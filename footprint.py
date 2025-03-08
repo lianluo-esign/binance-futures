@@ -21,11 +21,17 @@ class OrderFlowTrader:
         
         self.HISTORY_LENGTH = 1440  # 用于记录过去多少分钟的订单流数据
         self.orderflow_history = []  # 存储每分钟的 footprint 数据
-        
+            
         # ------------------- 实时变量 -------------------
         self.current_minute = None
         self.footprint = self.new_minute_footprint()
         self.imbalance_checked = False  # 当前分钟是否已进行连续失衡检测
+
+        # 新增支撑压力位分析相关参数
+        self.support_resistance_levels = []  # 存储识别出的支撑压力位
+        self.sr_volume_threshold = 0.1  # 支撑压力位的成交量阈值（占总成交量的比例）
+        self.sr_price_range = 5  # 支撑压力位的价格范围（美元）
+        self.reversal_threshold = 2.0  # 反转信号的失衡比例阈值
 
     def new_minute_footprint(self):
         """返回一个新的 minute 级别的 footprint 数据结构，并重置检测标记"""
@@ -46,6 +52,128 @@ class OrderFlowTrader:
         """将毫秒级时间戳转换为分钟级字符串，例如 '202503061230' 表示2025-03-06 12:30。"""
         dt = datetime.datetime.fromtimestamp(timestamp_ms / 1000)
         return dt.strftime('%Y%m%d%H%M')
+
+    def analyze_support_resistance(self):
+        """分析最近24小时数据中的支撑位和压力位"""
+        if not self.orderflow_history:
+            return []
+
+        # 统计所有价格层级的成交量
+        price_volumes = {}
+        total_volume = 0
+        
+        # 遍历历史数据
+        for minute_data in self.orderflow_history:
+            for price_str, orders in minute_data["order_flows"].items():
+                price = int(price_str)
+                volume = sum(order['volume'] for order in orders)
+                price_volumes[price] = price_volumes.get(price, 0) + volume
+                total_volume += volume
+
+        # 识别高成交量价格区域
+        significant_levels = []
+        volume_threshold = total_volume * self.sr_volume_threshold
+
+        for price, volume in price_volumes.items():
+            if volume >= volume_threshold:
+                # 计算该价位的买卖比例
+                buy_volume = sum(
+                    sum(o['volume'] for o in minute["order_flows"].get(str(price), [])
+                        if o['side'] == 'buy')
+                    for minute in self.orderflow_history
+                )
+                sell_volume = sum(
+                    sum(o['volume'] for o in minute["order_flows"].get(str(price), [])
+                        if o['side'] == 'sell')
+                    for minute in self.orderflow_history
+                )
+                
+                level_type = "支撑" if buy_volume > sell_volume else "压力"
+                significant_levels.append({
+                    'price': price,
+                    'volume': volume,
+                    'type': level_type,
+                    'buy_ratio': buy_volume / (buy_volume + sell_volume) if (buy_volume + sell_volume) > 0 else 0
+                })
+
+        # 合并接近的价格水平
+        merged_levels = []
+        significant_levels.sort(key=lambda x: x['price'])
+        
+        i = 0
+        while i < len(significant_levels):
+            current_level = significant_levels[i]
+            j = i + 1
+            merged_volume = current_level['volume']
+            merged_buy_ratio = current_level['buy_ratio'] * current_level['volume']
+            
+            while j < len(significant_levels) and \
+                  significant_levels[j]['price'] - significant_levels[i]['price'] <= self.sr_price_range:
+                merged_volume += significant_levels[j]['volume']
+                merged_buy_ratio += significant_levels[j]['buy_ratio'] * significant_levels[j]['volume']
+                j += 1
+            
+            avg_buy_ratio = merged_buy_ratio / merged_volume
+            level_type = "支撑" if avg_buy_ratio > 0.5 else "压力"
+            
+            merged_levels.append({
+                'price': significant_levels[i]['price'],
+                'volume': merged_volume,
+                'type': level_type,
+                'strength': merged_volume / total_volume  # 该位置的强度
+            })
+            
+            i = j
+
+        self.support_resistance_levels = merged_levels
+        return merged_levels
+
+    def check_reversal_signals(self):
+        """检查当前价格是否接近支撑压力位，并分析是否有反转信号"""
+        if not self.support_resistance_levels or not self.footprint['close']:
+            return None
+
+        current_price = self.footprint['close']
+        
+        # 遍历所有支撑压力位
+        for level in self.support_resistance_levels:
+            price_diff = abs(current_price - level['price'])
+            
+            # 如果当前价格接近支撑压力位（在5美元范围内）
+            if price_diff <= 5:
+                # 分析当前分钟的买卖失衡
+                buy_volume = self.footprint['buy_volume']
+                sell_volume = self.footprint['sell_volume']
+                
+                # 计算价格变动
+                price_change = self.footprint['close'] - self.footprint['open']
+                
+                # 判断是否有反转信号
+                if level['type'] == "压力" and price_change < 0:
+                    # 接近压力位且价格下跌
+                    if sell_volume > 0 and (buy_volume / sell_volume) > self.reversal_threshold:
+                        return {
+                            'signal': 'BUY',
+                            'price': current_price,
+                            'level_price': level['price'],
+                            'level_type': level['type'],
+                            'strength': level['strength'],
+                            'imbalance_ratio': buy_volume / sell_volume
+                        }
+                        
+                elif level['type'] == "支撑" and price_change > 0:
+                    # 接近支撑位且价格上涨
+                    if buy_volume > 0 and (sell_volume / buy_volume) > self.reversal_threshold:
+                        return {
+                            'signal': 'SELL',
+                            'price': current_price,
+                            'level_price': level['price'],
+                            'level_type': level['type'],
+                            'strength': level['strength'],
+                            'imbalance_ratio': sell_volume / buy_volume
+                        }
+        
+        return None
 
     def evaluate_minute(self):
         """1分钟结束后，更新 delta，并打印 minute 级别的统计数据；同时将 footprint 记录到历史数据中。"""
@@ -89,6 +217,23 @@ class OrderFlowTrader:
         self.orderflow_history.append(copy.deepcopy(self.footprint))
         if len(self.orderflow_history) > self.HISTORY_LENGTH:
             self.orderflow_history.pop(0)
+
+        # 分析支撑压力位
+        sr_levels = self.analyze_support_resistance()
+        
+        print("\n====== 支撑压力位分析 ======")
+        for level in sr_levels:
+            print(f"{level['type']}位: ${level['price']}, 强度: {level['strength']*100:.2f}%")
+
+        # 检查反转信号
+        reversal_signal = self.check_reversal_signals()
+        if reversal_signal:
+            print(f"\n{Fore.GREEN}检测到反转信号:")
+            print(f"方向: {reversal_signal['signal']}")
+            print(f"当前价格: ${reversal_signal['price']:.2f}")
+            print(f"接近{reversal_signal['level_type']}位: ${reversal_signal['level_price']}")
+            print(f"位置强度: {reversal_signal['strength']*100:.2f}%")
+            print(f"失衡比例: {reversal_signal['imbalance_ratio']:.2f}{Style.RESET_ALL}")
 
     def check_consecutive_imbalances(self):
         """
