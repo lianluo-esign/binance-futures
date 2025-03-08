@@ -19,7 +19,9 @@ class FootprintDisplay:
         self.current_text = []
         self.kb = KeyBindings()
         self.scroll_offset = 0
-        self.max_visible_rows = 80  # 可见行数
+        self.max_visible_rows = 50  # 可见行数
+        self.history_index = None  # 当前查看的历史数据索引
+        self.is_viewing_history = False  # 是否正在查看历史数据
         
         # 添加样式
         self.style = Style.from_dict({
@@ -31,7 +33,8 @@ class FootprintDisplay:
             'price': 'ansiwhite',   # 白色
             'ohlc': 'ansicyan',    # 青色
             'volume': 'ansiwhite',   # 白色
-            'current_row': 'bg:ansiwhite fg:ansiblack'  # 当前价格层级的背景色
+            'current_row': 'bg:ansiwhite fg:ansiblack',  # 当前价格层级的背景色
+            'history': 'bg:ansired fg:ansiwhite'  # 历史数据模式的标记颜色
         })
 
         @self.kb.add('c-c')
@@ -46,6 +49,25 @@ class FootprintDisplay:
         @self.kb.add('down')
         def _(event):
             self.scroll_offset += 1
+            event.app.invalidate()
+
+        @self.kb.add('left')
+        def _(event):
+            if not self.is_viewing_history:
+                self.history_index = -1
+                self.is_viewing_history = True
+            else:
+                self.history_index = max(-len(self.trader.orderflow_history), self.history_index - 1)
+            event.app.invalidate()
+
+        @self.kb.add('right')
+        def _(event):
+            if self.is_viewing_history:
+                if self.history_index < -1:
+                    self.history_index += 1
+                else:
+                    self.is_viewing_history = False
+                    self.history_index = None
             event.app.invalidate()
 
         @self.kb.add('pageup')
@@ -84,6 +106,17 @@ class FootprintDisplay:
         self.refresh_interval = 0.1  # 100ms 刷新一次
         self._running = True
         self._refresh_thread = None
+        self.trader = None  # 将在OrderFlowTrader初始化时设置
+
+    def set_trader(self, trader):
+        self.trader = trader
+
+    def get_display_data(self):
+        """获取要显示的数据，可能是实时数据或历史数据"""
+        if self.is_viewing_history and self.history_index is not None:
+            if -len(self.trader.orderflow_history) <= self.history_index < 0:
+                return self.trader.orderflow_history[self.history_index]
+        return self.trader.footprint
 
     def start_refresh_thread(self):
         def refresh_loop():
@@ -107,23 +140,33 @@ class FootprintDisplay:
         with self.lock:
             self.current_text = []
             
+            display_data = self.get_display_data()
+            
+            # 添加历史模式标记
+            if self.is_viewing_history:
+                history_index = abs(self.history_index)
+                total_history = len(self.trader.orderflow_history)
+                self.current_text.append(
+                    ('class:history', f"查看历史数据 ({history_index}/{total_history})\n")
+                )
+            
             # 添加时间和OHLC信息
-            time_str = datetime.datetime.fromtimestamp(footprint_data["time"] / 1000).strftime('%Y-%m-%d %H:%M:%S')
+            time_str = datetime.datetime.fromtimestamp(display_data["time"] / 1000).strftime('%Y-%m-%d %H:%M:%S')
             
             # 处理可能为None的OHLC值
-            open_price = footprint_data['open'] if footprint_data['open'] is not None else 0.0
-            high_price = footprint_data['high'] if footprint_data['high'] is not None else 0.0
-            low_price = footprint_data['low'] if footprint_data['low'] is not None else 0.0
-            close_price = footprint_data['close'] if footprint_data['close'] is not None else 0.0
+            open_price = display_data['open'] if display_data['open'] is not None else 0.0
+            high_price = display_data['high'] if display_data['high'] is not None else 0.0
+            low_price = display_data['low'] if display_data['low'] is not None else 0.0
+            close_price = display_data['close'] if display_data['close'] is not None else 0.0
             
             header_info = [
                 ('class:time', f"Time: {time_str}\n"),
                 ('class:ohlc', f"Open: {open_price:.2f}, High: {high_price:.2f}, "
                               f"Low: {low_price:.2f}, Close: {close_price:.2f}\n"),
-                ('class:volume', f"Total Volume: {footprint_data['total_volume']:.3f}, "
-                               f"Buy Volume: {footprint_data['buy_volume']:.3f}, "
-                               f"Sell Volume: {footprint_data['sell_volume']:.3f}, "
-                               f"Delta: {footprint_data['delta']:.3f}\n\n")
+                ('class:volume', f"Total Volume: {display_data['total_volume']:.3f}, "
+                               f"Buy Volume: {display_data['buy_volume']:.3f}, "
+                               f"Sell Volume: {display_data['sell_volume']:.3f}, "
+                               f"Delta: {display_data['delta']:.3f}\n\n")
             ]
             
             # 添加表格头部
@@ -134,13 +177,13 @@ class FootprintDisplay:
             ]
             
             # 获取当前价格层级
-            current_price_level = str(int(footprint_data['close']))
+            current_price_level = str(int(display_data['close']))
             
             # 生成所有价格层级数据行
             price_rows = []
             current_price_index = None  # 用于记录当前价格所在行的索引
             
-            for i, (price_level, level_data) in enumerate(sorted(footprint_data["order_flows"].items(), key=lambda x: -float(x[0]))):
+            for i, (price_level, level_data) in enumerate(sorted(display_data["order_flows"].items(), key=lambda x: -float(x[0]))):
                 if price_level == current_price_level:
                     current_price_index = i
                 
@@ -230,6 +273,7 @@ class OrderFlowTrader:
     def __init__(self, symbol="btcusdt"):
         self.symbol = symbol.lower()
         self.display = FootprintDisplay()
+        self.display.set_trader(self)  # 设置对 trader 的引用
         
         # 初始化 UM Futures WebSocket 客户端
         self.umfclient = UMFuturesWebsocketClient(on_message=self.spot_message_handler)
