@@ -13,7 +13,7 @@ class OrderFlowTrader:
         self.umfclient = UMFuturesWebsocketClient(on_message=self.spot_message_handler)
         
         # ------------------- 参数设置 -------------------
-        self.imbalance_threshold = 2.0          # 整体失衡阈值（用于分钟级别判断）
+        self.imbalance_threshold = 3.0          # 整体失衡阈值（用于分钟级别判断）
         self.volume_threshold_multiplier = 1.5  # 当前分钟总成交量大于历史平均成交量1.5倍视为放量
         self.order_quantity = 0.01              # 下单数量（BTC）
         
@@ -37,15 +37,16 @@ class OrderFlowTrader:
         """返回一个新的 minute 级别的 footprint 数据结构，并重置检测标记"""
         self.imbalance_checked = False
         return {
-            "open": None,          # 本分钟第一个成交价
-            "high": None,          # 本分钟最高成交价
+            "time": None,           # 新增time字段，记录这一分钟的时间戳
+            "open": None,           # 本分钟第一个成交价
+            "high": None,           # 本分钟最高成交价
             "low": None,           # 本分钟最低成交价
             "close": None,         # 本分钟最后成交价
             "total_volume": 0.0,   # 本分钟累计成交量
             "buy_volume": 0.0,     # 本分钟累计买量
             "sell_volume": 0.0,    # 本分钟累计卖量
             "delta": 0.0,          # 买量 - 卖量
-            "order_flows": {}      # 存放各价格档位的订单流数据，结构：{ "90130": [order1, order2, ...], ... }
+            "order_flows": {}      # 存放各价格档位的订单流数据
         }
 
     def get_minute_str(self, timestamp_ms):
@@ -181,7 +182,11 @@ class OrderFlowTrader:
         self.footprint["delta"] = self.footprint["buy_volume"] - self.footprint["sell_volume"]
         total_volume = self.footprint["buy_volume"] + self.footprint["sell_volume"]
 
+        # 转换时间戳为可读格式
+        time_str = datetime.datetime.fromtimestamp(self.footprint["time"] / 1000).strftime('%Y-%m-%d %H:%M:%S')
+        
         print("====== 分钟结束，Minute Footprint 数据 ======")
+        print(f"Time: {time_str}")
         print(f"Open: {self.footprint['open']:.2f}, High: {self.footprint['high']:.2f}, "
               f"Low: {self.footprint['low']:.2f}, Close: {self.footprint['close']:.2f}")
         print(f"Total Volume: {self.footprint['total_volume']:.6f}, Buy Volume: {self.footprint['buy_volume']:.6f}, "
@@ -190,28 +195,33 @@ class OrderFlowTrader:
         # 统计 order_flows 里各档位的累计买入和卖出成交量
         total_buy_flows = 0.0
         total_sell_flows = 0.0
+
         print("------ 订单流数据 (按1美元档) ------")
-        for price_level, orders in sorted(self.footprint["order_flows"].items(), key=lambda x: float(x[0])):
+
+        for price_level, orders in sorted(self.footprint["order_flows"].items(), key=lambda x: -float(x[0])):
             level_buy = sum(o['volume'] for o in orders if o['side'] == 'buy')
             level_sell = sum(o['volume'] for o in orders if o['side'] == 'sell')
             total_buy_flows += level_buy
             total_sell_flows += level_sell
             print(f"价格档位: {price_level}, 订单数: {len(orders)}, 累计成交量: {level_buy + level_sell:.6f}, "
                   f"买量: {level_buy:.6f}, 卖量: {level_sell:.6f}")
+
         print(f"所有价位累计 - 买量: {total_buy_flows:.6f}, 卖量: {total_sell_flows:.6f}")
         
-        if self.footprint["sell_volume"] > 0:
+        # 判断1分钟内的整体失衡表现
+        imbalance = 0
+        if self.footprint["sell_volume"] > self.footprint["buy_volume"]:
+            imbalance = self.footprint["sell_volume"] / self.footprint["buy_volume"]
+            if imbalance > self.imbalance_threshold:
+                print(f"{Fore.RED}当前1分钟严重失衡: Imbalance:{imbalance}{Style.RESET_ALL}")
+        elif self.footprint["sell_volume"] < self.footprint["buy_volume"]:
             imbalance = self.footprint["buy_volume"] / self.footprint["sell_volume"]
-        elif self.footprint["buy_volume"] > 0:
-            imbalance = float('inf')
-        else:
-            imbalance = 0.0
+            if imbalance > self.imbalance_threshold:
+                print(f"{Fore.RED}当前1分钟严重失衡: Imbalance:{imbalance}{Style.RESET_ALL}")
 
-        if imbalance > self.imbalance_threshold:
-            print(f"{Fore.GREEN}{Back}整体失衡条件满足：买量/卖量 = {imbalance:.2f}{Style.RESET_ALL}")
-            print("执行订单")
-        else:
-            print("本分钟条件未满足，不执行下单。")
+        # 检查连续价位失衡（移到这里）
+        print("\n------ 连续价位失衡分析 ------")
+        self.check_consecutive_imbalances()
         
         # 将本分钟的 footprint 深拷贝后存入历史记录
         self.orderflow_history.append(copy.deepcopy(self.footprint))
@@ -307,10 +317,12 @@ class OrderFlowTrader:
         if self.current_minute is None:
             self.current_minute = minute_str
             self.footprint = self.new_minute_footprint()
+            self.footprint["time"] = trade_time  # 设置分钟开始的时间戳
         elif minute_str != self.current_minute:
             self.evaluate_minute()
             self.current_minute = minute_str
             self.footprint = self.new_minute_footprint()
+            self.footprint["time"] = trade_time  # 设置新分钟的时间戳
 
         try:
             price = float(message.get('p'))
@@ -357,12 +369,6 @@ class OrderFlowTrader:
         if price_str not in self.footprint["order_flows"]:
             self.footprint["order_flows"][price_str] = []
         self.footprint["order_flows"][price_str].append(order_flow_record)
-
-        # 在本分钟的最后10秒内（秒数>=50）进行连续失衡检测（仅检测一次）
-        dt = datetime.datetime.fromtimestamp(trade_time / 1000)
-        if not self.imbalance_checked and dt.second >= 50:
-            self.check_consecutive_imbalances()
-            self.imbalance_checked = True
 
     def start(self):
         self.umfclient.agg_trade(self.symbol)
