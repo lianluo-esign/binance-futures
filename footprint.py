@@ -11,6 +11,11 @@ from threading import Lock
 import asyncio
 import threading
 from prompt_toolkit.styles import Style
+import winsound  # 替换为winsound
+import os
+from tinydb import TinyDB, Query
+from pathlib import Path
+
 
 class FootprintDisplay:
 
@@ -22,6 +27,7 @@ class FootprintDisplay:
         self.max_visible_rows = 50  # 可见行数
         self.history_index = None  # 当前查看的历史数据索引
         self.is_viewing_history = False  # 是否正在查看历史数据
+        
         
         # 添加样式
         self.style = Style.from_dict({
@@ -122,7 +128,7 @@ class FootprintDisplay:
         def refresh_loop():
             while self._running:
                 self.app.invalidate()
-                time.sleep(self.refresh_interval)
+                # time.sleep(self.refresh_interval)
         
         self._refresh_thread = threading.Thread(target=refresh_loop, daemon=True)
         self._refresh_thread.start()
@@ -171,9 +177,9 @@ class FootprintDisplay:
             
             # 添加表格头部
             table_header = [
-                ('class:header', "┌" + "─" * 15 + "┬" + "─" * 12 + "┬" + "─" * 16 + "┬" + "─" * 16 + "┬" + "─" * 16 + "┐\n"),
-                ('class:header', "│ Price Level   │ Orders     │ Total Volume   │ Buy Volume     │ Sell Volume    │\n"),
-                ('class:header', "├" + "─" * 15 + "┼" + "─" * 12 + "┼" + "─" * 16 + "┼" + "─" * 16 + "┼" + "─" * 16 + "┤\n")
+                ('class:header', "┌" + "─" * 15 + "┬" + "─" * 12 + "┬" + "─" * 16 + "┬" + "─" * 16 + "┬" + "─" * 16 + "┬" + "─" * 16 + "┐\n"),
+                ('class:header', "│ Price Level   │ Orders     │ Total Volume   │ Buy Volume     │ Sell Volume    │ Delta          │\n"),
+                ('class:header', "├" + "─" * 15 + "┼" + "─" * 12 + "┼" + "─" * 16 + "┼" + "─" * 16 + "┼" + "─" * 16 + "┼" + "─" * 16 + "┤\n")
             ]
             
             # 获取当前价格层级
@@ -200,6 +206,8 @@ class FootprintDisplay:
                     sell_text = f"{sell_vol:14.3f}"
                     total_text = f"{total_vol:14.3f}"
                     orders_text = f"{level_data['order_count']:10}"
+                    delta = buy_vol - sell_vol
+                    delta_text = f"{delta:14.3f}"
                     
                     row = [
                         ('class:current_row', "│ "),
@@ -212,19 +220,30 @@ class FootprintDisplay:
                         ('class:current_row', buy_text),
                         ('class:current_row', " │ "),
                         ('class:current_row', sell_text),
+                        ('class:current_row', " │ "),
+                        ('class:current_row', delta_text),
                         ('class:current_row', " │\n")
                     ]
                 else:
                     # 设置买卖量的颜色样式
-                    if sell_vol > 0 and buy_vol >= 1 and buy_vol / sell_vol >= 2:
+                    if buy_vol >= 1 and buy_vol / (sell_vol + 0.001) >= 2:
                         buy_style = 'buy_strong'
                         sell_style = 'normal'
-                    elif buy_vol > 0 and sell_vol >= 1 and sell_vol / buy_vol >= 2:
+                    elif sell_vol >= 1 and sell_vol / (buy_vol + 0.001) >= 2:
                         buy_style = 'normal'
                         sell_style = 'sell_strong'
                     else:
                         buy_style = 'normal'
                         sell_style = 'normal'
+                    
+                    # 计算并设置delta的颜色
+                    delta = buy_vol - sell_vol
+                    if delta > 1:
+                        delta_style = 'buy_strong'
+                    elif delta < -1:
+                        delta_style = 'sell_strong'
+                    else:
+                        delta_style = 'normal'
                     
                     row = [
                         ('class:normal', "│ "),
@@ -237,6 +256,8 @@ class FootprintDisplay:
                         (f'class:{buy_style}', f"{buy_vol:14.3f}"),
                         ('class:normal', " │ "),
                         (f'class:{sell_style}', f"{sell_vol:14.3f}"),
+                        ('class:normal', " │ "),
+                        (f'class:{delta_style}', f"{delta:14.3f}"),
                         ('class:normal', " │\n")
                     ]
                 price_rows.append(row)
@@ -266,14 +287,25 @@ class FootprintDisplay:
                 header_info +
                 table_header +
                 [item for row in price_rows[start_idx:end_idx] for item in row] +
-                [('class:header', "└" + "─" * 15 + "┴" + "─" * 12 + "┴" + "─" * 16 + "┴" + "─" * 16 + "┴" + "─" * 16 + "┘\n")]
+                [('class:header', "└" + "─" * 15 + "┴" + "─" * 12 + "┴" + "─" * 16 + "┴" + "─" * 16 + "┴" + "─" * 16 + "┴" + "─" * 16 + "┘\n")]
             )
 
 class OrderFlowTrader:
     def __init__(self, symbol="btcusdt"):
         self.symbol = symbol.lower()
         self.display = FootprintDisplay()
-        self.display.set_trader(self)  # 设置对 trader 的引用
+        self.display.set_trader(self)
+        
+        # 数据库相关设置
+        self.db_path = Path("history_data.json")
+        self.db = TinyDB(self.db_path)
+        self.history_table = self.db.table(f'footprint_history_{self.symbol}')
+        
+        # 存储队列和线程
+        self.storage_queue = []
+        self.storage_lock = Lock()
+        self.storage_thread = None
+        self._storage_running = True
         
         # 初始化 UM Futures WebSocket 客户端
         self.umfclient = UMFuturesWebsocketClient(on_message=self.spot_message_handler)
@@ -298,6 +330,24 @@ class OrderFlowTrader:
         self.sr_volume_threshold = 0.1  # 支撑压力位的成交量阈值（占总成交量的比例）
         self.sr_price_range = 5  # 支撑压力位的价格范围（美元）
         self.reversal_threshold = 2.0  # 反转信号的失衡比例阈值
+
+        self.sound_file = "coin_voice_v2.wav"  # 注意：winsound需要wav格式的音频文件
+        self.last_sound_time = 0  # 上次播放声音的时间
+        self.sound_interval = 5  # 播放间隔（秒）
+
+        # 启动存储线程
+        self.start_storage_thread()
+        
+        # 加载历史数据
+        self.load_history_from_db()
+
+    def play_sound(self):
+        """带有时间间隔控制的音效播放函数"""
+        current_time = time.time()
+        if current_time - self.last_sound_time >= self.sound_interval:
+            if os.path.exists(self.sound_file):
+                winsound.PlaySound(self.sound_file, winsound.SND_ASYNC | winsound.SND_FILENAME)
+                self.last_sound_time = current_time
 
     def get_minute_str(self, timestamp_ms):
         """将毫秒级时间戳转换为5分钟级字符串"""
@@ -446,7 +496,10 @@ class OrderFlowTrader:
         """5分钟后，更新历史数据"""
         self.footprint["delta"] = self.footprint["buy_volume"] - self.footprint["sell_volume"]
         
-        # 将本5分钟的 footprint 深拷贝后存入历史记录
+        # 保存到数据库
+        self.save_to_db(self.footprint)
+        
+        # 更新内存中的历史数据
         self.orderflow_history.append(copy.deepcopy(self.footprint))
         if len(self.orderflow_history) > self.HISTORY_LENGTH:
             self.orderflow_history.pop(0)
@@ -488,6 +541,81 @@ class OrderFlowTrader:
                     print(f"{Fore.YELLOW}检测到连续三个价位失衡，价位 {p1}, {p2}, {p3}，方向为 {d1}{Style.RESET_ALL}")
                     return True
         return False
+
+    def start_storage_thread(self):
+        """启动异步存储线程"""
+        def storage_loop():
+            while self._storage_running:
+                # 检查队列中是否有数据需要保存
+                with self.storage_lock:
+                    if self.storage_queue:
+                        data_to_save = self.storage_queue.pop(0)
+                        try:
+                            self.history_table.insert(data_to_save)
+                        except Exception as e:
+                            print(f"保存数据失败: {e}")
+                
+                # 避免空转消耗CPU
+                time.sleep(0.1)
+
+        self.storage_thread = threading.Thread(target=storage_loop, daemon=True)
+        self.storage_thread.start()
+
+    def save_to_db(self, footprint_data):
+        """将数据添加到存储队列"""
+        try:
+            # 准备要保存的数据
+            data_to_save = {
+                'symbol': self.symbol,
+                'timestamp': footprint_data["time"],
+                'minute_str': self.get_minute_str(footprint_data["time"]),
+                'data': footprint_data,
+                'created_at': int(time.time())
+            }
+            
+            # 添加到存储队列
+            with self.storage_lock:
+                self.storage_queue.append(data_to_save)
+            
+        except Exception as e:
+            print(f"准备数据失败: {e}")
+
+    def load_history_from_db(self):
+        """从TinyDB加载最近24小时的历史数据"""
+        try:
+            # 获取24小时前的时间戳
+            time_24h_ago = int(time.time() * 1000) - (24 * 60 * 60 * 1000)
+            
+            # 查询条件
+            History = Query()
+            results = self.history_table.search(
+                (History.timestamp > time_24h_ago) & 
+                (History.symbol == self.symbol)
+            )
+            
+            # 按时间戳排序并限制数量
+            results.sort(key=lambda x: x['timestamp'], reverse=True)
+            results = results[:self.HISTORY_LENGTH]
+            
+            # 更新历史数据
+            self.orderflow_history = [item['data'] for item in results]
+            
+        except Exception as e:
+            print(f"加载历史数据失败: {e}")
+            self.orderflow_history = []
+
+    def cleanup_old_data(self):
+        """清理超过7天的历史数据"""
+        try:
+            # 获取7天前的时间戳
+            time_7d_ago = int(time.time() * 1000) - (7 * 24 * 60 * 60 * 1000)
+            
+            # 删除旧数据
+            History = Query()
+            self.history_table.remove(History.timestamp < time_7d_ago)
+            
+        except Exception as e:
+            print(f"清理历史数据失败: {e}")
 
     def spot_message_handler(self, _, data):
         try:
@@ -537,6 +665,9 @@ class OrderFlowTrader:
             if price < self.footprint["low"]:
                 self.footprint["low"] = price
 
+        if volume >= 2:
+            self.play_sound()
+
         side = 'sell' if message.get('m', False) else 'buy'
 
         # 更新总成交量统计
@@ -578,8 +709,25 @@ class OrderFlowTrader:
             self.shutdown()
 
     def shutdown(self):
-        self.display.stop_refresh_thread()  # 停止刷新线程
+        # 停止存储线程
+        self._storage_running = False
+        if self.storage_thread:
+            self.storage_thread.join(timeout=2)  # 等待最多2秒
+        
+        # 保存剩余的数据
+        with self.storage_lock:
+            for data in self.storage_queue:
+                try:
+                    self.history_table.insert(data)
+                except Exception as e:
+                    print(f"保存剩余数据失败: {e}")
+        
+        self.display.stop_refresh_thread()
         self.umfclient.stop()
+        # 退出前清理旧数据
+        self.cleanup_old_data()
+        # 关闭数据库连接
+        self.db.close()
 
 if __name__ == "__main__":
     trader = OrderFlowTrader()
