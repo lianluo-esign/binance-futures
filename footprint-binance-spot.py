@@ -2,7 +2,9 @@ import datetime
 import time
 import json
 import copy
-from binance.websocket.um_futures.websocket_client import UMFuturesWebsocketClient
+# from binance.websocket.um_futures.websocket_client import UMFuturesWebsocketClient
+from binance.websocket.spot.websocket_stream import SpotWebsocketStreamClient
+
 from colorama import Fore, Back, Style
 from prompt_toolkit import Application
 from prompt_toolkit.layout import Layout, Window, HSplit, FormattedTextControl
@@ -24,11 +26,13 @@ class FootprintDisplay:
         self.current_text = []
         self.kb = KeyBindings()
         self.scroll_offset = 0
-        self.max_visible_rows = 50 # 使用类变量
+        self.max_visible_rows = 50  # 可见行数
         self.history_index = None  # 当前查看的历史数据索引
         self.is_viewing_history = False  # 是否正在查看历史数据
+        
+        # 滚动相关参数
         self.edge_threshold = 5     # 边界阈值（距离顶部或底部的行数）
-        self.scroll_speed = 3 
+        self.scroll_speed = 3       # 滚动速度（每次最多移动的行数）
         
         # 添加样式
         self.style = Style.from_dict({
@@ -50,12 +54,12 @@ class FootprintDisplay:
 
         @self.kb.add('up')
         def _(event):
-            self.scroll_offset = max(0, self.scroll_offset - self.scroll_speed)
+            self.scroll_offset = max(0, self.scroll_offset - 1)
             event.app.invalidate()
 
         @self.kb.add('down')
         def _(event):
-            self.scroll_offset += self.scroll_speed
+            self.scroll_offset += 1
             event.app.invalidate()
 
         @self.kb.add('left')
@@ -203,12 +207,12 @@ class FootprintDisplay:
                     # 当前价格层级使用背景色
                     style_class = 'current_row'
                     price_text = f"{price_level:13}"
-                    buy_text = f"{buy_vol:14.3f}"
-                    sell_text = f"{sell_vol:14.3f}"
-                    total_text = f"{total_vol:14.3f}"
+                    buy_text = f"{buy_vol:14.5f}"
+                    sell_text = f"{sell_vol:14.5f}"
+                    total_text = f"{total_vol:14.5f}"
                     orders_text = f"{level_data['order_count']:10}"
                     delta = buy_vol - sell_vol
-                    delta_text = f"{delta:14.3f}"
+                    delta_text = f"{delta:14.5f}"
                     
                     row = [
                         ('class:current_row', "│ "),
@@ -252,13 +256,13 @@ class FootprintDisplay:
                         ('class:normal', " │ "),
                         ('class:normal', f"{level_data['order_count']:10}"),
                         ('class:normal', " │ "),
-                        ('class:normal', f"{total_vol:14.3f}"),
+                        ('class:normal', f"{total_vol:14.5f}"),
                         ('class:normal', " │ "),
-                        (f'class:{buy_style}', f"{buy_vol:14.3f}"),
+                        (f'class:{buy_style}', f"{buy_vol:14.5f}"),
                         ('class:normal', " │ "),
-                        (f'class:{sell_style}', f"{sell_vol:14.3f}"),
+                        (f'class:{sell_style}', f"{sell_vol:14.5f}"),
                         ('class:normal', " │ "),
-                        (f'class:{delta_style}', f"{delta:14.3f}"),
+                        (f'class:{delta_style}', f"{delta:14.5f}"),
                         ('class:normal', " │\n")
                     ]
                 price_rows.append(row)
@@ -309,7 +313,7 @@ class OrderFlowTrader:
         self.display.set_trader(self)
         
         # 数据库相关设置
-        self.db_path = Path("history_data.json")
+        self.db_path = Path("spot_history_data.json")
         self.db = TinyDB(self.db_path)
         self.history_table = self.db.table(f'footprint_history_{self.symbol}')
         
@@ -320,7 +324,7 @@ class OrderFlowTrader:
         self._storage_running = True
         
         # 初始化 UM Futures WebSocket 客户端
-        self.umfclient = UMFuturesWebsocketClient(on_message=self.spot_message_handler)
+        self.spotclient = SpotWebsocketStreamClient(on_message=self.spot_message_handler)
         
         # ------------------- 参数设置 -------------------
         self.imbalance_threshold = 3.0          # 整体失衡阈值
@@ -677,9 +681,6 @@ class OrderFlowTrader:
             if price < self.footprint["low"]:
                 self.footprint["low"] = price
 
-        if volume >= 2:
-            self.play_sound()
-
         side = 'sell' if message.get('m', False) else 'buy'
 
         # 更新总成交量统计
@@ -713,7 +714,8 @@ class OrderFlowTrader:
         self.display.update_display(self.footprint)
 
     def start(self):
-        self.umfclient.agg_trade(self.symbol)
+        
+        self.spotclient.agg_trade(self.symbol)
         try:
             self.display.start_refresh_thread()  # 启动刷新线程
             self.display.app.run()
@@ -735,7 +737,7 @@ class OrderFlowTrader:
                     print(f"保存剩余数据失败: {e}")
         
         self.display.stop_refresh_thread()
-        self.umfclient.stop()
+        self.spotclient.stop()
         # 退出前清理旧数据
         self.cleanup_old_data()
         # 关闭数据库连接
