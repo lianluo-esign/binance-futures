@@ -308,16 +308,25 @@ class OrderFlowTrader:
         self.display = FootprintDisplay()
         self.display.set_trader(self)
         
-        # 数据库相关设置
-        self.db_path = Path("history_data.json")
-        self.db = TinyDB(self.db_path)
-        self.history_table = self.db.table(f'footprint_history_{self.symbol}')
+        # Footprint数据库设置
+        self.footprint_db_path = Path("footprint_history.json")
+        self.footprint_db = TinyDB(self.footprint_db_path)
+        self.history_table = self.footprint_db.table(f'footprint_history_{self.symbol}')
+        
+        # 交易历史数据库设置
+        self.trades_db_path = Path("trades_history.json")
+        self.trades_db = TinyDB(self.trades_db_path)
+        self.trades_table = self.trades_db.table(f'trades_history_{self.symbol}')
         
         # 存储队列和线程
         self.storage_queue = []
+        self.trades_queue = []
         self.storage_lock = Lock()
+        self.trades_lock = Lock()
         self.storage_thread = None
+        self.trades_thread = None  # 新增交易数据存储线程
         self._storage_running = True
+        self._trades_running = True  # 新增交易数据线程运行标志
         
         # 初始化 UM Futures WebSocket 客户端
         self.umfclient = UMFuturesWebsocketClient(on_message=self.spot_message_handler)
@@ -556,22 +565,35 @@ class OrderFlowTrader:
 
     def start_storage_thread(self):
         """启动异步存储线程"""
-        def storage_loop():
+        def footprint_storage_loop():
             while self._storage_running:
-                # 检查队列中是否有数据需要保存
                 with self.storage_lock:
                     if self.storage_queue:
                         data_to_save = self.storage_queue.pop(0)
                         try:
                             self.history_table.insert(data_to_save)
                         except Exception as e:
-                            print(f"保存数据失败: {e}")
-                
-                # 避免空转消耗CPU
+                            print(f"保存footprint数据失败: {e}")
                 time.sleep(0.1)
 
-        self.storage_thread = threading.Thread(target=storage_loop, daemon=True)
+        def trades_storage_loop():
+            while self._trades_running:
+                with self.trades_lock:
+                    if self.trades_queue:
+                        trade_to_save = self.trades_queue.pop(0)
+                        try:
+                            self.trades_table.insert(trade_to_save)
+                        except Exception as e:
+                            print(f"保存交易数据失败: {e}")
+                time.sleep(0.1)
+
+        # 启动Footprint数据存储线程
+        self.storage_thread = threading.Thread(target=footprint_storage_loop, daemon=True)
         self.storage_thread.start()
+
+        # 启动交易数据存储线程
+        self.trades_thread = threading.Thread(target=trades_storage_loop, daemon=True)
+        self.trades_thread.start()
 
     def save_to_db(self, footprint_data):
         """将数据添加到存储队列"""
@@ -622,12 +644,35 @@ class OrderFlowTrader:
             # 获取7天前的时间戳
             time_7d_ago = int(time.time() * 1000) - (7 * 24 * 60 * 60 * 1000)
             
-            # 删除旧数据
+            # 删除旧的footprint数据
             History = Query()
             self.history_table.remove(History.timestamp < time_7d_ago)
             
+            # 删除旧的交易数据
+            self.trades_table.remove(History.timestamp < time_7d_ago)
+            
         except Exception as e:
             print(f"清理历史数据失败: {e}")
+
+    def save_trade_to_db(self, trade_time, price, volume, side):
+        """将交易数据添加到存储队列"""
+        try:
+            # 准备要保存的交易数据
+            trade_data = {
+                'symbol': self.symbol,
+                'timestamp': trade_time,
+                'price': price,
+                'volume': volume,
+                'side': side,
+                'created_at': int(time.time())
+            }
+            
+            # 添加到交易数据队列
+            with self.trades_lock:
+                self.trades_queue.append(trade_data)
+            
+        except Exception as e:
+            print(f"准备交易数据失败: {e}")
 
     def spot_message_handler(self, _, data):
         try:
@@ -645,6 +690,11 @@ class OrderFlowTrader:
         try:
             price = float(message.get('p'))
             volume = float(message.get('q', 0))
+            side = 'sell' if message.get('m', False) else 'buy'
+            
+            # 保存交易数据
+            self.save_trade_to_db(trade_time, price, volume, side)
+            
         except Exception as e:
             print("数据转换异常:", e)
             return
@@ -679,8 +729,6 @@ class OrderFlowTrader:
 
         if volume >= 2:
             self.play_sound()
-
-        side = 'sell' if message.get('m', False) else 'buy'
 
         # 更新总成交量统计
         self.footprint["total_volume"] += volume
@@ -723,23 +771,36 @@ class OrderFlowTrader:
     def shutdown(self):
         # 停止存储线程
         self._storage_running = False
-        if self.storage_thread:
-            self.storage_thread.join(timeout=2)  # 等待最多2秒
+        self._trades_running = False
         
-        # 保存剩余的数据
+        if self.storage_thread:
+            self.storage_thread.join(timeout=2)
+        if self.trades_thread:
+            self.trades_thread.join(timeout=2)
+        
+        # 保存剩余的footprint数据
         with self.storage_lock:
             for data in self.storage_queue:
                 try:
                     self.history_table.insert(data)
                 except Exception as e:
-                    print(f"保存剩余数据失败: {e}")
+                    print(f"保存剩余footprint数据失败: {e}")
+        
+        # 保存剩余的交易数据
+        with self.trades_lock:
+            for trade in self.trades_queue:
+                try:
+                    self.trades_table.insert(trade)
+                except Exception as e:
+                    print(f"保存剩余交易数据失败: {e}")
         
         self.display.stop_refresh_thread()
         self.umfclient.stop()
         # 退出前清理旧数据
         self.cleanup_old_data()
         # 关闭数据库连接
-        self.db.close()
+        self.footprint_db.close()
+        self.trades_db.close()
 
 if __name__ == "__main__":
     trader = OrderFlowTrader()
