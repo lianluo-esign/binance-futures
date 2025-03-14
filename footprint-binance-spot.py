@@ -96,6 +96,32 @@ class FootprintDisplay:
             self.scroll_offset = 0
             event.app.invalidate()
 
+        # 添加列显示控制
+        self.column_visibility = {
+            'price': True,      # Price Level
+            'orders': False,     # Orders
+            'total_volume': False,  # Total Volume
+            'buy_volume': True,    # Buy Volume
+            'sell_volume': True,   # Sell Volume
+            'delta': False          # Delta
+        }
+        
+        # 添加切换列显示的快捷键
+        @self.kb.add('t')  # 切换 Total Volume 列显示
+        def _(event):
+            self.column_visibility['total_volume'] = not self.column_visibility['total_volume']
+            event.app.invalidate()
+
+        @self.kb.add('d')  # 切换 Delta 列显示
+        def _(event):
+            self.column_visibility['delta'] = not self.column_visibility['delta']
+            event.app.invalidate()
+
+        @self.kb.add('o')  # 切换 Orders 列显示
+        def _(event):
+            self.column_visibility['orders'] = not self.column_visibility['orders']
+            event.app.invalidate()
+
         self.text_control = FormattedTextControl(text=self.get_formatted_text)
         self.window = Window(
             content=self.text_control,
@@ -180,11 +206,27 @@ class FootprintDisplay:
                                f"Delta: {display_data['delta']:.3f}\n\n")
             ]
             
-            # 添加表格头部
+            # 动态计算表头宽度
+            header_parts = []
+            if True:  # Price Level 总是显示
+                header_parts.extend(["┌" + "─" * 15])
+            if self.column_visibility['orders']:
+                header_parts.extend(["┬" + "─" * 12])
+            if self.column_visibility['total_volume']:
+                header_parts.extend(["┬" + "─" * 16])
+            if self.column_visibility['buy_volume']:
+                header_parts.extend(["┬" + "─" * 16])
+            if self.column_visibility['sell_volume']:
+                header_parts.extend(["┬" + "─" * 16])
+            if self.column_visibility['delta']:
+                header_parts.extend(["┬" + "─" * 16])
+            header_parts.append("┐\n")
+
+            # 构建表头
             table_header = [
-                ('class:header', "┌" + "─" * 15 + "┬" + "─" * 12 + "┬" + "─" * 16 + "┬" + "─" * 16 + "┬" + "─" * 16 + "┬" + "─" * 16 + "┐\n"),
-                ('class:header', "│ Price Level   │ Orders     │ Total Volume   │ Buy Volume     │ Sell Volume    │ Delta          │\n"),
-                ('class:header', "├" + "─" * 15 + "┼" + "─" * 12 + "┼" + "─" * 16 + "┼" + "─" * 16 + "┼" + "─" * 16 + "┼" + "─" * 16 + "┤\n")
+                ('class:header', "".join(header_parts)),
+                ('class:header', self._build_column_headers()),
+                ('class:header', self._build_separator_line())
             ]
             
             # 获取当前价格层级
@@ -214,21 +256,21 @@ class FootprintDisplay:
                     delta = buy_vol - sell_vol
                     delta_text = f"{delta:14.5f}"
                     
-                    row = [
-                        ('class:current_row', "│ "),
-                        ('class:current_row', price_text),
-                        ('class:current_row', " │ "),
-                        ('class:current_row', orders_text),
-                        ('class:current_row', " │ "),
-                        ('class:current_row', total_text),
-                        ('class:current_row', " │ "),
-                        ('class:current_row', buy_text),
-                        ('class:current_row', " │ "),
-                        ('class:current_row', sell_text),
-                        ('class:current_row', " │ "),
-                        ('class:current_row', delta_text),
-                        ('class:current_row', " │\n")
-                    ]
+                    row = []
+                    row.extend([('class:current_row', "│ "), ('class:current_row', price_text)])
+                    
+                    if self.column_visibility['orders']:
+                        row.extend([('class:current_row', " │ "), ('class:current_row', orders_text)])
+                    if self.column_visibility['total_volume']:
+                        row.extend([('class:current_row', " │ "), ('class:current_row', total_text)])
+                    if self.column_visibility['buy_volume']:
+                        row.extend([('class:current_row', " │ "), ('class:current_row', buy_text)])
+                    if self.column_visibility['sell_volume']:
+                        row.extend([('class:current_row', " │ "), ('class:current_row', sell_text)])
+                    if self.column_visibility['delta']:
+                        row.extend([('class:current_row', " │ "), ('class:current_row', delta_text)])
+                    
+                    row.extend([('class:current_row', " │\n")])
                 else:
                     # 设置买卖量的颜色样式
                     if buy_vol >= 1 and buy_vol / (sell_vol + 0.001) >= 2:
@@ -250,21 +292,22 @@ class FootprintDisplay:
                     else:
                         delta_style = 'normal'
                     
-                    row = [
-                        ('class:normal', "│ "),
-                        ('class:price', f"{price_level:13}"),
-                        ('class:normal', " │ "),
-                        ('class:normal', f"{level_data['order_count']:10}"),
-                        ('class:normal', " │ "),
-                        ('class:normal', f"{total_vol:14.5f}"),
-                        ('class:normal', " │ "),
-                        (f'class:{buy_style}', f"{buy_vol:14.5f}"),
-                        ('class:normal', " │ "),
-                        (f'class:{sell_style}', f"{sell_vol:14.5f}"),
-                        ('class:normal', " │ "),
-                        (f'class:{delta_style}', f"{delta:14.5f}"),
-                        ('class:normal', " │\n")
-                    ]
+                    row = []
+                    row.extend([('class:normal', "│ "), ('class:price', f"{price_level:13}")])
+                    
+                    if self.column_visibility['orders']:
+                        row.extend([('class:normal', " │ "), ('class:normal', f"{level_data['order_count']:10}")])
+                    if self.column_visibility['total_volume']:
+                        row.extend([('class:normal', " │ "), ('class:normal', f"{total_vol:14.5f}")])
+                    if self.column_visibility['buy_volume']:
+                        row.extend([('class:normal', " │ "), (f'class:{buy_style}', f"{buy_vol:14.5f}")])
+                    if self.column_visibility['sell_volume']:
+                        row.extend([('class:normal', " │ "), (f'class:{sell_style}', f"{sell_vol:14.5f}")])
+                    if self.column_visibility['delta']:
+                        row.extend([('class:normal', " │ "), (f'class:{delta_style}', f"{delta:14.5f}")])
+                    
+                    row.extend([('class:normal', " │\n")])
+                
                 price_rows.append(row)
 
             # 自动调整滚动位置，根据当前价格在窗口中的位置决定是否滚动
@@ -298,13 +341,59 @@ class FootprintDisplay:
             start_idx = self.scroll_offset
             end_idx = min(start_idx + self.max_visible_rows, total_rows)
             
+            # 构建底部分隔线
+            bottom_parts = ["└" + "─" * 15]  # Price Level 总是显示
+            if self.column_visibility['orders']:
+                bottom_parts.append("┴" + "─" * 12)
+            if self.column_visibility['total_volume']:
+                bottom_parts.append("┴" + "─" * 16)
+            if self.column_visibility['buy_volume']:
+                bottom_parts.append("┴" + "─" * 16)
+            if self.column_visibility['sell_volume']:
+                bottom_parts.append("┴" + "─" * 16)
+            if self.column_visibility['delta']:
+                bottom_parts.append("┴" + "─" * 16)
+            bottom_parts.append("┘\n")
+
             # 组合最终显示内容
             self.current_text = (
                 header_info +
                 table_header +
                 [item for row in price_rows[start_idx:end_idx] for item in row] +
-                [('class:header', "└" + "─" * 15 + "┴" + "─" * 12 + "┴" + "─" * 16 + "┴" + "─" * 16 + "┴" + "─" * 16 + "┴" + "─" * 16 + "┘\n")]
+                [('class:header', "".join(bottom_parts))]
             )
+
+    def _build_column_headers(self):
+        """构建列标题"""
+        headers = ["│ Price Level   "]
+        if self.column_visibility['orders']:
+            headers.append("│ Orders     ")
+        if self.column_visibility['total_volume']:
+            headers.append("│ Total Volume   ")
+        if self.column_visibility['buy_volume']:
+            headers.append("│ Buy Volume     ")
+        if self.column_visibility['sell_volume']:
+            headers.append("│ Sell Volume    ")
+        if self.column_visibility['delta']:
+            headers.append("│ Delta          ")
+        headers.append("│\n")
+        return "".join(headers)
+
+    def _build_separator_line(self):
+        """构建分隔线"""
+        parts = ["├" + "─" * 15]
+        if self.column_visibility['orders']:
+            parts.append("┼" + "─" * 12)
+        if self.column_visibility['total_volume']:
+            parts.append("┼" + "─" * 16)
+        if self.column_visibility['buy_volume']:
+            parts.append("┼" + "─" * 16)
+        if self.column_visibility['sell_volume']:
+            parts.append("┼" + "─" * 16)
+        if self.column_visibility['delta']:
+            parts.append("┼" + "─" * 16)
+        parts.append("┤\n")
+        return "".join(parts)
 
 class OrderFlowTrader:
     def __init__(self, symbol="btcusdt"):
@@ -744,7 +833,7 @@ class OrderFlowTrader:
         self.db.close()
 
 if __name__ == "__main__":
-    trader = OrderFlowTrader()
+    trader = OrderFlowTrader(symbol="btcusdt")
     try:
         trader.start()
     except KeyboardInterrupt:
