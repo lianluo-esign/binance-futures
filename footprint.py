@@ -388,7 +388,7 @@ class OrderFlowTrader:
         self._storage_running = True
         
         # 初始化 UM Futures WebSocket 客户端
-        self.umfclient = UMFuturesWebsocketClient(on_message=self.spot_message_handler)
+        self.umfclient = None
         
         # ------------------- 参数设置 -------------------
         self.imbalance_threshold = 3.0          # 整体失衡阈值
@@ -415,11 +415,78 @@ class OrderFlowTrader:
         self.last_sound_time = 0  # 上次播放声音的时间
         self.sound_interval = 5  # 播放间隔（秒）
 
+        # 添加重连相关的属性
+        self.is_running = False
+        self.reconnect_delay = 1  # 初始重连延迟1秒
+        self.max_reconnect_delay = 60  # 最大重连延迟60秒
+        self.last_message_time = time.time()  # 记录最后一次收到消息的时间
+        self.heartbeat_interval = 5  # 心跳检测间隔（秒）
+        
+        # 创建WebSocket客户端
+        self.create_websocket_client()
+        
         # 启动存储线程
         self.start_storage_thread()
         
         # 加载历史数据
         self.load_history_from_db()
+
+    def create_websocket_client(self):
+        """创建新的WebSocket客户端"""
+        if self.umfclient:
+            try:
+                self.umfclient.stop()
+            except:
+                pass
+        self.umfclient = UMFuturesWebsocketClient(
+            on_message=self.spot_message_handler,
+            on_close=self.handle_disconnect
+        )
+
+    def handle_disconnect(self, *args):
+        """处理断开连接事件"""
+        if not self.is_running:
+            return
+        
+        print(f"{Fore.YELLOW}WebSocket断开连接，{self.reconnect_delay}秒后尝试重连...{Style.RESET_ALL}")
+        time.sleep(self.reconnect_delay)
+        
+        # 指数退避重连
+        self.reconnect_delay = min(self.reconnect_delay * 2, self.max_reconnect_delay)
+        
+        try:
+            self.create_websocket_client()
+            # 重新订阅数据
+            self.subscribe_data()
+            print(f"{Fore.GREEN}重连成功！{Style.RESET_ALL}")
+            # 重连成功后重置重连延迟
+            self.reconnect_delay = 1
+        except Exception as e:
+            print(f"{Fore.RED}重连失败: {e}{Style.RESET_ALL}")
+            # 递归调用自身继续尝试重连
+            self.handle_disconnect()
+
+    def subscribe_data(self):
+        """订阅数据"""
+        try:
+            self.umfclient.agg_trade(self.symbol)
+        except Exception as e:
+            print(f"{Fore.RED}订阅数据失败: {e}{Style.RESET_ALL}")
+            raise
+
+    def start_heartbeat_thread(self):
+        """启动心跳检测线程"""
+        def heartbeat_check():
+            while self.is_running:
+                current_time = time.time()
+                # 如果超过心跳间隔没有收到消息，触发重连
+                if current_time - self.last_message_time > self.heartbeat_interval:
+                    print(f"{Fore.YELLOW}检测到连接异常，准备重连...{Style.RESET_ALL}")
+                    self.handle_disconnect()
+                time.sleep(1)  # 每秒检查一次
+
+        self.heartbeat_thread = threading.Thread(target=heartbeat_check, daemon=True)
+        self.heartbeat_thread.start()
 
     def play_sound(self):
         """带有时间间隔控制的音效播放函数"""
@@ -697,9 +764,14 @@ class OrderFlowTrader:
 
     def spot_message_handler(self, _, data):
         try:
+            # 更新最后收到消息的时间
+            self.last_message_time = time.time()
+            # 重置重连延迟，因为收到了正常消息
+            self.reconnect_delay = 1
+            
             message = json.loads(data)
         except Exception as e:
-            print("JSON解析异常:", e)
+            print(f"{Fore.RED}处理消息异常: {e}{Style.RESET_ALL}")
             return
         
         if message.get('e') != 'aggTrade':
@@ -779,14 +851,20 @@ class OrderFlowTrader:
         self.display.update_display(self.footprint)
 
     def start(self):
-        self.umfclient.agg_trade(self.symbol)
+        self.is_running = True
         try:
-            self.display.start_refresh_thread()  # 启动刷新线程
+            # 启动心跳检测线程
+            self.start_heartbeat_thread()
+            # 订阅数据
+            self.subscribe_data()
+            # 启动显示
+            self.display.start_refresh_thread()
             self.display.app.run()
         finally:
             self.shutdown()
 
     def shutdown(self):
+        self.is_running = False
         # 停止存储线程
         self._storage_running = False
         
