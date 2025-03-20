@@ -11,7 +11,7 @@ from threading import Lock
 import asyncio
 import threading
 from prompt_toolkit.styles import Style
-import winsound  # 替换为winsound
+# import winsound  # 替换为winsound
 import os
 from tinydb import TinyDB, Query
 from pathlib import Path
@@ -411,7 +411,7 @@ class OrderFlowTrader:
         self.sr_price_range = 5  # 支撑压力位的价格范围（美元）
         self.reversal_threshold = 2.0  # 反转信号的失衡比例阈值
 
-        self.sound_file = "coin_voice_v2.wav"  # 注意：winsound需要wav格式的音频文件
+        # self.sound_file = "coin_voice_v2.wav"  # 注意：winsound需要wav格式的音频文件
         self.last_sound_time = 0  # 上次播放声音的时间
         self.sound_interval = 5  # 播放间隔（秒）
 
@@ -487,14 +487,6 @@ class OrderFlowTrader:
 
         self.heartbeat_thread = threading.Thread(target=heartbeat_check, daemon=True)
         self.heartbeat_thread.start()
-
-    def play_sound(self):
-        """带有时间间隔控制的音效播放函数"""
-        current_time = time.time()
-        if current_time - self.last_sound_time >= self.sound_interval:
-            if os.path.exists(self.sound_file):
-                winsound.PlaySound(self.sound_file, winsound.SND_ASYNC | winsound.SND_FILENAME)
-                self.last_sound_time = current_time
 
     def get_minute_str(self, timestamp_ms):
         """将毫秒级时间戳转换为5分钟级字符串"""
@@ -816,9 +808,6 @@ class OrderFlowTrader:
                 self.footprint["high"] = price
             if price < self.footprint["low"]:
                 self.footprint["low"] = price
-
-        if volume >= 2:
-            self.play_sound()
 
         # 更新总成交量统计
         self.footprint["total_volume"] += volume
