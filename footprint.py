@@ -3,7 +3,7 @@ import time
 import json
 import copy
 from binance.websocket.um_futures.websocket_client import UMFuturesWebsocketClient
-from colorama import Fore, Back, Style
+# from colorama import Fore, Back, Style
 from prompt_toolkit import Application
 from prompt_toolkit.layout import Layout, Window, HSplit, FormattedTextControl
 from prompt_toolkit.key_binding import KeyBindings
@@ -28,7 +28,8 @@ class FootprintDisplay:
         self.history_index = None  # 当前查看的历史数据索引
         self.is_viewing_history = False  # 是否正在查看历史数据
         self.edge_threshold = 5     # 边界阈值（距离顶部或底部的行数）
-        self.scroll_speed = 3 
+        self.scroll_speed = 3
+        self.imbalance_threshold = 2.5
         
         # 添加样式
         self.style = Style.from_dict({
@@ -255,10 +256,10 @@ class FootprintDisplay:
                     row.extend([('class:current_row', " │\n")])
                 else:
                     # 设置买卖量的颜色样式
-                    if buy_vol >= 1 and buy_vol / (sell_vol + 0.001) >= 2:
+                    if buy_vol >= 1 and buy_vol / (sell_vol + 0.001) >= self.imbalance_threshold:
                         buy_style = 'buy_strong'
                         sell_style = 'normal'
-                    elif sell_vol >= 1 and sell_vol / (buy_vol + 0.001) >= 2:
+                    elif sell_vol >= 1 and sell_vol / (buy_vol + 0.001) >= self.imbalance_threshold:
                         buy_style = 'normal'
                         sell_style = 'sell_strong'
                     else:
