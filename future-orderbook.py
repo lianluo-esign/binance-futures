@@ -30,8 +30,10 @@ class OrderBookDisplay:
             'price': 'ansiwhite',    # 价格白色
             'header': 'ansiyellow',  # 表头黄色
             'current_row': 'bg:ansiwhite fg:ansiblack',  # 当前价格行背景色
-            'trade_buy': 'ansibrightblue',     # 主动买单蓝色
-            'trade_sell': 'ansibrightmagenta', # 主动卖单紫色
+            'trade_buy': 'ansibrightgreen',     # 主动买单蓝色
+            'trade_sell': 'ansibrightred', # 主动卖单紫色
+            'cancel_bid': 'ansiyellow',        # 买单撤单黄色
+            'cancel_ask': 'ansicyan',          # 卖单撤单青色
         })
 
         @self.kb.add('c-c')
@@ -116,11 +118,11 @@ class OrderBookDisplay:
             price_rows = []
             current_price_index = None
             
-            # 添加表头
+            # 修改表头为7列
             header = [
-                ('class:header', "┌─────────────┬─────────────┬───────────┬─────────────┬─────────────┐\n"),
-                ('class:header', "│  主动卖单   │    买单     │   价格    │    卖单     │  主动买单   │\n"),
-                ('class:header', "├─────────────┼─────────────┼───────────┼─────────────┼─────────────┤\n")
+                ('class:header', "┌─────────────┬─────────────┬─────────────┬───────────┬─────────────┬─────────────┬─────────────┐\n"),
+                ('class:header', "│  买单撤单   │  主动卖单   │    买单     │   价格    │    卖单     │  主动买单   │  卖单撤单   │\n"),
+                ('class:header', "├─────────────┼─────────────┼─────────────┼───────────┼─────────────┼─────────────┼─────────────┤\n")
             ]
             
             # 获取所有价格并排序，过滤掉挂单量为0的层级
@@ -147,25 +149,37 @@ class OrderBookDisplay:
                 sell_trade_vol = orderbook_data.get_trade_volume(price, 'sell')
                 buy_trade_vol = orderbook_data.get_trade_volume(price, 'buy')
                 
+                # 获取撤单量信息
+                bid_cancel_vol = orderbook_data.get_cancel_volume(price, 'bid')
+                ask_cancel_vol = orderbook_data.get_cancel_volume(price, 'ask')
+                
                 # 格式化数值，使其居中显示
                 bid_str = f"{bid_vol:.3f}" if bid_vol > 0.0 else ""
                 ask_str = f"{ask_vol:.3f}" if ask_vol > 0.0 else ""
                 price_str = price  # 直接使用原始价格字符串
                 sell_trade_str = f"{sell_trade_vol:.3f}" if sell_trade_vol > 0 else ""
                 buy_trade_str = f"{buy_trade_vol:.3f}" if buy_trade_vol > 0 else ""
+                bid_cancel_str = f"{bid_cancel_vol:.3f}" if bid_cancel_vol > 0 else ""
+                ask_cancel_str = f"{ask_cancel_vol:.3f}" if ask_cancel_vol > 0 else ""
                 
                 # 计算居中所需的空格
+                bid_cancel_space = (12 - len(bid_cancel_str)) // 2
                 sell_trade_space = (12 - len(sell_trade_str)) // 2
                 bid_space = (12 - len(bid_str)) // 2
                 ask_space = (12 - len(ask_str)) // 2
                 price_space = (10 - len(price_str)) // 2
                 buy_trade_space = (12 - len(buy_trade_str)) // 2
+                ask_cancel_space = (12 - len(ask_cancel_str)) // 2
                 
                 # 构建行数据
                 if abs(price_float - current_price) < 0.000001:
                     # 根据最后成交方向决定高亮的列
-                    if orderbook_data.last_trade_side == 'buy':  # 主动买单，高亮右边两列
+                    if orderbook_data.last_trade_side == 'buy':  # 主动买单，高亮右边相关列
                         row = [
+                            ('class:normal', "│"),
+                            ('class:normal', " " * (bid_cancel_space + 1)),
+                            ('class:cancel_bid', bid_cancel_str),
+                            ('class:normal', " " * (12 - len(bid_cancel_str) - bid_cancel_space)),
                             ('class:normal', "│"),
                             ('class:normal', " " * (sell_trade_space + 1)),
                             ('class:trade_sell', sell_trade_str),
@@ -186,11 +200,19 @@ class OrderBookDisplay:
                             ('class:current_row', " " * (buy_trade_space + 1)),
                             ('class:current_row', buy_trade_str),
                             ('class:current_row', " " * (12 - len(buy_trade_str) - buy_trade_space)),
+                            ('class:current_row', "│"),
+                            ('class:current_row', " " * (ask_cancel_space + 1)),
+                            ('class:current_row', ask_cancel_str),
+                            ('class:current_row', " " * (12 - len(ask_cancel_str) - ask_cancel_space)),
                             ('class:normal', "│\n")
                         ]
-                    else:  # 主动卖单，高亮左边两列
+                    else:  # 主动卖单，高亮左边相关列
                         row = [
                             ('class:normal', "│"),
+                            ('class:current_row', " " * (bid_cancel_space + 1)),
+                            ('class:current_row', bid_cancel_str),
+                            ('class:current_row', " " * (12 - len(bid_cancel_str) - bid_cancel_space)),
+                            ('class:current_row', "│"),
                             ('class:current_row', " " * (sell_trade_space + 1)),
                             ('class:current_row', sell_trade_str),
                             ('class:current_row', " " * (12 - len(sell_trade_str) - sell_trade_space)),
@@ -210,6 +232,10 @@ class OrderBookDisplay:
                             ('class:normal', " " * (buy_trade_space + 1)),
                             ('class:trade_buy', buy_trade_str),
                             ('class:normal', " " * (12 - len(buy_trade_str) - buy_trade_space)),
+                            ('class:normal', "│"),
+                            ('class:normal', " " * (ask_cancel_space + 1)),
+                            ('class:cancel_ask', ask_cancel_str),
+                            ('class:normal', " " * (12 - len(ask_cancel_str) - ask_cancel_space)),
                             ('class:normal', "│\n")
                         ]
                 else:
@@ -217,6 +243,10 @@ class OrderBookDisplay:
                     show_ask = price_float > current_price
                     
                     row = [
+                        ('class:normal', "│"),
+                        ('class:normal', " " * (bid_cancel_space + 1)),
+                        ('class:cancel_bid', bid_cancel_str if bid_cancel_vol > 0 else " " * len(bid_cancel_str)),
+                        ('class:normal', " " * (12 - len(bid_cancel_str) - bid_cancel_space)),
                         ('class:normal', "│"),
                         ('class:normal', " " * (sell_trade_space + 1)),
                         ('class:trade_sell', sell_trade_str if sell_trade_vol > 0 else " " * len(sell_trade_str)),
@@ -237,6 +267,10 @@ class OrderBookDisplay:
                         ('class:normal', " " * (buy_trade_space + 1)),
                         ('class:trade_buy', buy_trade_str if buy_trade_vol > 0 else " " * len(buy_trade_str)),
                         ('class:normal', " " * (12 - len(buy_trade_str) - buy_trade_space)),
+                        ('class:normal', "│"),
+                        ('class:normal', " " * (ask_cancel_space + 1)),
+                        ('class:cancel_ask', ask_cancel_str if ask_cancel_vol > 0 else " " * len(ask_cancel_str)),
+                        ('class:normal', " " * (12 - len(ask_cancel_str) - ask_cancel_space)),
                         ('class:normal', "│\n")
                     ]
                 price_rows.append(row)
@@ -270,7 +304,7 @@ class OrderBookDisplay:
             self.current_text.extend([item for row in price_rows[start_idx:end_idx] for item in row])
             
             # 添加底部边框
-            footer = [('class:header', "└─────────────┴─────────────┴───────────┴─────────────┴─────────────┘\n")]
+            footer = [('class:header', "└─────────────┴─────────────┴───────────┴───────────┴─────────────┴─────────────┴─────────────┘\n")]
             self.current_text.extend(footer)
 
 class OrderBookData:
@@ -281,14 +315,23 @@ class OrderBookData:
         
         # 新增：成交数据跟踪
         self.recent_trades = {}  # {price: {'buy_volume': 0, 'sell_volume': 0, 'timestamp': 0}}
-        self.trade_display_duration = 3000  # 成交信息显示持续时间（毫秒）
+        self.trade_display_duration = 1000 * 10  # 成交信息显示持续时间（毫秒）
         self.max_trade_records = 100  # 最大成交记录数
         
         # 新增：跟踪最后成交方向
         self.last_trade_side = None  # 'buy' 或 'sell'
+        
+        # 新增：撤单检测相关数据
+        self.previous_levels = {}  # 上一次的价格层级数据
+        self.cancel_records = {}  # {price: {'bid_cancel': 0, 'ask_cancel': 0, 'timestamp': 0}}
+        self.cancel_display_duration = 1000 * 1  # 撤单信息显示持续时间（毫秒）
+        self.max_cancel_records = 100  # 最大撤单记录数
 
     def update(self, price, volume, side):
         """更新指定价格和方向的挂单量"""
+        # 检测撤单
+        self._detect_cancellation(price, volume, side)
+        
         if volume > 0:
             if price not in self.price_levels:
                 self.price_levels[price] = {'ask': 0, 'bid': 0}
@@ -355,6 +398,81 @@ class OrderBookData:
         """获取指定价格的成交量"""
         if price in self.recent_trades:
             return self.recent_trades[price].get(f'{side}_volume', 0)
+        return 0
+
+    def _detect_cancellation(self, price, new_volume, side):
+        """检测撤单行为"""
+        current_time = time.time() * 1000
+        
+        # 获取之前的挂单量
+        if price in self.previous_levels:
+            old_volume = self.previous_levels[price].get(side, 0)
+            
+            # 检测挂单量减少
+            if old_volume > new_volume:
+                volume_decrease = old_volume - new_volume
+                
+                # 获取该价格的成交量
+                trade_volume = 0
+                if price in self.recent_trades:
+                    # 根据side确定对应的成交方向
+                    if side == 'bid':  # 买单减少，检查主动卖单成交
+                        trade_volume = self.recent_trades[price].get('sell_volume', 0)
+                    else:  # 卖单减少，检查主动买单成交
+                        trade_volume = self.recent_trades[price].get('buy_volume', 0)
+                
+                # 如果挂单减少量大于成交量，认为是撤单
+                cancel_volume = max(0, volume_decrease - trade_volume)
+                
+                if cancel_volume > 0:
+                    if price not in self.cancel_records:
+                        self.cancel_records[price] = {
+                            'bid_cancel': 0,
+                            'ask_cancel': 0,
+                            'timestamp': current_time
+                        }
+                    
+                    # 累加撤单量
+                    if side == 'bid':
+                        self.cancel_records[price]['bid_cancel'] += cancel_volume
+                    else:
+                        self.cancel_records[price]['ask_cancel'] += cancel_volume
+                    
+                    self.cancel_records[price]['timestamp'] = current_time
+        
+        # 更新历史数据
+        if price not in self.previous_levels:
+            self.previous_levels[price] = {'ask': 0, 'bid': 0}
+        self.previous_levels[price][side] = new_volume
+        
+        # 清理过期的撤单记录
+        self.clean_old_cancels()
+
+    def clean_old_cancels(self):
+        """清理过期的撤单记录"""
+        current_time = time.time() * 1000
+        
+        # 删除超过显示时间的撤单记录
+        expired_prices = []
+        for price, cancel_data in self.cancel_records.items():
+            if current_time - cancel_data['timestamp'] > self.cancel_display_duration:
+                expired_prices.append(price)
+        
+        for price in expired_prices:
+            del self.cancel_records[price]
+        
+        # 限制记录数量
+        if len(self.cancel_records) > self.max_cancel_records:
+            # 按时间戳排序，删除最旧的记录
+            sorted_cancels = sorted(self.cancel_records.items(), 
+                                   key=lambda x: x[1]['timestamp'])
+            for price, _ in sorted_cancels[:-self.max_cancel_records]:
+                del self.cancel_records[price]
+
+    def get_cancel_volume(self, price, side):
+        """获取指定价格的撤单量"""
+        if price in self.cancel_records:
+            return self.cancel_records[price].get(f'{side}_cancel', 0)
         return 0
 
     def update_current_price(self, price):
