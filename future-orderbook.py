@@ -30,6 +30,8 @@ class OrderBookDisplay:
             'price': 'ansiwhite',    # 价格白色
             'header': 'ansiyellow',  # 表头黄色
             'current_row': 'bg:ansiwhite fg:ansiblack',  # 当前价格行背景色
+            'trade_buy': 'ansibrightblue',     # 主动买单蓝色
+            'trade_sell': 'ansibrightmagenta', # 主动卖单紫色
         })
 
         @self.kb.add('c-c')
@@ -191,7 +193,7 @@ class OrderBookDisplay:
                     row = [
                         ('class:normal', "│"),
                         ('class:normal', " " * (sell_trade_space + 1)),
-                        ('class:ask', sell_trade_str if sell_trade_vol > 0 else " " * len(sell_trade_str)),
+                        ('class:trade_sell', sell_trade_str if sell_trade_vol > 0 else " " * len(sell_trade_str)),
                         ('class:normal', " " * (12 - len(sell_trade_str) - sell_trade_space)),
                         ('class:normal', "│"),
                         ('class:normal', " " * (bid_space + 1)),
@@ -207,7 +209,7 @@ class OrderBookDisplay:
                         ('class:normal', " " * (12 - len(ask_str) - ask_space)),
                         ('class:normal', "│"),
                         ('class:normal', " " * (buy_trade_space + 1)),
-                        ('class:bid', buy_trade_str if buy_trade_vol > 0 else " " * len(buy_trade_str)),
+                        ('class:trade_buy', buy_trade_str if buy_trade_vol > 0 else " " * len(buy_trade_str)),
                         ('class:normal', " " * (12 - len(buy_trade_str) - buy_trade_space)),
                         ('class:normal', "│\n")
                     ]
@@ -448,7 +450,7 @@ class OrderBookTrader:
         self.umfclient.stop()
 
 if __name__ == "__main__":
-    trader = OrderBookTrader(symbol="btcusdt")
+    trader = OrderBookTrader(symbol="BTCUSDT")
     try:
         trader.start()
     except KeyboardInterrupt:

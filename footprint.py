@@ -49,10 +49,10 @@ class FootprintDisplay:
         self.column_visibility = {
             'price': True,      # Price Level
             'orders': False,     # Orders
-            'total_volume': False,  # Total Volume
+            'total_volume': True,  # Total Volume
             'buy_volume': True,    # Buy Volume
             'sell_volume': True,   # Sell Volume
-            'delta': False          # Delta
+            'delta': True          # Delta
         }
         
         # 添加切换列显示的快捷键
