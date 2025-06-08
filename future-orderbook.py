@@ -163,29 +163,55 @@ class OrderBookDisplay:
                 
                 # 构建行数据
                 if abs(price_float - current_price) < 0.000001:
-                    row = [
-                        ('class:current_row', "│"),
-                        ('class:current_row', " " * (sell_trade_space + 1)),
-                        ('class:current_row', sell_trade_str),
-                        ('class:current_row', " " * (12 - len(sell_trade_str) - sell_trade_space)),
-                        ('class:current_row', "│"),
-                        ('class:current_row', " " * (bid_space + 1)),
-                        ('class:current_row', bid_str),
-                        ('class:current_row', " " * (12 - len(bid_str) - bid_space)),
-                        ('class:current_row', "│"),
-                        ('class:current_row', " " * (price_space + 1)),
-                        ('class:current_row', price_str),
-                        ('class:current_row', " " * (10 - len(price_str) - price_space)),
-                        ('class:current_row', "│"),
-                        ('class:current_row', " " * (ask_space + 1)),
-                        ('class:current_row', ask_str),
-                        ('class:current_row', " " * (12 - len(ask_str) - ask_space)),
-                        ('class:current_row', "│"),
-                        ('class:current_row', " " * (buy_trade_space + 1)),
-                        ('class:current_row', buy_trade_str),
-                        ('class:current_row', " " * (12 - len(buy_trade_str) - buy_trade_space)),
-                        ('class:current_row', "│\n")
-                    ]
+                    # 根据最后成交方向决定高亮的列
+                    if orderbook_data.last_trade_side == 'buy':  # 主动买单，高亮右边两列
+                        row = [
+                            ('class:normal', "│"),
+                            ('class:normal', " " * (sell_trade_space + 1)),
+                            ('class:trade_sell', sell_trade_str),
+                            ('class:normal', " " * (12 - len(sell_trade_str) - sell_trade_space)),
+                            ('class:normal', "│"),
+                            ('class:normal', " " * (bid_space + 1)),
+                            ('class:bid', bid_str),
+                            ('class:normal', " " * (12 - len(bid_str) - bid_space)),
+                            ('class:normal', "│"),
+                            ('class:normal', " " * (price_space + 1)),
+                            ('class:price', price_str),
+                            ('class:normal', " " * (10 - len(price_str) - price_space)),
+                            ('class:normal', "│"),
+                            ('class:current_row', " " * (ask_space + 1)),
+                            ('class:current_row', ask_str),
+                            ('class:current_row', " " * (12 - len(ask_str) - ask_space)),
+                            ('class:current_row', "│"),
+                            ('class:current_row', " " * (buy_trade_space + 1)),
+                            ('class:current_row', buy_trade_str),
+                            ('class:current_row', " " * (12 - len(buy_trade_str) - buy_trade_space)),
+                            ('class:normal', "│\n")
+                        ]
+                    else:  # 主动卖单，高亮左边两列
+                        row = [
+                            ('class:normal', "│"),
+                            ('class:current_row', " " * (sell_trade_space + 1)),
+                            ('class:current_row', sell_trade_str),
+                            ('class:current_row', " " * (12 - len(sell_trade_str) - sell_trade_space)),
+                            ('class:current_row', "│"),
+                            ('class:current_row', " " * (bid_space + 1)),
+                            ('class:current_row', bid_str),
+                            ('class:current_row', " " * (12 - len(bid_str) - bid_space)),
+                            ('class:normal', "│"),
+                            ('class:normal', " " * (price_space + 1)),
+                            ('class:price', price_str),
+                            ('class:normal', " " * (10 - len(price_str) - price_space)),
+                            ('class:normal', "│"),
+                            ('class:normal', " " * (ask_space + 1)),
+                            ('class:ask', ask_str),
+                            ('class:normal', " " * (12 - len(ask_str) - ask_space)),
+                            ('class:normal', "│"),
+                            ('class:normal', " " * (buy_trade_space + 1)),
+                            ('class:trade_buy', buy_trade_str),
+                            ('class:normal', " " * (12 - len(buy_trade_str) - buy_trade_space)),
+                            ('class:normal', "│\n")
+                        ]
                 else:
                     show_bid = price_float < current_price
                     show_ask = price_float > current_price
@@ -257,6 +283,9 @@ class OrderBookData:
         self.recent_trades = {}  # {price: {'buy_volume': 0, 'sell_volume': 0, 'timestamp': 0}}
         self.trade_display_duration = 3000  # 成交信息显示持续时间（毫秒）
         self.max_trade_records = 100  # 最大成交记录数
+        
+        # 新增：跟踪最后成交方向
+        self.last_trade_side = None  # 'buy' 或 'sell'
 
     def update(self, price, volume, side):
         """更新指定价格和方向的挂单量"""
@@ -274,11 +303,13 @@ class OrderBookData:
 
     def add_trade(self, price, volume, is_buyer_maker, timestamp):
         """添加成交记录"""
-        import time
         current_time = time.time() * 1000  # 转换为毫秒
         
         # 判断成交方向：is_buyer_maker=True表示买方是挂单方，即主动卖单
         side = 'sell' if is_buyer_maker else 'buy'
+        
+        # 记录最后成交方向
+        self.last_trade_side = side
         
         if price not in self.recent_trades:
             self.recent_trades[price] = {
