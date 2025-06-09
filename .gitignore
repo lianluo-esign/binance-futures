@@ -2,3 +2,7 @@ history_data.json
 spot_history_data.json
 trades_history.json
 footprint_history.json
+
+# Added by cargo
+
+/target
