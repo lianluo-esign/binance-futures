@@ -8,9 +8,9 @@ use ordered_float::OrderedFloat;
 use parking_lot::Mutex;
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Constraint, Rect},
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
-    widgets::{Block, Borders, Cell, Row, Table},
+    widgets::{Block, Borders, Cell, Row, Table, Paragraph, Wrap},
     Frame, Terminal,
 };
 use serde_json::Value;
@@ -23,6 +23,52 @@ use std::{
 };
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 use url::Url;
+
+
+
+// 流动性失衡检测结构
+#[derive(Debug, Clone)]
+struct LiquidityImbalance {
+    timestamp: u64,
+    imbalance_type: String,  // "bullish" or "bearish"
+    imbalance_ratio: f64,    // 失衡百分比
+    consumed_volume: f64,    // 消耗的流动性量
+    // price_level: f64,        // 发生失衡的价格
+}
+
+// 冰山订单检测结构
+#[derive(Debug, Clone)]
+struct IcebergOrder {
+    timestamp: u64,
+    side: String,            // "bid" or "ask"
+    price: f64,
+    accumulated_volume: f64, // 累积的冰山订单量
+    replenish_count: u32,    // 补充次数
+    signal_strength: f64,    // 信号强度
+}
+
+// 市场微观结构分析器
+struct MarketMicrostructureAnalyzer {
+    // 流动性失衡检测参数
+    imbalance_threshold: f64,           // 失衡阈值 (默认 0.7 = 70%)
+    min_volume_threshold: f64,          // 最小成交量阈值
+    
+    // 冰山订单检测参数
+    iceberg_volume_ratio: f64,          // 冰山订单量比例阈值
+    iceberg_replenish_threshold: u32,   // 冰山订单补充次数阈值
+    iceberg_window_ms: u64,             // 冰山订单检测窗口
+    
+    // 状态跟踪
+    last_best_bid: Option<f64>,
+    last_best_ask: Option<f64>,
+    last_bid_volume: f64,
+    last_ask_volume: f64,
+    
+    // 检测结果存储
+    detected_imbalances: Vec<LiquidityImbalance>,
+    detected_icebergs: Vec<IcebergOrder>,
+}
+
 
 // 订单簿数据结构
 #[derive(Debug, Clone)]
@@ -56,7 +102,18 @@ struct OrderBookData {
     cancel_display_duration: u64,
     max_trade_records: usize,
     max_cancel_records: usize,
+    
+    // 新增市场微观结构分析器
+    microstructure_analyzer: MarketMicrostructureAnalyzer,
+    
+    // 新增字段
+    stable_highlight_price: Option<f64>,
+    stable_highlight_side: Option<String>,
+    last_trade_price: Option<f64>,
+    highlight_start_time: Option<u64>,
+    highlight_duration: u64,
 }
+
 
 impl OrderBookData {
     fn new() -> Self {
@@ -70,6 +127,18 @@ impl OrderBookData {
             cancel_display_duration: 5000,
             max_trade_records: 1000,
             max_cancel_records: 500,
+            microstructure_analyzer: MarketMicrostructureAnalyzer::new(
+                0.8,    // imbalance_threshold
+                1.0,    // min_volume_threshold
+                2.0,    // iceberg_volume_ratio
+                3,      // iceberg_replenish_threshold
+                1000,   // iceberg_window_ms
+            ),
+            stable_highlight_price: None,
+            stable_highlight_side: None,
+            last_trade_price: None,
+            highlight_start_time: None,
+            highlight_duration: 3000,
         }
     }
 
@@ -124,6 +193,24 @@ impl OrderBookData {
             
             // 直接在这里清理不合理的挂单数据
             self.clear_unreasonable_orders(price, side);
+            
+            // 获取当前最佳买卖价和挂单量
+            let (best_bid, best_ask) = self.get_best_bid_ask();
+            let (bid_volume, ask_volume) = self.get_best_volumes();
+            
+            // 检测流动性失衡
+            if let Some(imbalance) = self.microstructure_analyzer.detect_liquidity_imbalance(
+                best_bid, best_ask, bid_volume, ask_volume, price, qty_f64, side
+            ) {
+                // println!("🚨 流动性失衡检测: {:?}", imbalance);
+            }
+            
+            // 检测冰山订单
+            if let Some(iceberg) = self.microstructure_analyzer.detect_iceberg_order(
+                best_bid, best_ask, bid_volume, ask_volume, qty_f64, side
+            ) {
+                // println!("🧊 冰山订单检测: {:?}", iceberg);
+            }
             
             let current_time = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -341,7 +428,390 @@ impl OrderBookData {
             .find(|(_, level)| level.ask > 0.0)
             .map(|(price, _)| price.into_inner())
     }
+    
+    // 获取最佳买卖价
+    fn get_best_bid_ask(&self) -> (Option<f64>, Option<f64>) {
+        let mut best_bid = None;
+        let mut best_ask = None;
+        
+        for (price, level) in &self.price_levels {
+            if level.bid > 0.0 {
+                if best_bid.is_none() || price.into_inner() > best_bid.unwrap() {
+                    best_bid = Some(price.into_inner());
+                }
+            }
+            if level.ask > 0.0 {
+                if best_ask.is_none() || price.into_inner() < best_ask.unwrap() {
+                    best_ask = Some(price.into_inner());
+                }
+            }
+        }
+        
+        (best_bid, best_ask)
+    }
+    
+    // 获取最佳价位的挂单量
+    fn get_best_volumes(&self) -> (f64, f64) {
+        let (best_bid, best_ask) = self.get_best_bid_ask();
+        let mut bid_volume = 0.0;
+        let mut ask_volume = 0.0;
+        
+        if let Some(bid_price) = best_bid {
+            if let Some(level) = self.price_levels.get(&OrderedFloat(bid_price)) {
+                bid_volume = level.bid;
+            }
+        }
+        
+        if let Some(ask_price) = best_ask {
+            if let Some(level) = self.price_levels.get(&OrderedFloat(ask_price)) {
+                ask_volume = level.ask;
+            }
+        }
+        
+        (bid_volume, ask_volume)
+    }
+    
+    // 获取市场信号摘要
+    fn get_market_signals(&self) -> String {
+        let imbalances = self.microstructure_analyzer.get_current_imbalance_signals();
+        let icebergs = self.microstructure_analyzer.get_current_iceberg_signals();
+        
+        let mut signals = Vec::new();
+        
+        for imbalance in imbalances {
+            signals.push(format!(
+                "{}失衡 {:.1}% (量:{:.2})",
+                if imbalance.imbalance_type == "bullish" { "🟢看涨" } else { "🔴看跌" },
+                imbalance.imbalance_ratio * 100.0,
+                imbalance.consumed_volume
+            ));
+        }
+        
+        for iceberg in icebergs {
+            signals.push(format!(
+                "🧊{}冰山 {:.2} ({}次补充)",
+                if iceberg.side == "bid" { "买盘" } else { "卖盘" },
+                iceberg.accumulated_volume,
+                iceberg.replenish_count
+            ));
+        }
+        
+        if signals.is_empty() {
+            "无特殊信号".to_string()
+        } else {
+            signals.join("\n")
+        }
+    }
 }
+
+
+// 市场微观结构分析器
+impl MarketMicrostructureAnalyzer {
+    fn new(
+        imbalance_threshold: f64,
+        min_volume_threshold: f64,
+        iceberg_volume_ratio: f64,
+        iceberg_replenish_threshold: u32,
+        iceberg_window_ms: u64,
+    ) -> Self {
+        Self {
+            imbalance_threshold,
+            min_volume_threshold,
+            iceberg_volume_ratio,
+            iceberg_replenish_threshold,
+            iceberg_window_ms,
+            last_best_bid: None,
+            last_best_ask: None,
+            last_bid_volume: 0.0,
+            last_ask_volume: 0.0,
+            detected_imbalances: Vec::new(),
+            detected_icebergs: Vec::new(),
+        }
+    }
+    
+    // 实时流动性失衡检测
+    fn detect_liquidity_imbalance(&mut self, 
+        best_bid: Option<f64>, 
+        best_ask: Option<f64>,
+        bid_volume: f64,
+        ask_volume: f64,
+        trade_price: f64,
+        trade_volume: f64,
+        trade_side: &str) -> Option<LiquidityImbalance> {
+        
+        let current_time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        
+        // 检查成交量是否达到最小阈值
+        if trade_volume < self.min_volume_threshold {
+            return None;
+        }
+        
+        let mut imbalance_detected = None;
+        
+        match trade_side {
+            "buy" => {
+                // 主动买单检测 - 放宽价格匹配条件
+                if let Some(ask) = best_ask {
+                    // 检查是否为主动买单（价格大于等于best_ask）
+                    if trade_price >= ask {
+                        // 计算消耗比例
+                        let consumption_ratio = if ask_volume > 0.0 {
+                            trade_volume / ask_volume
+                        } else {
+                            1.0 // 如果挂单量为0，认为完全消耗
+                        };
+                        
+                        // 降低阈值，更容易触发检测
+                        if consumption_ratio > 0.3 { // 降低到30%
+                            // 简化补充检测逻辑
+                            let volume_change_ratio = if self.last_ask_volume > 0.0 {
+                                (ask_volume - self.last_ask_volume) / self.last_ask_volume
+                            } else {
+                                0.0
+                            };
+                            
+                            // 如果挂单量没有显著增加，认为存在失衡
+                            if volume_change_ratio < 0.5 { // 增长不足50%
+                                imbalance_detected = Some(LiquidityImbalance {
+                                    timestamp: current_time,
+                                    imbalance_type: "bullish".to_string(),
+                                    imbalance_ratio: consumption_ratio,
+                                    consumed_volume: trade_volume,
+                                });
+                            }
+                        }
+                    }
+                }
+            },
+            "sell" => {
+                // 主动卖单检测 - 放宽价格匹配条件
+                if let Some(bid) = best_bid {
+                    // 检查是否为主动卖单（价格小于等于best_bid）
+                    if trade_price <= bid {
+                        // 计算消耗比例
+                        let consumption_ratio = if bid_volume > 0.0 {
+                            trade_volume / bid_volume
+                        } else {
+                            1.0 // 如果挂单量为0，认为完全消耗
+                        };
+                        
+                        // 降低阈值，更容易触发检测
+                        if consumption_ratio > 0.3 { // 降低到30%
+                            // 简化补充检测逻辑
+                            let volume_change_ratio = if self.last_bid_volume > 0.0 {
+                                (bid_volume - self.last_bid_volume) / self.last_bid_volume
+                            } else {
+                                0.0
+                            };
+                            
+                            // 如果挂单量没有显著增加，认为存在失衡
+                            if volume_change_ratio < 0.5 { // 增长不足50%
+                                imbalance_detected = Some(LiquidityImbalance {
+                                    timestamp: current_time,
+                                    imbalance_type: "bearish".to_string(),
+                                    imbalance_ratio: consumption_ratio,
+                                    consumed_volume: trade_volume,
+                                });
+                            }
+                        }
+                    }
+                }
+            },
+            _ => {}
+        }
+        
+        // 更新历史状态
+        self.last_best_bid = best_bid;
+        self.last_best_ask = best_ask;
+        self.last_bid_volume = bid_volume;
+        self.last_ask_volume = ask_volume;
+        
+        // 如果检测到失衡，添加到记录中
+        if let Some(ref imbalance) = imbalance_detected {
+            self.detected_imbalances.push(imbalance.clone());
+            
+            // 限制记录数量，只保留最近的信号
+            if self.detected_imbalances.len() > 10 {
+                self.detected_imbalances.remove(0);
+            }
+        }
+        
+        imbalance_detected
+    }
+    
+    // 分析窗口中的流动性失衡
+    // fn analyze_window_imbalance(&self, window: &LiquidityWindow) -> Option<LiquidityImbalance> {
+    //     let total_aggressive_volume = window.aggressive_buy_volume + window.aggressive_sell_volume;
+    //     
+    //     if total_aggressive_volume < self.min_volume_threshold {
+    //         return None;
+    //     }
+    //     
+    //     let buy_ratio = window.aggressive_buy_volume / total_aggressive_volume;
+    //     let sell_ratio = window.aggressive_sell_volume / total_aggressive_volume;
+    //     
+    //     // 检测强烈看涨信号 (主动买压过大)
+    //     if buy_ratio > self.imbalance_threshold && 
+    //        window.ask_replenish_volume < window.aggressive_buy_volume * 0.5 {
+    //         return Some(LiquidityImbalance {
+    //             timestamp: window.start_time,
+    //             imbalance_type: "bullish".to_string(),
+    //             imbalance_ratio: buy_ratio,
+    //             consumed_volume: window.aggressive_buy_volume,
+    //             price_level: 0.0, // 需要从上下文获取
+    //         });
+    //     }
+    //     
+    //     // 检测强烈看跌信号 (主动卖压过大)
+    //     if sell_ratio > self.imbalance_threshold && 
+    //        window.bid_replenish_volume < window.aggressive_sell_volume * 0.5 {
+    //         return Some(LiquidityImbalance {
+    //             timestamp: window.start_time,
+    //             imbalance_type: "bearish".to_string(),
+    //             imbalance_ratio: sell_ratio,
+    //             consumed_volume: window.aggressive_sell_volume,
+    //             price_level: 0.0, // 需要从上下文获取
+    //         });
+    //     }
+    //     
+    //     None
+    // }
+    
+    // 冰山订单检测
+    fn detect_iceberg_order(&mut self,
+        best_bid: Option<f64>,
+        best_ask: Option<f64>,
+        bid_volume: f64,
+        ask_volume: f64,
+        trade_volume: f64,
+        trade_side: &str) -> Option<IcebergOrder> {
+        
+        let current_time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        
+        // 检测买盘冰山订单 (在best_bid持续补充)
+        if let Some(bid_price) = best_bid {
+            if trade_side == "sell" && bid_volume > self.last_bid_volume {
+                let replenish_volume = bid_volume - self.last_bid_volume;
+                
+                // 检查是否满足冰山订单条件
+                if replenish_volume > trade_volume * self.iceberg_volume_ratio {
+                    // 查找或创建冰山订单记录
+                    let mut found_iceberg = false;
+                    for iceberg in &mut self.detected_icebergs {
+                        if iceberg.side == "bid" && 
+                           (iceberg.price - bid_price).abs() < 0.000001 &&
+                           current_time - iceberg.timestamp < self.iceberg_window_ms {
+                            iceberg.accumulated_volume += replenish_volume;
+                            iceberg.replenish_count += 1;
+                            iceberg.timestamp = current_time;
+                            iceberg.signal_strength = iceberg.accumulated_volume / (current_time - iceberg.timestamp + 1) as f64;
+                            found_iceberg = true;
+                            
+                            if iceberg.replenish_count >= self.iceberg_replenish_threshold {
+                                return Some(iceberg.clone());
+                            }
+                            break;
+                        }
+                    }
+                    
+                    if !found_iceberg {
+                        let new_iceberg = IcebergOrder {
+                            timestamp: current_time,
+                            side: "bid".to_string(),
+                            price: bid_price,
+                            accumulated_volume: replenish_volume,
+                            replenish_count: 1,
+                            signal_strength: replenish_volume,
+                        };
+                        self.detected_icebergs.push(new_iceberg);
+                    }
+                }
+            }
+        }
+        
+        // 检测卖盘冰山订单 (在best_ask持续补充)
+        if let Some(ask_price) = best_ask {
+            if trade_side == "buy" && ask_volume > self.last_ask_volume {
+                let replenish_volume = ask_volume - self.last_ask_volume;
+                
+                if replenish_volume > trade_volume * self.iceberg_volume_ratio {
+                    let mut found_iceberg = false;
+                    for iceberg in &mut self.detected_icebergs {
+                        if iceberg.side == "ask" && 
+                           (iceberg.price - ask_price).abs() < 0.000001 &&
+                           current_time - iceberg.timestamp < self.iceberg_window_ms {
+                            iceberg.accumulated_volume += replenish_volume;
+                            iceberg.replenish_count += 1;
+                            iceberg.timestamp = current_time;
+                            iceberg.signal_strength = iceberg.accumulated_volume / (current_time - iceberg.timestamp + 1) as f64;
+                            found_iceberg = true;
+                            
+                            if iceberg.replenish_count >= self.iceberg_replenish_threshold {
+                                return Some(iceberg.clone());
+                            }
+                            break;
+                        }
+                    }
+                    
+                    if !found_iceberg {
+                        let new_iceberg = IcebergOrder {
+                            timestamp: current_time,
+                            side: "ask".to_string(),
+                            price: ask_price,
+                            accumulated_volume: replenish_volume,
+                            replenish_count: 1,
+                            signal_strength: replenish_volume,
+                        };
+                        self.detected_icebergs.push(new_iceberg);
+                    }
+                }
+            }
+        }
+        
+        // 清理过期的冰山订单记录
+        self.detected_icebergs.retain(|iceberg| {
+            current_time - iceberg.timestamp < self.iceberg_window_ms * 2
+        });
+        
+        None
+    }
+    
+    // 获取当前流动性失衡状态
+    fn get_current_imbalance_signals(&self) -> Vec<&LiquidityImbalance> {
+        let current_time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        
+        self.detected_imbalances
+            .iter()
+            .filter(|imbalance| current_time - imbalance.timestamp < 5000) // 5秒内的信号
+            .collect()
+    }
+    
+    // 获取当前冰山订单信号
+    fn get_current_iceberg_signals(&self) -> Vec<&IcebergOrder> {
+        let current_time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        
+        self.detected_icebergs
+            .iter()
+            .filter(|iceberg| {
+                current_time - iceberg.timestamp < self.iceberg_window_ms &&
+                iceberg.replenish_count >= self.iceberg_replenish_threshold
+            })
+            .collect()
+    }
+}
+
 
 // 应用状态
 struct App {
@@ -413,22 +883,31 @@ impl App {
     }
 }
 
-// UI渲染函数 - 更新以使用 OrderedFloat
+// UI渲染函数 - 修改为左右布局
 fn ui(f: &mut Frame, app: &mut App) {
     let size = f.size();
     
-    // 计算居中的表格区域
-    let table_width = 105;
-    let table_height = size.height.saturating_sub(1);
+    // 创建左右布局
+    let horizontal_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(70), // 订单薄占70%
+            Constraint::Percentage(30), // 市场信号占30%
+        ])
+        .split(size);
     
-    let horizontal_margin = (size.width.saturating_sub(table_width)) / 2;
-    let vertical_margin = (size.height.saturating_sub(table_height)) / 10;
+    let orderbook_area = horizontal_chunks[0];
+    let signal_area = horizontal_chunks[1];
+    
+    // 计算订单薄表格区域
+    let table_width = orderbook_area.width.saturating_sub(2);
+    let table_height = orderbook_area.height.saturating_sub(2);
     
     let centered_area = Rect {
-        x: horizontal_margin,
-        y: vertical_margin,
-        width: table_width.min(size.width),
-        height: table_height.min(size.height),
+        x: orderbook_area.x + 1,
+        y: orderbook_area.y + 1,
+        width: table_width,
+        height: table_height,
     };
     
     let block = Block::default()
@@ -513,7 +992,7 @@ fn ui(f: &mut Frame, app: &mut App) {
                     String::new() 
                 };
                 
-                // Trade数据显示逻辑：无论价格如何跳动都要显示
+                // 成交量显示逻辑
                 let sell_trade_str = if sell_trade_vol > 0.0 { 
                     format!("+{:.3}", sell_trade_vol) 
                 } else { 
@@ -618,6 +1097,24 @@ fn ui(f: &mut Frame, app: &mut App) {
         ]);
     
     f.render_widget(table, centered_area);
+    
+    // 右侧市场信号显示区域
+    let signals = {
+        let orderbook = app.orderbook.lock();
+        orderbook.get_market_signals()
+    };
+    
+    let signal_block = Block::default()
+        .title("市场微观结构信号")
+        .borders(Borders::ALL)
+        .style(Style::default().fg(Color::Yellow));
+    
+    let signal_paragraph = Paragraph::new(signals)
+        .block(signal_block)
+        .style(Style::default().fg(Color::White))
+        .wrap(Wrap { trim: true });
+    
+    f.render_widget(signal_paragraph, signal_area);
 }
 
 // WebSocket消息处理 - 修改为接受symbol参数
