@@ -501,8 +501,8 @@ impl OrderBookData {
         let bid_percentage = (bid_ratio * 100.0) as u32;
         let ask_percentage = (ask_ratio * 100.0) as u32;
         
-        // 创建动态字符条显示 - 固定20个字符
-        let total_blocks = 20; // 总字符数量固定为20个
+        // 创建动态字符条显示 - 固定50个字符
+        let total_blocks = 50; // 总字符数量固定为50个
         
         // 确保比率总和为1.0，避免浮点数精度问题
         let total_ratio = bid_ratio + ask_ratio;
