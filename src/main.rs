@@ -133,7 +133,7 @@ impl OrderBookData {
             max_trade_records: 1000,
             max_cancel_records: 500,
             microstructure_analyzer: MarketMicrostructureAnalyzer::new(
-                0.8,    // imbalance_threshold
+                0.95,    // imbalance_threshold
                 1.0,    // min_volume_threshold
                 2.0,    // iceberg_volume_ratio
                 3,      // iceberg_replenish_threshold
@@ -517,7 +517,7 @@ impl OrderBookData {
             
             // 组合显示
             let char_bar = format!(
-                "[{}{}] 买:{}% 卖:{}%",
+                "[{}{}] BID:{}% ASK:{}%",
                 bid_bar,      // 买盘部分
                 ask_bar,      // 卖盘部分
                 bid_percentage,
@@ -526,15 +526,15 @@ impl OrderBookData {
             
             signals.push(char_bar);
         } else {
-            signals.push("等待订单簿数据...".to_string());
+            signals.push("Waiting...".to_string());
         }
         
         // 第二行：失衡信号（如果有）
         if let Some(current_signal) = self.microstructure_analyzer.get_current_imbalance_signal() {
             let signal_text = if current_signal.imbalance_type == "bullish" {
-                format!("🟢做多失衡信号 (买盘{}%)", bid_percentage)
+                format!("🟢Imbalance Buy Signal (BID{}%)", bid_percentage)
             } else {
-                format!("🔴做空失衡信号 (卖盘{}%)", ask_percentage)
+                format!("🔴Imbalance Sell Signal (ASK{}%)", ask_percentage)
             };
             signals.push(signal_text);
         }
@@ -552,7 +552,7 @@ impl OrderBookData {
         }
         
         if signals.len() == 1 {
-            signals.push("等待失衡信号...".to_string());
+            signals.push("Waiting...".to_string());
         }
         
         signals.join("\n")
@@ -1090,7 +1090,7 @@ fn ui(f: &mut Frame, app: &mut App) {
     };
     
     let signal_block = Block::default()
-        .title("市场微观结构信号")
+        .title("Micro Market Signals")
         .borders(Borders::ALL)
         .style(Style::default().fg(Color::Yellow));
     
