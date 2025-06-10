@@ -67,6 +67,11 @@ struct MarketMicrostructureAnalyzer {
     // 检测结果存储
     detected_imbalances: Vec<LiquidityImbalance>,
     detected_icebergs: Vec<IcebergOrder>,
+    
+    // 新增：当前挂单量比率状态
+    current_bid_ratio: f64,
+    current_ask_ratio: f64,
+    current_imbalance_signal: Option<LiquidityImbalance>,
 }
 
 
@@ -408,6 +413,22 @@ impl OrderBookData {
             self.detect_cancellation(price, &side, volume);
         }
         
+        // 在更新完订单簿后，立即计算挂单量比率
+        if let (Some(best_bid), Some(best_ask)) = (self.get_best_bid(), self.get_best_ask()) {
+            let (bid_volume, ask_volume) = self.get_best_volumes();
+            
+            // 调用失衡检测（不依赖交易，纯粹基于挂单量）
+            self.microstructure_analyzer.detect_liquidity_imbalance(
+                Some(best_bid),
+                Some(best_ask),
+                bid_volume,
+                ask_volume,
+                0.0,  // 无交易价格
+                0.0,  // 无交易量
+                ""    // 无交易方向
+            );
+        }
+        
         self.clean_old_trades();
         self.clean_old_cancels();
     }
@@ -473,19 +494,53 @@ impl OrderBookData {
     
     // 获取市场信号摘要
     fn get_market_signals(&self) -> String {
-        let imbalances = self.microstructure_analyzer.get_current_imbalance_signals();
-        let icebergs = self.microstructure_analyzer.get_current_iceberg_signals();
-        
         let mut signals = Vec::new();
         
-        for imbalance in imbalances {
-            signals.push(format!(
-                "{}失衡 {:.1}% (量:{:.2})",
-                if imbalance.imbalance_type == "bullish" { "🟢看涨" } else { "🔴看跌" },
-                imbalance.imbalance_ratio * 100.0,
-                imbalance.consumed_volume
-            ));
+        // 第一行：实时挂单量比率色条
+        let (bid_ratio, ask_ratio) = self.microstructure_analyzer.get_current_orderbook_ratio();
+        let bid_percentage = (bid_ratio * 100.0) as u32;
+        let ask_percentage = (ask_ratio * 100.0) as u32;
+        
+        // 创建动态字符条显示 - 固定20个字符
+        let total_blocks = 20; // 总字符数量固定为20个
+        
+        // 确保比率总和为1.0，避免浮点数精度问题
+        let total_ratio = bid_ratio + ask_ratio;
+        if total_ratio > 0.0 {
+            let normalized_bid_ratio = bid_ratio / total_ratio;
+            let green_blocks = (normalized_bid_ratio * total_blocks as f64).round() as usize;
+            let red_blocks = total_blocks - green_blocks;
+            
+            // 构建字符条：使用不同字符表示买卖盘
+            let bid_bar = "▓".repeat(green_blocks);  // 买盘用深色块
+            let ask_bar = "░".repeat(red_blocks);    // 卖盘用浅色块
+            
+            // 组合显示
+            let char_bar = format!(
+                "[{}{}] 买:{}% 卖:{}%",
+                bid_bar,      // 买盘部分
+                ask_bar,      // 卖盘部分
+                bid_percentage,
+                ask_percentage
+            );
+            
+            signals.push(char_bar);
+        } else {
+            signals.push("等待订单簿数据...".to_string());
         }
+        
+        // 第二行：失衡信号（如果有）
+        if let Some(current_signal) = self.microstructure_analyzer.get_current_imbalance_signal() {
+            let signal_text = if current_signal.imbalance_type == "bullish" {
+                format!("🟢做多失衡信号 (买盘{}%)", bid_percentage)
+            } else {
+                format!("🔴做空失衡信号 (卖盘{}%)", ask_percentage)
+            };
+            signals.push(signal_text);
+        }
+        
+        // 添加其他信号（冰山订单等）
+        let icebergs = self.microstructure_analyzer.get_current_iceberg_signals();
         
         for iceberg in icebergs {
             signals.push(format!(
@@ -496,11 +551,11 @@ impl OrderBookData {
             ));
         }
         
-        if signals.is_empty() {
-            "无特殊信号".to_string()
-        } else {
-            signals.join("\n")
+        if signals.len() == 1 {
+            signals.push("等待失衡信号...".to_string());
         }
+        
+        signals.join("\n")
     }
 }
 
@@ -526,10 +581,13 @@ impl MarketMicrostructureAnalyzer {
             last_ask_volume: 0.0,
             detected_imbalances: Vec::new(),
             detected_icebergs: Vec::new(),
+            current_bid_ratio: 0.5,
+            current_ask_ratio: 0.5,
+            current_imbalance_signal: None,
         }
     }
     
-    // 实时流动性失衡检测
+    // 实时流动性失衡检测 - 基于挂单量比率
     fn detect_liquidity_imbalance(&mut self, 
         best_bid: Option<f64>, 
         best_ask: Option<f64>,
@@ -544,84 +602,39 @@ impl MarketMicrostructureAnalyzer {
             .unwrap()
             .as_millis() as u64;
         
-        // 检查成交量是否达到最小阈值
-        if trade_volume < self.min_volume_threshold {
+        // 计算挂单量比率
+        let total_volume = bid_volume + ask_volume;
+        if total_volume <= 0.0 {
             return None;
         }
         
+        // 更新当前比率
+        self.current_bid_ratio = bid_volume / total_volume;
+        self.current_ask_ratio = ask_volume / total_volume;
+        
+        // 检查是否触发失衡信号
         let mut imbalance_detected = None;
         
-        match trade_side {
-            "buy" => {
-                // 主动买单检测 - 放宽价格匹配条件
-                if let Some(ask) = best_ask {
-                    // 检查是否为主动买单（价格大于等于best_ask）
-                    if trade_price >= ask {
-                        // 计算消耗比例
-                        let consumption_ratio = if ask_volume > 0.0 {
-                            trade_volume / ask_volume
-                        } else {
-                            1.0 // 如果挂单量为0，认为完全消耗
-                        };
-                        
-                        // 降低阈值，更容易触发检测
-                        if consumption_ratio > 0.3 { // 降低到30%
-                            // 简化补充检测逻辑
-                            let volume_change_ratio = if self.last_ask_volume > 0.0 {
-                                (ask_volume - self.last_ask_volume) / self.last_ask_volume
-                            } else {
-                                0.0
-                            };
-                            
-                            // 如果挂单量没有显著增加，认为存在失衡
-                            if volume_change_ratio < 0.5 { // 增长不足50%
-                                imbalance_detected = Some(LiquidityImbalance {
-                                    timestamp: current_time,
-                                    imbalance_type: "bullish".to_string(),
-                                    imbalance_ratio: consumption_ratio,
-                                    consumed_volume: trade_volume,
-                                });
-                            }
-                        }
-                    }
-                }
-            },
-            "sell" => {
-                // 主动卖单检测 - 放宽价格匹配条件
-                if let Some(bid) = best_bid {
-                    // 检查是否为主动卖单（价格小于等于best_bid）
-                    if trade_price <= bid {
-                        // 计算消耗比例
-                        let consumption_ratio = if bid_volume > 0.0 {
-                            trade_volume / bid_volume
-                        } else {
-                            1.0 // 如果挂单量为0，认为完全消耗
-                        };
-                        
-                        // 降低阈值，更容易触发检测
-                        if consumption_ratio > 0.3 { // 降低到30%
-                            // 简化补充检测逻辑
-                            let volume_change_ratio = if self.last_bid_volume > 0.0 {
-                                (bid_volume - self.last_bid_volume) / self.last_bid_volume
-                            } else {
-                                0.0
-                            };
-                            
-                            // 如果挂单量没有显著增加，认为存在失衡
-                            if volume_change_ratio < 0.5 { // 增长不足50%
-                                imbalance_detected = Some(LiquidityImbalance {
-                                    timestamp: current_time,
-                                    imbalance_type: "bearish".to_string(),
-                                    imbalance_ratio: consumption_ratio,
-                                    consumed_volume: trade_volume,
-                                });
-                            }
-                        }
-                    }
-                }
-            },
-            _ => {}
+        if self.current_bid_ratio >= self.imbalance_threshold {
+            // 买盘失衡（做多信号）
+            imbalance_detected = Some(LiquidityImbalance {
+                timestamp: current_time,
+                imbalance_type: "bullish".to_string(),
+                imbalance_ratio: self.current_bid_ratio,
+                consumed_volume: trade_volume,
+            });
+        } else if self.current_ask_ratio >= self.imbalance_threshold {
+            // 卖盘失衡（做空信号）
+            imbalance_detected = Some(LiquidityImbalance {
+                timestamp: current_time,
+                imbalance_type: "bearish".to_string(),
+                imbalance_ratio: self.current_ask_ratio,
+                consumed_volume: trade_volume,
+            });
         }
+        
+        // 更新当前失衡信号状态
+        self.current_imbalance_signal = imbalance_detected.clone();
         
         // 更新历史状态
         self.last_best_bid = best_bid;
@@ -641,44 +654,6 @@ impl MarketMicrostructureAnalyzer {
         
         imbalance_detected
     }
-    
-    // 分析窗口中的流动性失衡
-    // fn analyze_window_imbalance(&self, window: &LiquidityWindow) -> Option<LiquidityImbalance> {
-    //     let total_aggressive_volume = window.aggressive_buy_volume + window.aggressive_sell_volume;
-    //     
-    //     if total_aggressive_volume < self.min_volume_threshold {
-    //         return None;
-    //     }
-    //     
-    //     let buy_ratio = window.aggressive_buy_volume / total_aggressive_volume;
-    //     let sell_ratio = window.aggressive_sell_volume / total_aggressive_volume;
-    //     
-    //     // 检测强烈看涨信号 (主动买压过大)
-    //     if buy_ratio > self.imbalance_threshold && 
-    //        window.ask_replenish_volume < window.aggressive_buy_volume * 0.5 {
-    //         return Some(LiquidityImbalance {
-    //             timestamp: window.start_time,
-    //             imbalance_type: "bullish".to_string(),
-    //             imbalance_ratio: buy_ratio,
-    //             consumed_volume: window.aggressive_buy_volume,
-    //             price_level: 0.0, // 需要从上下文获取
-    //         });
-    //     }
-    //     
-    //     // 检测强烈看跌信号 (主动卖压过大)
-    //     if sell_ratio > self.imbalance_threshold && 
-    //        window.bid_replenish_volume < window.aggressive_sell_volume * 0.5 {
-    //         return Some(LiquidityImbalance {
-    //             timestamp: window.start_time,
-    //             imbalance_type: "bearish".to_string(),
-    //             imbalance_ratio: sell_ratio,
-    //             consumed_volume: window.aggressive_sell_volume,
-    //             price_level: 0.0, // 需要从上下文获取
-    //         });
-    //     }
-    //     
-    //     None
-    // }
     
     // 冰山订单检测
     fn detect_iceberg_order(&mut self,
@@ -809,6 +784,16 @@ impl MarketMicrostructureAnalyzer {
                 iceberg.replenish_count >= self.iceberg_replenish_threshold
             })
             .collect()
+    }
+    
+    // 新增：获取当前挂单量比率
+    fn get_current_orderbook_ratio(&self) -> (f64, f64) {
+        (self.current_bid_ratio, self.current_ask_ratio)
+    }
+    
+    // 新增：获取当前失衡信号
+    fn get_current_imbalance_signal(&self) -> Option<&LiquidityImbalance> {
+        self.current_imbalance_signal.as_ref()
     }
 }
 
