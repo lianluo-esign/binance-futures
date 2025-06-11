@@ -108,6 +108,15 @@ struct MarketMicrostructureAnalyzer {
     current_bid_ratio: f64,
     current_ask_ratio: f64,
     current_imbalance_signal: Option<LiquidityImbalance>,
+    
+    // 新增：最近1秒失衡信号统计
+    recent_imbalance_signals: Vec<LiquidityImbalance>,  // 最近1秒内的失衡信号
+    imbalance_window_ms: u64,                          // 失衡信号统计窗口（毫秒）
+    bullish_threshold: f64,                            // 多头信号阈值（默认0.8 = 80%）
+    bearish_threshold: f64,                            // 空头信号阈值（默认0.8 = 80%）
+    last_trend_signal: Option<String>,                 // 最后的趋势信号（"bullish" 或 "bearish"）
+    trend_signal_timestamp: Option<u64>,               // 趋势信号的时间戳
+    trend_signal_duration_ms: u64,                     // 趋势信号显示持续时间（毫秒）
 }
 
 
@@ -232,33 +241,32 @@ impl OrderBookData {
             self.last_trade_side = Some(side.to_string());
             self.update_current_price(price);
             
-            // 直接在这里清理不合理的挂单数据
-            self.clear_unreasonable_orders(price, side);
+
             
             // 获取当前最佳买卖价和挂单量
             let (best_bid, best_ask) = self.get_best_bid_ask();
             let (bid_volume, ask_volume) = self.get_best_volumes();
             
             // 检测流动性失衡
-            if let Some(imbalance) = self.microstructure_analyzer.detect_liquidity_imbalance(
+            if let Some(_imbalance) = self.microstructure_analyzer.detect_liquidity_imbalance(
                 best_bid, best_ask, bid_volume, ask_volume, price, qty_f64, side
             ) {
-                // println!("🚨 流动性失衡检测: {:?}", imbalance);
+                // println!("🚨 流动性失衡检测: {:?}", _imbalance);
             }
             
             // 检测冰山订单
-            if let Some(iceberg) = self.microstructure_analyzer.detect_iceberg_order(
+            if let Some(_iceberg) = self.microstructure_analyzer.detect_iceberg_order(
                 best_bid, best_ask, bid_volume, ask_volume, qty_f64, side
             ) {
-                // println!("🧊 冰山订单检测: {:?}", iceberg);
+                // println!("🧊 冰山订单检测: {:?}", _iceberg);
             }
             
             // 检测订单动能
             if let (Some(best_bid_price), Some(best_ask_price)) = (best_bid, best_ask) {
-                if let Some(momentum) = self.microstructure_analyzer.detect_order_momentum(
+                if let Some(_momentum) = self.microstructure_analyzer.detect_order_momentum(
                     price, qty_f64, side, best_bid_price, best_ask_price, bid_volume, ask_volume
                 ) {
-                    // println!("⚡ 订单动能检测: {:?}", momentum);
+                    // println!("⚡ 订单动能检测: {:?}", _momentum);
                 }
             }
             
@@ -476,6 +484,9 @@ impl OrderBookData {
         
         self.clean_old_trades();
         self.clean_old_cancels();
+        
+        // 自动清理不合理的挂单数据
+        self.auto_clean_unreasonable_orders();
     }
     
     // 使用 BTreeMap 的优势 - O(log n) 时间复杂度获取最佳买价
@@ -493,6 +504,66 @@ impl OrderBookData {
             .iter()  // 从低到高遍历
             .find(|(_, level)| level.ask > 0.0)
             .map(|(price, _)| price.into_inner())
+    }
+    
+    // 自动清理不合理的挂单数据
+    fn auto_clean_unreasonable_orders(&mut self) {
+        let best_bid = self.get_best_bid();
+        let best_ask = self.get_best_ask();
+        
+        // 如果没有最佳买价或卖价，则不进行清理
+        if best_bid.is_none() || best_ask.is_none() {
+            return;
+        }
+        
+        let best_bid_price = best_bid.unwrap();
+        let best_ask_price = best_ask.unwrap();
+        
+        // 收集需要清理的价格
+        let mut prices_to_clean = Vec::new();
+        
+        for (price, level) in &self.price_levels {
+            let price_val = price.into_inner();
+            
+            // 检查买单挂单：价格大于best_bid的买单挂单需要清理（不合理）
+            if level.bid > 0.0 && price_val > best_bid_price {
+                prices_to_clean.push((price_val, "bid"));
+            }
+            
+            // 检查卖单挂单：价格小于best_ask的卖单挂单需要清理（不合理）
+            if level.ask > 0.0 && price_val < best_ask_price {
+                prices_to_clean.push((price_val, "ask"));
+            }
+        }
+        
+        // 执行清理
+        let mut cleaned_count = 0;
+        for (price, side) in prices_to_clean {
+            let price_ordered = OrderedFloat(price);
+            if let Some(level) = self.price_levels.get_mut(&price_ordered) {
+                match side {
+                    "bid" => {
+                        if level.bid > 0.0 {
+                            level.bid = 0.0;
+                            cleaned_count += 1;
+                        }
+                    },
+                    "ask" => {
+                        if level.ask > 0.0 {
+                            level.ask = 0.0;
+                            cleaned_count += 1;
+                        }
+                    },
+                    _ => {}
+                }
+            }
+        }
+        
+        // // 调试信息：打印清理统计
+        // if cleaned_count > 0 {
+        //     eprintln!("清理了 {} 个不合理挂单，best_bid: {:.2}, best_ask: {:.2}", 
+        //              cleaned_count, best_bid_price, best_ask_price);
+        // }
     }
     
     // 获取最佳买卖价
@@ -538,7 +609,7 @@ impl OrderBookData {
     }
     
     // 获取市场信号摘要
-    fn get_market_signals(&self) -> String {
+    fn get_market_signals(&mut self) -> String {
         let mut signals = Vec::new();
         
         // 第一行：实时挂单量比率色条
@@ -582,6 +653,16 @@ impl OrderBookData {
                 format!("🔴Imbalance Sell Signal (ASK{}%)", ask_percentage)
             };
             signals.push(signal_text);
+        }
+        
+        // 第三行：最近1秒趋势信号（如果有）
+        if let Some(trend_signal) = self.microstructure_analyzer.get_trend_signal() {
+            let trend_text = if trend_signal == "bullish" {
+                "\x1b[32m📈 1秒趋势: 多头信号 (80%+)\x1b[0m".to_string()  // 绿色
+            } else {
+                "\x1b[31m📉 1秒趋势: 空头信号 (80%+)\x1b[0m".to_string()  // 红色
+            };
+            signals.push(trend_text);
         }
         
         // 添加其他信号（冰山订单等）
@@ -637,6 +718,13 @@ impl MarketMicrostructureAnalyzer {
             current_bid_ratio: 0.5,
             current_ask_ratio: 0.5,
             current_imbalance_signal: None,
+            recent_imbalance_signals: Vec::new(),
+            imbalance_window_ms: 1000,  // 1秒窗口
+            bullish_threshold: 0.8,     // 80%阈值
+            bearish_threshold: 0.8,     // 80%阈值
+            last_trend_signal: None,
+            trend_signal_timestamp: None,
+            trend_signal_duration_ms: 5000,  // 5秒显示时间
         }
     }
     
@@ -646,9 +734,9 @@ impl MarketMicrostructureAnalyzer {
         best_ask: Option<f64>,
         bid_volume: f64,
         ask_volume: f64,
-        trade_price: f64,
+        _trade_price: f64,
         trade_volume: f64,
-        trade_side: &str) -> Option<LiquidityImbalance> {
+        _trade_side: &str) -> Option<LiquidityImbalance> {
         
         let current_time = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -703,7 +791,16 @@ impl MarketMicrostructureAnalyzer {
             if self.detected_imbalances.len() > 10 {
                 self.detected_imbalances.remove(0);
             }
+            
+            // 添加到最近1秒失衡信号统计
+            self.recent_imbalance_signals.push(imbalance.clone());
         }
+        
+        // 清理超过时间窗口的失衡信号
+        self.clean_old_imbalance_signals(current_time);
+        
+        // 分析最近1秒内的失衡趋势
+        self.analyze_imbalance_trend();
         
         imbalance_detected
     }
@@ -847,6 +944,68 @@ impl MarketMicrostructureAnalyzer {
     // 新增：获取当前失衡信号
     fn get_current_imbalance_signal(&self) -> Option<&LiquidityImbalance> {
         self.current_imbalance_signal.as_ref()
+    }
+    
+    // 清理超过时间窗口的失衡信号
+    fn clean_old_imbalance_signals(&mut self, current_time: u64) {
+        self.recent_imbalance_signals.retain(|signal| {
+            current_time - signal.timestamp <= self.imbalance_window_ms
+        });
+    }
+    
+    // 分析最近1秒内的失衡趋势
+    fn analyze_imbalance_trend(&mut self) {
+        if self.recent_imbalance_signals.is_empty() {
+            return;
+        }
+        
+        let total_signals = self.recent_imbalance_signals.len();
+        let bullish_count = self.recent_imbalance_signals.iter()
+            .filter(|signal| signal.imbalance_type == "bullish")
+            .count();
+        let bearish_count = total_signals - bullish_count;
+        
+        let bullish_ratio = bullish_count as f64 / total_signals as f64;
+        let bearish_ratio = bearish_count as f64 / total_signals as f64;
+        
+        // 判断是否达到80%阈值
+        let current_time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+            
+        if bullish_ratio >= self.bullish_threshold {
+            if self.last_trend_signal.as_ref() != Some(&"bullish".to_string()) {
+                self.trend_signal_timestamp = Some(current_time);
+            }
+            self.last_trend_signal = Some("bullish".to_string());
+        } else if bearish_ratio >= self.bearish_threshold {
+            if self.last_trend_signal.as_ref() != Some(&"bearish".to_string()) {
+                self.trend_signal_timestamp = Some(current_time);
+            }
+            self.last_trend_signal = Some("bearish".to_string());
+        }
+    }
+    
+    // 获取最近的趋势信号（检查5秒过期）
+    fn get_trend_signal(&mut self) -> Option<String> {
+        if let (Some(_), Some(timestamp)) = (&self.last_trend_signal, self.trend_signal_timestamp) {
+            let current_time = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64;
+                
+            // 检查信号是否已过期（5秒）
+            if current_time - timestamp > self.trend_signal_duration_ms {
+                self.last_trend_signal = None;
+                self.trend_signal_timestamp = None;
+                return None;
+            }
+            
+            self.last_trend_signal.clone()
+        } else {
+            None
+        }
     }
     
     // 订单动能检测 - 监控主动订单对被动订单的瞬时消耗
@@ -1129,12 +1288,19 @@ fn ui(f: &mut Frame, app: &mut App) {
             let best_bid = orderbook.get_best_bid();
             let best_ask = orderbook.get_best_ask();
             
-            // 获取所有价格并排序，过滤掉挂单量为0的层级
-            // BTreeMap 已经是有序的，我们只需要过滤和收集
+            // 获取所有价格并排序，只显示合理的价位
+            // 买单：价格 <= best_bid，卖单：价格 >= best_ask
             let filtered_prices: Vec<f64> = orderbook
                 .price_levels
                 .iter()
-                .filter(|(_, level)| level.ask > 0.0 || level.bid > 0.0)
+                .filter(|(price, level)| {
+                    let price_val = price.into_inner();
+                    let has_valid_bid = level.bid > 0.0 && 
+                        best_bid.map_or(false, |bb| price_val <= bb);
+                    let has_valid_ask = level.ask > 0.0 && 
+                        best_ask.map_or(false, |ba| price_val >= ba);
+                    has_valid_bid || has_valid_ask
+                })
                 .map(|(price, _)| price.into_inner())
                 .collect();
             
@@ -1165,32 +1331,16 @@ fn ui(f: &mut Frame, app: &mut App) {
                 let is_at_best_bid = best_bid.map_or(false, |bb| (price - bb).abs() < 0.000001);
                 let is_at_best_ask = best_ask.map_or(false, |ba| (price - ba).abs() < 0.000001);
                 
-                // Bid挂单显示逻辑
+                // Bid挂单显示逻辑：直接显示买单挂单量（过滤已在上层完成）
                 let bid_str = if bid_vol > 0.0 {
-                    if is_at_best_bid {
-                        format!("{:.3}", bid_vol)
-                    } else if is_at_best_ask {
-                        String::new()
-                    } else if *price <= current_price {
-                        format!("{:.3}", bid_vol)
-                    } else {
-                        String::new()
-                    }
+                    format!("{:.3}", bid_vol)
                 } else { 
                     String::new() 
                 };
                 
-                // Ask挂单显示逻辑
+                // Ask挂单显示逻辑：直接显示卖单挂单量（过滤已在上层完成）
                 let ask_str = if ask_vol > 0.0 {
-                    if is_at_best_ask {
-                        format!("{:.3}", ask_vol)
-                    } else if is_at_best_bid {
-                        String::new()
-                    } else if *price >= current_price {
-                        format!("{:.3}", ask_vol)
-                    } else {
-                        String::new()
-                    }
+                    format!("{:.3}", ask_vol)
                 } else { 
                     String::new() 
                 };
@@ -1208,31 +1358,15 @@ fn ui(f: &mut Frame, app: &mut App) {
                     String::new() 
                 };
                 
-                // 撤单量显示逻辑：遵循与挂单相同的逻辑
+                // 撤单量显示逻辑：直接显示撤单量（过滤已在上层完成）
                 let bid_cancel_str = if bid_cancel_vol > 0.0 {
-                    if is_at_best_bid {
-                        format!("-{:.3}", bid_cancel_vol)
-                    } else if is_at_best_ask {
-                        String::new()
-                    } else if *price <= current_price {
-                        format!("-{:.3}", bid_cancel_vol)
-                    } else {
-                        String::new()
-                    }
+                    format!("-{:.3}", bid_cancel_vol)
                 } else { 
                     String::new() 
                 };
                 
                 let ask_cancel_str = if ask_cancel_vol > 0.0 {
-                    if is_at_best_ask {
-                        format!("-{:.3}", ask_cancel_vol)
-                    } else if is_at_best_bid {
-                        String::new()
-                    } else if *price >= current_price {
-                        format!("-{:.3}", ask_cancel_vol)
-                    } else {
-                        String::new()
-                    }
+                    format!("-{:.3}", ask_cancel_vol)
                 } else { 
                     String::new() 
                 };
@@ -1310,7 +1444,7 @@ fn ui(f: &mut Frame, app: &mut App) {
 // 渲染订单簿失衡信号
 fn render_orderbook_imbalance(f: &mut Frame, app: &mut App, area: Rect) {
     let signals = {
-        let orderbook = app.orderbook.lock();
+        let mut orderbook = app.orderbook.lock();
         orderbook.get_market_signals()
     };
     
