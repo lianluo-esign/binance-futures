@@ -884,6 +884,20 @@ fn ui(f: &mut Frame, app: &mut App) {
     let orderbook_area = horizontal_chunks[0];
     let signal_area = horizontal_chunks[1];
     
+    // 将右侧信号区域分为三个垂直部分
+    let signal_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage(40), // Orderbook Imbalance 占40%
+            Constraint::Percentage(30), // Order Momentum 占30%
+            Constraint::Percentage(30), // Iceberg Orders 占30%
+        ])
+        .split(signal_area);
+    
+    let imbalance_area = signal_chunks[0];
+    let momentum_area = signal_chunks[1];
+    let iceberg_area = signal_chunks[2];
+    
     // 计算订单薄表格区域
     let table_width = orderbook_area.width.saturating_sub(2);
     let table_height = orderbook_area.height.saturating_sub(2);
@@ -1083,23 +1097,81 @@ fn ui(f: &mut Frame, app: &mut App) {
     
     f.render_widget(table, centered_area);
     
-    // 右侧市场信号显示区域
+    // 渲染三个信号区域
+    render_orderbook_imbalance(f, app, imbalance_area);
+    render_order_momentum(f, app, momentum_area);
+    render_iceberg_orders(f, app, iceberg_area);
+}
+
+// 渲染订单簿失衡信号
+fn render_orderbook_imbalance(f: &mut Frame, app: &mut App, area: Rect) {
     let signals = {
         let orderbook = app.orderbook.lock();
         orderbook.get_market_signals()
     };
     
-    let signal_block = Block::default()
-        .title("Micro Market Signals")
+    let block = Block::default()
+        .title("📊 Orderbook Imbalance")
         .borders(Borders::ALL)
-        .style(Style::default().fg(Color::Yellow));
+        .style(Style::default().fg(Color::Green));
     
-    let signal_paragraph = Paragraph::new(signals)
-        .block(signal_block)
+    let paragraph = Paragraph::new(signals)
+        .block(block)
         .style(Style::default().fg(Color::White))
         .wrap(Wrap { trim: true });
     
-    f.render_widget(signal_paragraph, signal_area);
+    f.render_widget(paragraph, area);
+}
+
+// 渲染订单动能信号（占位符）
+fn render_order_momentum(f: &mut Frame, app: &mut App, area: Rect) {
+    let block = Block::default()
+        .title("⚡ Order Momentum")
+        .borders(Borders::ALL)
+        .style(Style::default().fg(Color::Blue));
+    
+    let paragraph = Paragraph::new("功能开发中...\n\n将显示：\n• 订单流向分析\n• 动量指标\n• 成交量加权价格")
+        .block(block)
+        .style(Style::default().fg(Color::Gray))
+        .wrap(Wrap { trim: true });
+    
+    f.render_widget(paragraph, area);
+}
+
+// 渲染冰山订单信号（占位符）
+fn render_iceberg_orders(f: &mut Frame, app: &mut App, area: Rect) {
+    let signals = {
+        let orderbook = app.orderbook.lock();
+        let icebergs = orderbook.microstructure_analyzer.get_current_iceberg_signals();
+        
+        if icebergs.is_empty() {
+            "暂无冰山订单检测".to_string()
+        } else {
+            icebergs.iter()
+                .map(|iceberg| {
+                    format!(
+                        "🧊{}冰山 {:.2} ({}次补充)",
+                        if iceberg.side == "bid" { "买盘" } else { "卖盘" },
+                        iceberg.accumulated_volume,
+                        iceberg.replenish_count
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+    };
+    
+    let block = Block::default()
+        .title("🧊 Iceberg Orders")
+        .borders(Borders::ALL)
+        .style(Style::default().fg(Color::Cyan));
+    
+    let paragraph = Paragraph::new(signals)
+        .block(block)
+        .style(Style::default().fg(Color::White))
+        .wrap(Wrap { trim: true });
+    
+    f.render_widget(paragraph, area);
 }
 
 // WebSocket消息处理 - 修改为接受symbol参数
