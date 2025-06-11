@@ -36,6 +36,30 @@ struct LiquidityImbalance {
     // price_level: f64,        // 发生失衡的价格
 }
 
+// 订单动能检测结构
+#[derive(Debug, Clone)]
+struct OrderMomentum {
+    timestamp: u64,
+    momentum_type: String,   // "buy", "sell", "buy_positive", "sell_positive"
+    trade_volume: f64,       // 主动订单成交量
+    liquidity_consumed: f64, // 被动订单消耗量
+    consumption_ratio: f64,  // 消耗比例
+    signal_strength: f64,    // 信号强度
+}
+
+// Tick数据结构
+#[derive(Debug, Clone)]
+struct TickData {
+    timestamp: u64,
+    trade_price: f64,
+    trade_volume: f64,
+    trade_side: String,      // "buy" or "sell"
+    best_bid: f64,
+    best_ask: f64,
+    bid_volume: f64,
+    ask_volume: f64,
+}
+
 // 冰山订单检测结构
 #[derive(Debug, Clone)]
 struct IcebergOrder {
@@ -58,11 +82,23 @@ struct MarketMicrostructureAnalyzer {
     iceberg_replenish_threshold: u32,   // 冰山订单补充次数阈值
     iceberg_window_ms: u64,             // 冰山订单检测窗口
     
+    // 订单动能检测参数
+    momentum_consumption_threshold: f64, // 流动性消耗阈值 (默认 0.95 = 95%)
+    momentum_window_size: usize,        // Tick窗口大小 (默认 2)
+    momentum_order_size_threshold: f64, // 订单大小阈值 (默认 1.0)
+    
     // 状态跟踪
     last_best_bid: Option<f64>,
     last_best_ask: Option<f64>,
     last_bid_volume: f64,
     last_ask_volume: f64,
+    
+    // 订单动能状态跟踪
+    tick_history: Vec<TickData>,        // 最近的Tick数据
+    momentum_signals: Vec<OrderMomentum>, // 动能信号历史
+    current_momentum_signal: Option<OrderMomentum>, // 当前动能信号
+    consecutive_buy_count: u32,         // 连续买单计数
+    consecutive_sell_count: u32,        // 连续卖单计数
     
     // 检测结果存储
     detected_imbalances: Vec<LiquidityImbalance>,
@@ -217,6 +253,15 @@ impl OrderBookData {
                 // println!("🧊 冰山订单检测: {:?}", iceberg);
             }
             
+            // 检测订单动能
+            if let (Some(best_bid_price), Some(best_ask_price)) = (best_bid, best_ask) {
+                if let Some(momentum) = self.microstructure_analyzer.detect_order_momentum(
+                    price, qty_f64, side, best_bid_price, best_ask_price, bid_volume, ask_volume
+                ) {
+                    // println!("⚡ 订单动能检测: {:?}", momentum);
+                }
+            }
+            
             let current_time = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
@@ -293,7 +338,7 @@ impl OrderBookData {
             .as_millis() as u64;
         
         // 删除超过显示时间的撤单记录
-        self.cancel_records.retain(|_, cancel| {
+        self.cancel_records.retain(|_, cancel: &mut CancelRecord| {
             current_time - cancel.timestamp <= self.cancel_display_duration
         });
         
@@ -575,10 +620,18 @@ impl MarketMicrostructureAnalyzer {
             iceberg_volume_ratio,
             iceberg_replenish_threshold,
             iceberg_window_ms,
+            momentum_consumption_threshold: 0.95,
+            momentum_window_size: 2,
+            momentum_order_size_threshold: 1.0,
             last_best_bid: None,
             last_best_ask: None,
             last_bid_volume: 0.0,
             last_ask_volume: 0.0,
+            tick_history: Vec::new(),
+            momentum_signals: Vec::new(),
+            current_momentum_signal: None,
+            consecutive_buy_count: 0,
+            consecutive_sell_count: 0,
             detected_imbalances: Vec::new(),
             detected_icebergs: Vec::new(),
             current_bid_ratio: 0.5,
@@ -794,6 +847,157 @@ impl MarketMicrostructureAnalyzer {
     // 新增：获取当前失衡信号
     fn get_current_imbalance_signal(&self) -> Option<&LiquidityImbalance> {
         self.current_imbalance_signal.as_ref()
+    }
+    
+    // 订单动能检测 - 监控主动订单对被动订单的瞬时消耗
+    fn detect_order_momentum(&mut self, 
+        trade_price: f64,
+        trade_volume: f64,
+        trade_side: &str,
+        best_bid: f64,
+        best_ask: f64,
+        bid_volume: f64,
+        ask_volume: f64) -> Option<OrderMomentum> {
+        
+        let current_time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        
+        // 创建当前tick数据
+        let current_tick = TickData {
+            timestamp: current_time,
+            trade_price,
+            trade_volume,
+            trade_side: trade_side.to_string(),
+            best_bid,
+            best_ask,
+            bid_volume,
+            ask_volume,
+        };
+        
+        // 添加到历史记录
+        self.tick_history.push(current_tick.clone());
+        
+        // 保持窗口大小
+        if self.tick_history.len() > self.momentum_window_size {
+            self.tick_history.remove(0);
+        }
+        
+        // 需要至少2个tick才能进行分析
+        if self.tick_history.len() < 2 {
+            return None;
+        }
+        
+        let previous_tick = &self.tick_history[self.tick_history.len() - 2];
+        let current_tick = &self.tick_history[self.tick_history.len() - 1];
+        
+        let mut momentum_detected = None;
+        
+        match current_tick.trade_side.as_str() {
+            "buy" => {
+                // 主动买单，检查best ask的流动性消耗
+                if previous_tick.ask_volume > 0.0 {
+                    let consumption_ratio = 1.0 - (current_tick.ask_volume / previous_tick.ask_volume);
+                    
+                    if consumption_ratio >= self.momentum_consumption_threshold && current_tick.trade_volume >= self.momentum_order_size_threshold {
+                        // 检测到买单冲击
+                        self.consecutive_buy_count += 1;
+                        self.consecutive_sell_count = 0;
+                        
+                        let momentum_type = if self.consecutive_buy_count >= 2 {
+                            "buy_positive".to_string()
+                        } else {
+                            "buy".to_string()
+                        };
+                        
+                        momentum_detected = Some(OrderMomentum {
+                            timestamp: current_time,
+                            momentum_type,
+                            trade_volume: current_tick.trade_volume,
+                            liquidity_consumed: previous_tick.ask_volume - current_tick.ask_volume,
+                            consumption_ratio,
+                            signal_strength: consumption_ratio,
+                        });
+                    }
+                }
+            },
+            "sell" => {
+                // 主动卖单，检查best bid的流动性消耗
+                if previous_tick.bid_volume > 0.0 {
+                    let consumption_ratio = 1.0 - (current_tick.bid_volume / previous_tick.bid_volume);
+                    
+                    if consumption_ratio >= self.momentum_consumption_threshold && current_tick.trade_volume >= self.momentum_order_size_threshold {
+                        // 检测到卖单冲击
+                        self.consecutive_sell_count += 1;
+                        self.consecutive_buy_count = 0;
+                        
+                        let momentum_type = if self.consecutive_sell_count >= 2 {
+                            "sell_positive".to_string()
+                        } else {
+                            "sell".to_string()
+                        };
+                        
+                        momentum_detected = Some(OrderMomentum {
+                            timestamp: current_time,
+                            momentum_type,
+                            trade_volume: current_tick.trade_volume,
+                            liquidity_consumed: previous_tick.bid_volume - current_tick.bid_volume,
+                            consumption_ratio,
+                            signal_strength: consumption_ratio,
+                        });
+                    }
+                }
+            },
+            _ => {}
+        }
+        
+        // 更新当前动能信号
+        self.current_momentum_signal = momentum_detected.clone();
+        
+        // 如果检测到动能，添加到历史记录
+        if let Some(ref momentum) = momentum_detected {
+            self.momentum_signals.push(momentum.clone());
+            
+            // 限制历史记录数量
+            if self.momentum_signals.len() > 20 {
+                self.momentum_signals.remove(0);
+            }
+        }
+        
+        momentum_detected
+    }
+    
+    // 获取当前动能信号 - 3秒后自动消失
+    fn get_current_momentum_signal(&self) -> Option<&OrderMomentum> {
+        if let Some(ref signal) = self.current_momentum_signal {
+            let current_time = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64;
+            
+            // 检查信号是否超过3秒（3000毫秒）
+            if current_time - signal.timestamp <= 3000 {
+                Some(signal)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+    
+    // 获取最近的动能信号
+    fn get_recent_momentum_signals(&self) -> Vec<&OrderMomentum> {
+        let current_time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        
+        self.momentum_signals
+            .iter()
+            .filter(|momentum| current_time - momentum.timestamp < 10000) // 10秒内的信号
+            .collect()
     }
 }
 
@@ -1125,14 +1329,58 @@ fn render_orderbook_imbalance(f: &mut Frame, app: &mut App, area: Rect) {
 
 // 渲染订单动能信号（占位符）
 fn render_order_momentum(f: &mut Frame, app: &mut App, area: Rect) {
+    let signals = {
+        let orderbook = app.orderbook.lock();
+        let current_momentum = orderbook.microstructure_analyzer.get_current_momentum_signal();
+        let recent_signals = orderbook.microstructure_analyzer.get_recent_momentum_signals();
+        
+        let mut signal_lines = Vec::new();
+        
+        // 显示当前动能信号（3秒内有效）
+        if let Some(momentum) = current_momentum {
+            let signal_text = match momentum.momentum_type.as_str() {
+                "buy" => format!("🟢 Buy Orders({:.2}) Momentum", momentum.trade_volume),
+                "sell" => format!("🔴 Sell Orders({:.2}) Momentum", momentum.trade_volume),
+                "buy_positive" => format!("🟢🟢 Buy Positive Momentum ({:.2})", momentum.trade_volume),
+                "sell_positive" => format!("🔴🔴 Sell Positive Momentum ({:.2})", momentum.trade_volume),
+                _ => format!("⚡ Unknown Momentum"),
+            };
+            
+            signal_lines.push(signal_text);
+            signal_lines.push(format!("消耗比例: {:.1}%", momentum.consumption_ratio * 100.0));
+            signal_lines.push(format!("流动性消耗: {:.2}", momentum.liquidity_consumed));
+        }
+        
+        // 显示历史信号（每个信号换行显示）
+        if !recent_signals.is_empty() {
+            if !signal_lines.is_empty() {
+                signal_lines.push("".to_string());
+            }
+            
+            // 显示最近的5个信号，每个信号一行
+            for signal in recent_signals.iter().rev().take(5) {
+                let signal_text = match signal.momentum_type.as_str() {
+                    "buy" => format!("🟢 买单冲击 ({:.2})", signal.trade_volume),
+                    "sell" => format!("🔴 卖单冲击 ({:.2})", signal.trade_volume),
+                    "buy_positive" => format!("🟢🟢 买单积极 ({:.2})", signal.trade_volume),
+                    "sell_positive" => format!("🔴🔴 卖单积极 ({:.2})", signal.trade_volume),
+                    _ => format!("⚡ 未知信号 ({:.2})", signal.trade_volume),
+                };
+                signal_lines.push(signal_text);
+            }
+        }
+        
+        signal_lines.join("\n")
+    };
+    
     let block = Block::default()
         .title("⚡ Order Momentum")
         .borders(Borders::ALL)
         .style(Style::default().fg(Color::Blue));
     
-    let paragraph = Paragraph::new("功能开发中...\n\n将显示：\n• 订单流向分析\n• 动量指标\n• 成交量加权价格")
+    let paragraph = Paragraph::new(signals)
         .block(block)
-        .style(Style::default().fg(Color::Gray))
+        .style(Style::default().fg(Color::White))
         .wrap(Wrap { trim: true });
     
     f.render_widget(paragraph, area);
