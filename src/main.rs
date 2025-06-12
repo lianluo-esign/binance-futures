@@ -16,7 +16,7 @@ use ratatui::{
 };
 use serde_json::Value;
 use std::{
-    collections::BTreeMap,
+    collections::{ BTreeMap, HashMap},
     env,  // 新增：用于读取环境变量
     io,
     sync::Arc,
@@ -26,102 +26,6 @@ use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 use url::Url;
 // 新增：引入reqwest用于HTTP请求
 use reqwest;
-
-// 注释掉市场微观结构分析相关的数据结构
-/*
-// 流动性失衡检测结构
-#[derive(Debug, Clone)]
-struct LiquidityImbalance {
-    timestamp: u64,
-    imbalance_type: String,  // "bullish" or "bearish"
-    imbalance_ratio: f64,    // 失衡百分比
-    consumed_volume: f64,    // 消耗的流动性量
-    // price_level: f64,        // 发生失衡的价格
-}
-
-// 订单动能检测结构
-#[derive(Debug, Clone)]
-struct OrderMomentum {
-    timestamp: u64,
-    momentum_type: String,   // "buy", "sell", "buy_positive", "sell_positive"
-    trade_volume: f64,       // 主动订单成交量
-    liquidity_consumed: f64, // 被动订单消耗量
-    consumption_ratio: f64,  // 消耗比例
-    signal_strength: f64,    // 信号强度
-}
-
-// Tick数据结构
-#[derive(Debug, Clone)]
-struct TickData {
-    timestamp: u64,
-    trade_price: f64,
-    trade_volume: f64,
-    trade_side: String,      // "buy" or "sell"
-    best_bid: f64,
-    best_ask: f64,
-    bid_volume: f64,
-    ask_volume: f64,
-}
-
-// 冰山订单检测结构
-#[derive(Debug, Clone)]
-struct IcebergOrder {
-    timestamp: u64,
-    side: String,            // "bid" or "ask"
-    price: f64,
-    accumulated_volume: f64, // 累积的冰山订单量
-    replenish_count: u32,    // 补充次数
-    signal_strength: f64,    // 信号强度
-}
-
-// 市场微观结构分析器
-struct MarketMicrostructureAnalyzer {
-    // 流动性失衡检测参数
-    imbalance_threshold: f64,           // 失衡阈值 (默认 0.7 = 70%)
-    min_volume_threshold: f64,          // 最小成交量阈值
-    
-    // 冰山订单检测参数
-    iceberg_volume_ratio: f64,          // 冰山订单量比例阈值
-    iceberg_replenish_threshold: u32,   // 冰山订单补充次数阈值
-    iceberg_window_ms: u64,             // 冰山订单检测窗口
-    
-    // 订单动能检测参数
-    momentum_consumption_threshold: f64, // 流动性消耗阈值 (默认 0.95 = 95%)
-    momentum_window_size: usize,        // Tick窗口大小 (默认 2)
-    momentum_order_size_threshold: f64, // 订单大小阈值 (默认 1.0)
-    
-    // 状态跟踪
-    last_best_bid: Option<f64>,
-    last_best_ask: Option<f64>,
-    last_bid_volume: f64,
-    last_ask_volume: f64,
-    
-    // 订单动能状态跟踪
-    tick_history: Vec<TickData>,        // 最近的Tick数据
-    momentum_signals: Vec<OrderMomentum>, // 动能信号历史
-    current_momentum_signal: Option<OrderMomentum>, // 当前动能信号
-    consecutive_buy_count: u32,         // 连续买单计数
-    consecutive_sell_count: u32,        // 连续卖单计数
-    
-    // 检测结果存储
-    detected_imbalances: Vec<LiquidityImbalance>,
-    detected_icebergs: Vec<IcebergOrder>,
-    
-    // 新增：当前挂单量比率状态
-    current_bid_ratio: f64,
-    current_ask_ratio: f64,
-    current_imbalance_signal: Option<LiquidityImbalance>,
-    
-    // 新增：最近1秒失衡信号统计
-    recent_imbalance_signals: Vec<LiquidityImbalance>,  // 最近1秒内的失衡信号
-    imbalance_window_ms: u64,                          // 失衡信号统计窗口（毫秒）
-    bullish_threshold: f64,                            // 多头信号阈值（默认0.8 = 80%）
-    bearish_threshold: f64,                            // 空头信号阈值（默认0.8 = 80%）
-    last_trend_signal: Option<String>,                 // 最后的趋势信号（"bullish" 或 "bearish"）
-    trend_signal_timestamp: Option<u64>,               // 趋势信号的时间戳
-    trend_signal_duration_ms: u64,                     // 趋势信号显示持续时间（毫秒）
-}
-*/
 
 // 订单簿数据结构 - 基础组件
 #[derive(Debug, Clone)]
@@ -220,6 +124,8 @@ struct OrderBookData {
     current_imbalance_type: Option<String>, // 当前失衡类型 "buy" 或 "sell"
     cancel_signals: Vec<ImbalanceSignal>, // 撤单信号列表，复用ImbalanceSignal结构体
     last_cancel_check: u64,              // 上次检查撤单的时间戳
+
+    active_trades_buffer: HashMap<OrderedFloat<f64>, (f64, f64)>, // 价格 -> (买单成交量, 卖单成交量)
 }
 
 
@@ -233,16 +139,7 @@ impl OrderBookData {
             cancel_display_duration: 5000,
             max_trade_records: 1000,
             max_cancel_records: 500,
-            // 注释掉微观结构分析器初始化
-            /*
-            microstructure_analyzer: MarketMicrostructureAnalyzer::new(
-                0.95,    // imbalance_threshold
-                1.0,    // min_volume_threshold
-                2.0,    // iceberg_volume_ratio
-                3,      // iceberg_replenish_threshold
-                1000,   // iceberg_window_ms
-            ),
-            */
+    
             stable_highlight_price: None,
             stable_highlight_side: None,
             last_trade_price: None,
@@ -265,6 +162,7 @@ impl OrderBookData {
             current_imbalance_type: None,
             cancel_signals: Vec::new(),
             last_cancel_check: 0,
+            active_trades_buffer: HashMap::new(),
         }
     }
 
@@ -316,36 +214,14 @@ impl OrderBookData {
             
             self.last_trade_side = Some(side.to_string());
             self.update_current_price(price);
-            
-            // 注释掉市场微观结构分析调用
-            /*
-            // 获取当前最佳买卖价和挂单量
-            let (best_bid, best_ask) = self.get_best_bid_ask();
-            let (bid_volume, ask_volume) = self.get_best_volumes();
-            
-            // 检测流动性失衡
-            if let Some(_imbalance) = self.microstructure_analyzer.detect_liquidity_imbalance(
-                best_bid, best_ask, bid_volume, ask_volume, price, qty_f64, side
-            ) {
-                // println!("🚨 流动性失衡检测: {:?}", _imbalance);
+
+            // 记录主动成交量，用于撤单计算
+            let entry = self.active_trades_buffer.entry(price_ordered).or_insert((0.0, 0.0));
+            match side {
+                "buy" => entry.0 += qty_f64,  // 买单成交量
+                "sell" => entry.1 += qty_f64, // 卖单成交量
+                _ => {}
             }
-            
-            // 检测冰山订单
-            if let Some(_iceberg) = self.microstructure_analyzer.detect_iceberg_order(
-                best_bid, best_ask, bid_volume, ask_volume, qty_f64, side
-            ) {
-                // println!("🧊 冰山订单检测: {:?}", _iceberg);
-            }
-            
-            // 检测订单动能
-            if let (Some(best_bid_price), Some(best_ask_price)) = (best_bid, best_ask) {
-                if let Some(_momentum) = self.microstructure_analyzer.detect_order_momentum(
-                    price, qty_f64, side, best_bid_price, best_ask_price, bid_volume, ask_volume
-                ) {
-                    // println!("⚡ 订单动能检测: {:?}", _momentum);
-                }
-            }
-            */
             
             let current_time = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -543,15 +419,29 @@ impl OrderBookData {
                         
                         let old_bid = order_flow.bid_ask.bid;
                         
+                        // 在处理bids时
                         if qty_f64 == 0.0 {
                             if order_flow.bid_ask.bid > 0.0 {
-                                cancellations.push((price, "bid".to_string(), order_flow.bid_ask.bid));
+                                // 获取该价格的主动卖单成交量（消耗买单）
+                                let active_sell = self.active_trades_buffer.get(&price_ordered).map_or(0.0, |v| v.1);
+                                // 计算真正的撤单量 = 原挂单量 - 主动成交量
+                                let cancel_volume = (order_flow.bid_ask.bid - active_sell).max(0.0);
+                                if cancel_volume > 0.0 {
+                                    cancellations.push((price, "bid".to_string(), cancel_volume));
+                                }
                             }
                             order_flow.bid_ask.bid = 0.0;
                         } else {
+                            let old_bid = order_flow.bid_ask.bid;
                             order_flow.bid_ask.bid = qty_f64;
                             if old_bid > qty_f64 {
-                                cancellations.push((price, "bid".to_string(), old_bid - qty_f64));
+                                // 获取该价格的主动卖单成交量（消耗买单）
+                                let active_sell = self.active_trades_buffer.get(&price_ordered).map_or(0.0, |v| v.1);
+                                // 计算真正的撤单量 = 挂单减少量 - 主动成交量
+                                let cancel_volume = (old_bid - qty_f64 - active_sell).max(0.0);
+                                if cancel_volume > 0.0 {
+                                    cancellations.push((price, "bid".to_string(), cancel_volume));
+                                }
                             }
                         }
                     }
@@ -615,13 +505,26 @@ impl OrderBookData {
                         
                         if qty_f64 == 0.0 {
                             if order_flow.bid_ask.ask > 0.0 {
-                                cancellations.push((price, "ask".to_string(), order_flow.bid_ask.ask));
+                                // 获取该价格的主动买单成交量（消耗卖单）
+                                let active_buy = self.active_trades_buffer.get(&price_ordered).map_or(0.0, |v| v.0);
+                                // 计算真正的撤单量 = 原挂单量 - 主动成交量
+                                let cancel_volume = (order_flow.bid_ask.ask - active_buy).max(0.0);
+                                if cancel_volume > 0.0 {
+                                    cancellations.push((price, "ask".to_string(), cancel_volume));
+                                }
                             }
                             order_flow.bid_ask.ask = 0.0;
                         } else {
+                            let old_ask = order_flow.bid_ask.ask;
                             order_flow.bid_ask.ask = qty_f64;
                             if old_ask > qty_f64 {
-                                cancellations.push((price, "ask".to_string(), old_ask - qty_f64));
+                                // 获取该价格的主动买单成交量（消耗卖单）
+                                let active_buy = self.active_trades_buffer.get(&price_ordered).map_or(0.0, |v| v.0);
+                                // 计算真正的撤单量 = 挂单减少量 - 主动成交量
+                                let cancel_volume = (old_ask - qty_f64 - active_buy).max(0.0);
+                                if cancel_volume > 0.0 {
+                                    cancellations.push((price, "ask".to_string(), cancel_volume));
+                                }
                             }
                         }
                     }
@@ -633,7 +536,8 @@ impl OrderBookData {
         for (price, side, volume) in cancellations {
             self.detect_cancellation(price, &side, volume);
         }
-        
+        // 清空主动成交缓冲区
+        self.active_trades_buffer.clear();
         self.clean_old_trades();
         self.clean_old_cancels();
         
@@ -817,14 +721,14 @@ impl OrderBookData {
         self.last_imbalance_check = current_time;
         
         // 检测是否有失衡
-        let has_buy_imbalance = self.bid_volume_ratio >= 0.9;
-        let has_sell_imbalance = self.ask_volume_ratio >= 0.9;
+        let has_buy_imbalance = self.bid_volume_ratio >= 0.75;
+        let has_sell_imbalance = self.ask_volume_ratio >= 0.75;
         
         match (has_buy_imbalance, has_sell_imbalance, &self.current_imbalance_type) {
             (true, false, Some(imbalance_type)) if imbalance_type == "buy" => {
                 // 继续买入失衡
                 if let Some(start_time) = self.continuous_imbalance_start {
-                    if current_time - start_time >= 1000 { // 持续1秒
+                    if current_time - start_time >= 300 { // 持续300ms
                         // 添加买入失衡信号
                         self.add_imbalance_signal("buy", self.bid_volume_ratio);
                         // 重置计时器，避免连续触发
@@ -835,7 +739,7 @@ impl OrderBookData {
             (false, true, Some(imbalance_type)) if imbalance_type == "sell" => {
                 // 继续卖出失衡
                 if let Some(start_time) = self.continuous_imbalance_start {
-                    if current_time - start_time >= 1000 { // 持续1秒
+                    if current_time - start_time >= 300 { // 持续300ms
                         // 添加卖出失衡信号
                         self.add_imbalance_signal("sell", self.ask_volume_ratio);
                         // 重置计时器，避免连续触发
@@ -925,120 +829,7 @@ impl OrderBookData {
         
         (bid_volume, ask_volume)
     }
-    
-    // 获取市场信号摘要
-    fn get_market_signals(&mut self) -> String {
-        let mut signals = Vec::new();
-        
-        // 获取买卖盘总量
-        let bid_volume: f64 = self.order_flows.values().map(|of| of.bid_ask.bid).sum();
-        let ask_volume: f64 = self.order_flows.values().map(|of| of.bid_ask.ask).sum();
-        
-        // 计算比率
-        let ratio = if ask_volume > 0.0 { bid_volume / ask_volume } else { 1.0 };
-        let bid_percentage = (bid_volume / (bid_volume + ask_volume) * 100.0) as u32;
-        let ask_percentage = 100 - bid_percentage;
-        
-        // 创建动态字符条显示 - 固定50个字符
-        let total_blocks = 50; // 总字符数量固定为50个
-        
-        // 确保比率总和为1.0，避免浮点数精度问题
-        let normalized_bid_ratio = bid_volume / (bid_volume + ask_volume);
-        let green_blocks = (normalized_bid_ratio * total_blocks as f64).round() as usize;
-        let red_blocks = total_blocks - green_blocks;
-        
-        // 构建字符条：使用不同字符表示买卖盘
-        let bid_bar = "▓".repeat(green_blocks);  // 买盘用深色块
-        let ask_bar = "░".repeat(red_blocks);    // 卖盘用浅色块
-        
-        // 组合显示
-        let char_bar = format!(
-            "[{}{}] BID:{}% ASK:{}%",
-            bid_bar,      // 买盘部分
-            ask_bar,      // 卖盘部分
-            bid_percentage,
-            ask_percentage
-        );
-        
-        signals.push(char_bar);
-        
-        // 基本信息
-        signals.push(format!("当前价格: {:.2}", self.current_price.unwrap_or(0.0)));
-        signals.push(format!("买卖盘比: {:.2}", ratio));
-        signals.push(format!("买盘总量: {:.2}", bid_volume));
-        signals.push(format!("卖盘总量: {:.2}", ask_volume));
-        
-        // 注释掉微观结构信号
-        /*
-        // 第二行：失衡信号（如果有）
-        if let Some(current_signal) = self.microstructure_analyzer.get_current_imbalance_signal() {
-            let signal_text = if current_signal.imbalance_type == "bullish" {
-                format!("🟢Imbalance Buy Signal (BID{}%)", bid_percentage)
-            } else {
-                format!("🔴Imbalance Sell Signal (ASK{}%)", ask_percentage)
-            };
-            signals.push(signal_text);
-        }
-        
-        // 第三行：最近1秒趋势信号（如果有）
-        if let Some(trend_signal) = self.microstructure_analyzer.get_trend_signal() {
-            let trend_text = if trend_signal == "bullish" {
-                "\x1b[32m📈 1秒趋势: 多头信号 (80%+)\x1b[0m".to_string()  // 绿色
-            } else {
-                "\x1b[31m📉 1秒趋势: 空头信号 (80%+)\x1b[0m".to_string()  // 红色
-            };
-            signals.push(trend_text);
-        }
-        
-        // 添加其他信号（冰山订单等）
-        let icebergs = self.microstructure_analyzer.get_current_iceberg_signals();
-        
-        for iceberg in icebergs {
-            signals.push(format!(
-                "🧊{}冰山 {:.2} ({}次补充)",
-                if iceberg.side == "bid" { "买盘" } else { "卖盘" },
-                iceberg.accumulated_volume,
-                iceberg.replenish_count
-            ));
-        }
-        */
-        
-        signals.join("\n")
-    }
-    
-    // 获取显示信号（用于UI）
-    fn get_display_signals(&self) -> String {
-        // 获取买卖盘总量
-        let bid_volume: f64 = self.order_flows.values().map(|of| of.bid_ask.bid).sum();
-        let ask_volume: f64 = self.order_flows.values().map(|of| of.bid_ask.ask).sum();
-        
-        // 计算比率
-        let ratio = if ask_volume > 0.0 { bid_volume / ask_volume } else { 1.0 };
-        
-        // 创建买卖盘比例的可视化表示
-        let max_bar_length = 20;
-        let normalized_ratio = ratio.min(5.0) / 5.0;  // 将比率限制在0-5之间，然后归一化到0-1
-        let bar_length = (normalized_ratio * max_bar_length as f64) as usize;
-        
-        let mut bar = String::new();
-        for _ in 0..bar_length {
-            bar.push('█');
-        }
-        for _ in bar_length..max_bar_length {
-            bar.push('░');
-        }
-        
-        // 基本信息
-        let mut signals = vec![
-            format!("当前价格: {:.2}", self.current_price.unwrap_or(0.0)),
-            format!("买卖盘比: {:.2} | {}", ratio, bar),
-            format!("买盘总量: {:.2}", bid_volume),
-            format!("卖盘总量: {:.2}", ask_volume),
-        ];
-        
-        signals.join("\n")
-    }
-    
+
     // 新增：初始化深度数据的方法
     async fn initialize_depth_data(&mut self, symbol: &str) -> Result<(), Box<dyn std::error::Error>> {
         // 构建请求URL
@@ -1104,13 +895,6 @@ impl OrderBookData {
         Ok(())
     }
 }
-
-// 注释掉MarketMicrostructureAnalyzer实现
-/*
-impl MarketMicrostructureAnalyzer {
-    // ... 实现代码 ...
-}
-*/
 
 // 应用状态
 struct App {
@@ -1263,11 +1047,7 @@ fn ui(f: &mut Frame, app: &mut App) {
                 // 获取撤单量信息
                 let bid_cancel_vol = orderbook.get_cancel_volume(*price, "bid");
                 let ask_cancel_vol = orderbook.get_cancel_volume(*price, "ask");
-                
-                // 判断当前价格是否为best_bid或best_ask
-                // let is_at_best_bid = best_bid.map_or(false, |bb| (price - bb).abs() < 0.000001);
-                // let is_at_best_ask = best_ask.map_or(false, |ba| (price - ba).abs() < 0.000001);
-                
+
                 // Bid挂单显示逻辑：直接显示买单挂单量（过滤已在上层完成）
                 let bid_str = if bid_vol > 0.0 {
                     format!("{:.3}", bid_vol)
@@ -1535,11 +1315,14 @@ fn render_iceberg_orders(f: &mut Frame, app: &mut App, area: Rect) {
 async fn handle_websocket_messages(orderbook: Arc<Mutex<OrderBookData>>, symbol: String) -> Result<(), Box<dyn std::error::Error>> {
     // 将symbol转换为小写用于WebSocket URL
     let symbol_lower = symbol.to_lowercase();
-    
+  
+    let testnet_baseurl = "fstream.binancefuture.com";
+    let live_baseurl = "fstream.binance.com";
+
     // 动态构建WebSocket URL
     let url_string = format!(
-        "wss://fstream.binance.com/stream?streams={}@depth20@100ms/{}@aggTrade",
-        symbol_lower, symbol_lower
+        "wss://{}/stream?streams={}@depth20@100ms/{}@aggTrade",
+        live_baseurl, symbol_lower, symbol_lower
     );
     
     let url = Url::parse(&url_string)?;
