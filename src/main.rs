@@ -84,6 +84,14 @@ struct ImbalanceSignal {
     ratio: f64,         // 占比
 }
 
+// 添加大订单结构体
+#[derive(Debug, Clone)]
+struct BigOrder {
+    order_type: String,  // "buy" 或 "sell"
+    volume: f64,         // 订单量
+    timestamp: u64,      // 时间戳
+}
+
 // 订单簿数据管理 - 使用 BTreeMap<OrderedFloat<f64>, OrderFlow>
 struct OrderBookData {
     // 合并后的数据结构，使用一个BTreeMap共用价格Key
@@ -124,6 +132,12 @@ struct OrderBookData {
     current_imbalance_type: Option<String>, // 当前失衡类型 "buy" 或 "sell"
     cancel_signals: Vec<ImbalanceSignal>, // 撤单信号列表，复用ImbalanceSignal结构体
     last_cancel_check: u64,              // 上次检查撤单的时间戳
+    
+    // 新增：冰山订单信号列表
+    iceberg_signals: Vec<ImbalanceSignal>, // 冰山订单信号列表，复用ImbalanceSignal结构体
+    
+    // 新增：大订单 HashMap，key为价格，value为BigOrder
+    big_orders: HashMap<OrderedFloat<f64>, BigOrder>,
 
     active_trades_buffer: HashMap<OrderedFloat<f64>, (f64, f64)>, // 价格 -> (买单成交量, 卖单成交量)
 }
@@ -163,6 +177,30 @@ impl OrderBookData {
             cancel_signals: Vec::new(),
             last_cancel_check: 0,
             active_trades_buffer: HashMap::new(),
+            // 初始化冰山订单信号列表
+            iceberg_signals: Vec::new(),
+            
+            // 初始化大订单 HashMap
+            big_orders: HashMap::new(),
+        }
+    }
+    
+    // 添加冰山订单信号
+    fn add_iceberg_signal(&mut self, signal_type: &str, volume: f64) {
+        let current_time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or(Duration::from_secs(0))
+            .as_millis() as u64;
+        
+        self.iceberg_signals.push(ImbalanceSignal {
+            timestamp: current_time,
+            signal_type: signal_type.to_string(),
+            ratio: volume, // 这里使用ratio字段存储BTC数量
+        });
+        
+        // 限制信号列表大小，保留最近的20个信号
+        if self.iceberg_signals.len() > 20 {
+            self.iceberg_signals.remove(0);
         }
     }
 
@@ -343,6 +381,19 @@ impl OrderBookData {
         }
     }
 
+    fn get_history_trade_volume(&self, price: f64, side: &str) -> f64 {
+        let price_ordered = OrderedFloat(price);
+        if let Some(order_flow) = self.order_flows.get(&price_ordered) {
+            match side {
+                "buy" => order_flow.history_trade_record.buy_volume,
+                "sell" => order_flow.history_trade_record.sell_volume,
+                _ => 0.0,
+            }
+        } else {
+            0.0
+        }
+    }
+
     fn get_cancel_volume(&self, price: f64, side: &str) -> f64 {
         let price_ordered = OrderedFloat(price);
         if let Some(order_flow) = self.order_flows.get(&price_ordered) {
@@ -358,6 +409,26 @@ impl OrderBookData {
 
     fn update_current_price(&mut self, price: f64) {
         self.current_price = Some(price);
+    }
+
+    fn reset_history_trade_records(&mut self) {
+        let current_time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        
+        // 获取当前时间的小时
+        let seconds = current_time / 1000;
+        let hours = (seconds / 3600) % 24;
+        
+        // 如果是凌晨5点，重置所有历史成交记录
+        if hours == 5 {
+            for (_price, order_flow) in self.order_flows.iter_mut() {
+                order_flow.history_trade_record.buy_volume = 0.0;
+                order_flow.history_trade_record.sell_volume = 0.0;
+                order_flow.history_trade_record.timestamp = current_time;
+            }
+        }
     }
 
     fn update(&mut self, data: &Value) {
@@ -547,8 +618,83 @@ impl OrderBookData {
         // 检测撤单信号
         self.detect_cancel_signal();
         
-        // 自动清理不合理的挂单数据
-        // self.auto_clean_unreasonable_orders();
+        // 检查是否需要重置历史成交记录
+        self.reset_history_trade_records();
+        
+        // 检测大挂单（冰山订单）
+        let threshold = 10.0; // 阈值设为10个BTC
+        
+        // 获取最优买卖价格
+        let (best_bid, best_ask) = self.get_best_bid_ask();
+        
+        // 获取当前时间戳
+        let current_time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or(Duration::from_secs(0))
+            .as_millis() as u64;
+        
+        // 清除旧的大订单记录（可选，如果您想保留一段时间的历史记录）
+        // self.big_orders.retain(|_, order| current_time - order.timestamp < 3600000); // 保留1小时内的记录
+        
+        // 遍历所有价格水平，检查是否有大于等于阈值的挂单，但排除最优价格
+        for (price, order_flow) in &self.order_flows {
+            let price_val = price.0; // 使用.0访问OrderedFloat中的f64值
+            
+            // 检查买单（排除最优买价）
+            if order_flow.bid_ask.bid >= threshold {
+                if let Some(best_bid_price) = best_bid {
+                    if price_val != best_bid_price {
+                        // 保存到big_orders HashMap
+                        self.big_orders.insert(*price, BigOrder {
+                            order_type: "buy".to_string(),
+                            volume: order_flow.bid_ask.bid,
+                            timestamp: current_time,
+                        });
+                        
+                        // 同时添加到iceberg_signals用于兼容现有显示逻辑
+                        // self.add_iceberg_signal("buy", order_flow.bid_ask.bid);
+                    }
+                } else {
+                    // 保存到big_orders HashMap
+                    self.big_orders.insert(*price, BigOrder {
+                        order_type: "buy".to_string(),
+                        volume: order_flow.bid_ask.bid,
+                        timestamp: current_time,
+                    });
+                    
+                    // 同时添加到iceberg_signals用于兼容现有显示逻辑
+                    // self.add_iceberg_signal("buy", order_flow.bid_ask.bid);
+                }
+            }
+            
+            // 检查卖单（排除最优卖价）
+            if order_flow.bid_ask.ask >= threshold {
+                if let Some(best_ask_price) = best_ask {
+                    if price_val != best_ask_price {
+                        // 保存到big_orders HashMap
+                        self.big_orders.insert(*price, BigOrder {
+                            order_type: "sell".to_string(),
+                            volume: order_flow.bid_ask.ask,
+                            timestamp: current_time,
+                        });
+                        
+                        // 同时添加到iceberg_signals用于兼容现有显示逻辑
+                        // self.add_iceberg_signal("sell", order_flow.bid_ask.ask);
+                    }
+                } else {
+                    // 保存到big_orders HashMap
+                    self.big_orders.insert(*price, BigOrder {
+                        order_type: "sell".to_string(),
+                        volume: order_flow.bid_ask.ask,
+                        timestamp: current_time,
+                    });
+                    
+                    // 同时添加到iceberg_signals用于兼容现有显示逻辑
+                    // self.add_iceberg_signal("sell", order_flow.bid_ask.ask);
+                }
+            }
+        }
+   
     }
 
     // 检测撤单信号
@@ -1047,6 +1193,10 @@ fn ui(f: &mut Frame, app: &mut App) {
                 // 获取撤单量信息
                 let bid_cancel_vol = orderbook.get_cancel_volume(*price, "bid");
                 let ask_cancel_vol = orderbook.get_cancel_volume(*price, "ask");
+                
+                // 获取历史成交量信息
+                let history_sell_trade_vol = orderbook.get_history_trade_volume(*price, "sell");
+                let history_buy_trade_vol = orderbook.get_history_trade_volume(*price, "buy");
 
                 // Bid挂单显示逻辑：直接显示买单挂单量（过滤已在上层完成）
                 let bid_str = if bid_vol > 0.0 {
@@ -1064,13 +1214,13 @@ fn ui(f: &mut Frame, app: &mut App) {
                 
                 // 成交量显示逻辑
                 let sell_trade_str = if sell_trade_vol > 0.0 { 
-                    format!("+{:.3}", sell_trade_vol) 
+                    format!("@{:.3}", sell_trade_vol) 
                 } else { 
                     String::new() 
                 };
                 
                 let buy_trade_str = if buy_trade_vol > 0.0 { 
-                    format!("+{:.3}", buy_trade_vol) 
+                    format!("@{:.3}", buy_trade_vol) 
                 } else { 
                     String::new() 
                 };
@@ -1112,6 +1262,36 @@ fn ui(f: &mut Frame, app: &mut App) {
                     Cell::from(ask_str).style(Style::default().fg(Color::Red)),
                     Cell::from(buy_trade_str).style(Style::default().fg(Color::Green)),
                     Cell::from(ask_cancel_str).style(Style::default().fg(Color::Gray)),
+                    {
+                        // 主动成交订单列 - 使用字符条形图显示
+                        let total_vol = history_buy_trade_vol + history_sell_trade_vol;
+                        let mut active_trade_str = String::new();
+                        
+                        if total_vol > 0.0 {
+                            // 最大显示30个字符
+                            let max_chars = 30;
+                            
+                            // 修改逻辑：每1个BTC对应一个色块
+                            // 计算买单和卖单应该显示的字符数量
+                            let buy_chars = (history_buy_trade_vol.min(30.0) as usize).min(max_chars);
+                            let sell_chars = (history_sell_trade_vol.min(30.0) as usize).min(max_chars - buy_chars);
+                            
+                            // 添加买单字符
+                            for _ in 0..buy_chars {
+                                active_trade_str.push('█');
+                            }
+                            
+                            // 添加卖单字符
+                            for _ in 0..sell_chars {
+                                active_trade_str.push('░');
+                            }
+                            
+                            // 添加总量
+                            active_trade_str.push_str(&format!(" {:.3}", total_vol));
+                        }
+                        
+                        Cell::from(active_trade_str).style(Style::default().fg(Color::White))
+                    },
                 ]);
                 
                 rows.push(row);
@@ -1137,6 +1317,7 @@ fn ui(f: &mut Frame, app: &mut App) {
                 Cell::from("Ask Vol").style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
                 Cell::from("Buy Trade").style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
                 Cell::from("Ask Cancel").style(Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+                Cell::from("Active Trade").style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
             ])
         )
         .block(block)
@@ -1148,6 +1329,7 @@ fn ui(f: &mut Frame, app: &mut App) {
             Constraint::Length(12), // Ask Volume
             Constraint::Length(12), // Buy Trade
             Constraint::Length(12), // Ask Cancel
+            Constraint::Length(60), // History Trade - 增加宽度以容纳30个字符加总量
         ]);
     
     f.render_widget(table, centered_area);
@@ -1300,7 +1482,45 @@ fn render_iceberg_orders(f: &mut Frame, app: &mut App, area: Rect) {
         .title("Iceberg Orders")
         .borders(Borders::ALL);
     
-    let text = "Iceberg Orders Signal";
+    let inner_area = block.inner(area);
+    
+    // 获取大订单信息
+    let big_orders = {
+        let orderbook = app.orderbook.lock();
+        orderbook.big_orders.clone()
+    };
+    
+    // 创建Text对象和Line列表
+    let mut lines = Vec::new();
+    
+    // 将大订单按BTC数量排序（从大到小）
+    let mut orders: Vec<_> = big_orders.iter().collect();
+    orders.sort_by(|a, b| b.1.volume.partial_cmp(&a.1.volume).unwrap_or(std::cmp::Ordering::Equal));
+    
+    // 显示大订单信息
+    for (price, order) in orders.iter().take(20) { // 限制显示最大的20条
+        // 使用标准库计算时间
+        let time = std::time::UNIX_EPOCH + std::time::Duration::from_millis(order.timestamp);
+        let seconds = time.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let hours = (seconds / 3600) % 24;
+        let minutes = (seconds / 60) % 60;
+        let secs = seconds % 60;
+        let formatted_time = format!("{:02}:{:02}:{:02}", hours, minutes, secs);
+        
+        // 创建信号文本
+        let signal_text = format!("[{formatted_time}] 价格:{} 大订单挂单{} {:.2} 个 BTC", 
+            price,
+            if order.order_type == "buy" { "买入" } else { "卖出" },
+            order.volume
+        );
+        
+        lines.push(Line::from(Span::raw(signal_text)));
+    }
+    
+    // 创建Text对象
+    let text = Text::from(lines);
+    
+    // 创建段落
     let paragraph = Paragraph::new(text)
         .block(block)
         .style(Style::default().fg(Color::White))
