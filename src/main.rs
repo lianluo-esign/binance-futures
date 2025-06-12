@@ -120,7 +120,7 @@ struct MarketMicrostructureAnalyzer {
 }
 
 
-// 订单簿数据结构
+// 订单簿数据结构 - 基础组件
 #[derive(Debug, Clone)]
 struct PriceLevel {
     ask: f64,
@@ -141,13 +141,39 @@ struct CancelRecord {
     timestamp: u64,
 }
 
-// 订单簿数据管理 - 使用 BTreeMap<OrderedFloat<f64>, PriceLevel>
+// 新的OrderFlow结构体，整合了价格水平、交易记录和撤单记录
+#[derive(Debug, Clone)]
+struct OrderFlow {
+    // 买卖盘数据
+    bid_ask: PriceLevel,
+    
+    // 历史累计买单和卖单量
+    history_trade_record: TradeRecord,
+    
+    // 实时成交订单，每过5s自动清除，用新的不断覆盖
+    realtime_trade_record: TradeRecord,
+    
+    // 实时撤单记录
+    realtime_cancel_records: CancelRecord,
+}
+
+impl OrderFlow {
+    fn new() -> Self {
+        Self {
+            bid_ask: PriceLevel { bid: 0.0, ask: 0.0 },
+            history_trade_record: TradeRecord { buy_volume: 0.0, sell_volume: 0.0, timestamp: 0 },
+            realtime_trade_record: TradeRecord { buy_volume: 0.0, sell_volume: 0.0, timestamp: 0 },
+            realtime_cancel_records: CancelRecord { bid_cancel: 0.0, ask_cancel: 0.0, timestamp: 0 },
+        }
+    }
+}
+
+// 订单簿数据管理 - 使用 BTreeMap<OrderedFloat<f64>, OrderFlow>
 struct OrderBookData {
-    price_levels: BTreeMap<OrderedFloat<f64>, PriceLevel>,
+    // 合并后的数据结构，使用一个BTreeMap共用价格Key
+    order_flows: BTreeMap<OrderedFloat<f64>, OrderFlow>,
     current_price: Option<f64>,
-    recent_trades: BTreeMap<OrderedFloat<f64>, TradeRecord>,
     last_trade_side: Option<String>,
-    cancel_records: BTreeMap<OrderedFloat<f64>, CancelRecord>,
     trade_display_duration: u64,
     cancel_display_duration: u64,
     max_trade_records: usize,
@@ -168,11 +194,9 @@ struct OrderBookData {
 impl OrderBookData {
     fn new() -> Self {
         Self {
-            price_levels: BTreeMap::new(),
+            order_flows: BTreeMap::new(),
             current_price: None,
-            recent_trades: BTreeMap::new(),
             last_trade_side: None,
-            cancel_records: BTreeMap::new(),
             trade_display_duration: 10000,
             cancel_display_duration: 5000,
             max_trade_records: 1000,
@@ -199,27 +223,27 @@ impl OrderBookData {
         match trade_side {
             "buy" => {
                 // 买单成交，清空价格小于等于成交价的所有ask挂单
-                let keys_to_update: Vec<OrderedFloat<f64>> = self.price_levels
+                let keys_to_update: Vec<OrderedFloat<f64>> = self.order_flows
                     .range(..=trade_price_ordered)
                     .map(|(price, _)| *price)
                     .collect();
                 
                 for price in keys_to_update {
-                    if let Some(level) = self.price_levels.get_mut(&price) {
-                        level.ask = 0.0;
+                    if let Some(order_flow) = self.order_flows.get_mut(&price) {
+                        order_flow.bid_ask.ask = 0.0;
                     }
                 }
             }
             "sell" => {
                 // 卖单成交，清空价格大于等于成交价的所有bid挂单
-                let keys_to_update: Vec<OrderedFloat<f64>> = self.price_levels
+                let keys_to_update: Vec<OrderedFloat<f64>> = self.order_flows
                     .range(trade_price_ordered..)
                     .map(|(price, _)| *price)
                     .collect();
                 
                 for price in keys_to_update {
-                    if let Some(level) = self.price_levels.get_mut(&price) {
-                        level.bid = 0.0;
+                    if let Some(order_flow) = self.order_flows.get_mut(&price) {
+                        order_flow.bid_ask.bid = 0.0;
                     }
                 }
             }
@@ -275,19 +299,25 @@ impl OrderBookData {
                 .unwrap()
                 .as_millis() as u64;
             
-            let trade = self.recent_trades.entry(price_ordered).or_insert(TradeRecord {
-                buy_volume: 0.0,
-                sell_volume: 0.0,
-                timestamp: current_time,
-            });
+            // 获取或创建该价格的OrderFlow
+            let order_flow = self.order_flows.entry(price_ordered).or_insert_with(OrderFlow::new);
             
+            // 更新实时交易记录
             match side {
-                "buy" => trade.buy_volume += qty_f64,
-                "sell" => trade.sell_volume += qty_f64,
+                "buy" => {
+                    order_flow.realtime_trade_record.buy_volume += qty_f64;
+                    order_flow.history_trade_record.buy_volume += qty_f64;
+                },
+                "sell" => {
+                    order_flow.realtime_trade_record.sell_volume += qty_f64;
+                    order_flow.history_trade_record.sell_volume += qty_f64;
+                },
                 _ => {}
             }
             
-            trade.timestamp = current_time;
+            // 更新时间戳
+            order_flow.realtime_trade_record.timestamp = current_time;
+            order_flow.history_trade_record.timestamp = current_time;
         }
     }
 
@@ -297,22 +327,39 @@ impl OrderBookData {
             .unwrap()
             .as_millis() as u64;
         
-        // 删除超过显示时间的成交记录
-        self.recent_trades.retain(|_, trade| {
-            current_time - trade.timestamp <= self.trade_display_duration
-        });
+        // 清理过期的实时交易记录
+        for (_price, order_flow) in self.order_flows.iter_mut() {
+            // 如果实时交易记录超过显示时间，则重置为0
+            if current_time - order_flow.realtime_trade_record.timestamp > self.trade_display_duration {
+                order_flow.realtime_trade_record.buy_volume = 0.0;
+                order_flow.realtime_trade_record.sell_volume = 0.0;
+            }
+        }
         
-        // 限制记录数量 - BTreeMap 天然有序，直接移除最旧的记录
-        if self.recent_trades.len() > self.max_trade_records {
-            let to_remove = self.recent_trades.len() - self.max_trade_records;
-            let oldest_keys: Vec<OrderedFloat<f64>> = self.recent_trades
-                .iter()
-                .take(to_remove)
-                .map(|(price, _)| *price)
-                .collect();
+        // 限制记录数量 - 如果OrderFlow数量超过限制，移除最旧的记录
+        if self.order_flows.len() > self.max_trade_records {
+            // 收集需要移除的键
+            let to_remove = self.order_flows.len() - self.max_trade_records;
+            let mut keys_to_remove = Vec::new();
             
-            for price in oldest_keys {
-                self.recent_trades.remove(&price);
+            // 找出没有活跃数据的OrderFlow进行移除
+            for (price, order_flow) in &self.order_flows {
+                if order_flow.bid_ask.bid == 0.0 && 
+                   order_flow.bid_ask.ask == 0.0 && 
+                   order_flow.realtime_trade_record.buy_volume == 0.0 && 
+                   order_flow.realtime_trade_record.sell_volume == 0.0 && 
+                   order_flow.realtime_cancel_records.bid_cancel == 0.0 && 
+                   order_flow.realtime_cancel_records.ask_cancel == 0.0 {
+                    keys_to_remove.push(*price);
+                    if keys_to_remove.len() >= to_remove {
+                        break;
+                    }
+                }
+            }
+            
+            // 移除收集的键
+            for price in keys_to_remove {
+                self.order_flows.remove(&price);
             }
         }
     }
@@ -324,19 +371,18 @@ impl OrderBookData {
             .unwrap()
             .as_millis() as u64;
         
-        let cancel = self.cancel_records.entry(price_ordered).or_insert(CancelRecord {
-            bid_cancel: 0.0,
-            ask_cancel: 0.0,
-            timestamp: current_time,
-        });
+        // 获取或创建该价格的OrderFlow
+        let order_flow = self.order_flows.entry(price_ordered).or_insert_with(OrderFlow::new);
         
+        // 更新撤单记录
         match side {
-            "bid" => cancel.bid_cancel += volume,
-            "ask" => cancel.ask_cancel += volume,
+            "bid" => order_flow.realtime_cancel_records.bid_cancel += volume,
+            "ask" => order_flow.realtime_cancel_records.ask_cancel += volume,
             _ => {}
         }
         
-        cancel.timestamp = current_time;
+        // 更新时间戳
+        order_flow.realtime_cancel_records.timestamp = current_time;
     }
 
     fn clean_old_cancels(&mut self) {
@@ -345,32 +391,22 @@ impl OrderBookData {
             .unwrap()
             .as_millis() as u64;
         
-        // 删除超过显示时间的撤单记录
-        self.cancel_records.retain(|_, cancel: &mut CancelRecord| {
-            current_time - cancel.timestamp <= self.cancel_display_duration
-        });
-        
-        // 限制记录数量
-        if self.cancel_records.len() > self.max_cancel_records {
-            let to_remove = self.cancel_records.len() - self.max_cancel_records;
-            let oldest_keys: Vec<OrderedFloat<f64>> = self.cancel_records
-                .iter()
-                .take(to_remove)
-                .map(|(price, _)| *price)
-                .collect();
-            
-            for price in oldest_keys {
-                self.cancel_records.remove(&price);
+        // 清理过期的撤单记录
+        for (_price, order_flow) in self.order_flows.iter_mut() {
+            // 如果撤单记录超过显示时间，则重置为0
+            if current_time - order_flow.realtime_cancel_records.timestamp > self.cancel_display_duration {
+                order_flow.realtime_cancel_records.bid_cancel = 0.0;
+                order_flow.realtime_cancel_records.ask_cancel = 0.0;
             }
         }
     }
 
     fn get_trade_volume(&self, price: f64, side: &str) -> f64 {
         let price_ordered = OrderedFloat(price);
-        if let Some(trade) = self.recent_trades.get(&price_ordered) {
+        if let Some(order_flow) = self.order_flows.get(&price_ordered) {
             match side {
-                "buy" => trade.buy_volume,
-                "sell" => trade.sell_volume,
+                "buy" => order_flow.realtime_trade_record.buy_volume,
+                "sell" => order_flow.realtime_trade_record.sell_volume,
                 _ => 0.0,
             }
         } else {
@@ -380,10 +416,10 @@ impl OrderBookData {
 
     fn get_cancel_volume(&self, price: f64, side: &str) -> f64 {
         let price_ordered = OrderedFloat(price);
-        if let Some(cancel) = self.cancel_records.get(&price_ordered) {
+        if let Some(order_flow) = self.order_flows.get(&price_ordered) {
             match side {
-                "bid" => cancel.bid_cancel,
-                "ask" => cancel.ask_cancel,
+                "bid" => order_flow.realtime_cancel_records.bid_cancel,
+                "ask" => order_flow.realtime_cancel_records.ask_cancel,
                 _ => 0.0,
             }
         } else {
@@ -406,25 +442,27 @@ impl OrderBookData {
                     let price_ordered = OrderedFloat(price);
                     let qty_f64 = qty.parse::<f64>().unwrap_or(0.0);
                     
-                    let old_bid = self.price_levels.get(&price_ordered)
-                        .map(|level| level.bid)
-                        .unwrap_or(0.0);
+                    // 获取或创建该价格的OrderFlow
+                    let order_flow = self.order_flows.entry(price_ordered).or_insert_with(OrderFlow::new);
                     
-                    let level = self.price_levels.entry(price_ordered).or_insert(PriceLevel {
-                        bid: 0.0,
-                        ask: 0.0,
-                    });
+                    let old_bid = order_flow.bid_ask.bid;
                     
                     if qty_f64 == 0.0 {
-                        if level.bid > 0.0 {
-                            cancellations.push((price, "bid".to_string(), level.bid));
+                        if order_flow.bid_ask.bid > 0.0 {
+                            cancellations.push((price, "bid".to_string(), order_flow.bid_ask.bid));
                         }
-                        level.bid = 0.0;
+                        order_flow.bid_ask.bid = 0.0;
                     } else {
-                        level.bid = qty_f64;
+                        order_flow.bid_ask.bid = qty_f64;
                         if old_bid > qty_f64 {
                             cancellations.push((price, "bid".to_string(), old_bid - qty_f64));
                         }
+                    }
+                    
+                    // 清理同价格上的ask挂单量
+                    if order_flow.bid_ask.ask > 0.0 {
+                        cancellations.push((price, "ask".to_string(), order_flow.bid_ask.ask));
+                        order_flow.bid_ask.ask = 0.0;
                     }
                 }
             }
@@ -437,25 +475,27 @@ impl OrderBookData {
                     let price_ordered = OrderedFloat(price);
                     let qty_f64 = qty.parse::<f64>().unwrap_or(0.0);
                     
-                    let old_ask = self.price_levels.get(&price_ordered)
-                        .map(|level| level.ask)
-                        .unwrap_or(0.0);
+                    // 获取或创建该价格的OrderFlow
+                    let order_flow = self.order_flows.entry(price_ordered).or_insert_with(OrderFlow::new);
                     
-                    let level = self.price_levels.entry(price_ordered).or_insert(PriceLevel {
-                        bid: 0.0,
-                        ask: 0.0,
-                    });
+                    let old_ask = order_flow.bid_ask.ask;
                     
                     if qty_f64 == 0.0 {
-                        if level.ask > 0.0 {
-                            cancellations.push((price, "ask".to_string(), level.ask));
+                        if order_flow.bid_ask.ask > 0.0 {
+                            cancellations.push((price, "ask".to_string(), order_flow.bid_ask.ask));
                         }
-                        level.ask = 0.0;
+                        order_flow.bid_ask.ask = 0.0;
                     } else {
-                        level.ask = qty_f64;
+                        order_flow.bid_ask.ask = qty_f64;
                         if old_ask > qty_f64 {
                             cancellations.push((price, "ask".to_string(), old_ask - qty_f64));
                         }
+                    }
+                    
+                    // 清理同价格上的bid挂单量
+                    if order_flow.bid_ask.bid > 0.0 {
+                        cancellations.push((price, "bid".to_string(), order_flow.bid_ask.bid));
+                        order_flow.bid_ask.bid = 0.0;
                     }
                 }
             }
@@ -491,18 +531,18 @@ impl OrderBookData {
     
     // 使用 BTreeMap 的优势 - O(log n) 时间复杂度获取最佳买价
     fn get_best_bid(&self) -> Option<f64> {
-        self.price_levels
+        self.order_flows
             .iter()
             .rev()  // 从高到低遍历
-            .find(|(_, level)| level.bid > 0.0)
+            .find(|(_, order_flow)| order_flow.bid_ask.bid > 0.0)
             .map(|(price, _)| price.into_inner())
     }
     
     // 使用 BTreeMap 的优势 - O(log n) 时间复杂度获取最佳卖价
     fn get_best_ask(&self) -> Option<f64> {
-        self.price_levels
+        self.order_flows
             .iter()  // 从低到高遍历
-            .find(|(_, level)| level.ask > 0.0)
+            .find(|(_, order_flow)| order_flow.bid_ask.ask > 0.0)
             .map(|(price, _)| price.into_inner())
     }
     
@@ -522,16 +562,16 @@ impl OrderBookData {
         // 收集需要清理的价格
         let mut prices_to_clean = Vec::new();
         
-        for (price, level) in &self.price_levels {
+        for (price, order_flow) in &self.order_flows {
             let price_val = price.into_inner();
             
             // 检查买单挂单：价格大于best_bid的买单挂单需要清理（不合理）
-            if level.bid > 0.0 && price_val > best_bid_price {
+            if order_flow.bid_ask.bid > 0.0 && price_val > best_bid_price {
                 prices_to_clean.push((price_val, "bid"));
             }
             
             // 检查卖单挂单：价格小于best_ask的卖单挂单需要清理（不合理）
-            if level.ask > 0.0 && price_val < best_ask_price {
+            if order_flow.bid_ask.ask > 0.0 && price_val < best_ask_price {
                 prices_to_clean.push((price_val, "ask"));
             }
         }
@@ -540,17 +580,17 @@ impl OrderBookData {
         let mut cleaned_count = 0;
         for (price, side) in prices_to_clean {
             let price_ordered = OrderedFloat(price);
-            if let Some(level) = self.price_levels.get_mut(&price_ordered) {
+            if let Some(order_flow) = self.order_flows.get_mut(&price_ordered) {
                 match side {
                     "bid" => {
-                        if level.bid > 0.0 {
-                            level.bid = 0.0;
+                        if order_flow.bid_ask.bid > 0.0 {
+                            order_flow.bid_ask.bid = 0.0;
                             cleaned_count += 1;
                         }
                     },
                     "ask" => {
-                        if level.ask > 0.0 {
-                            level.ask = 0.0;
+                        if order_flow.bid_ask.ask > 0.0 {
+                            order_flow.bid_ask.ask = 0.0;
                             cleaned_count += 1;
                         }
                     },
@@ -571,13 +611,13 @@ impl OrderBookData {
         let mut best_bid = None;
         let mut best_ask = None;
         
-        for (price, level) in &self.price_levels {
-            if level.bid > 0.0 {
+        for (price, order_flow) in &self.order_flows {
+            if order_flow.bid_ask.bid > 0.0 {
                 if best_bid.is_none() || price.into_inner() > best_bid.unwrap() {
                     best_bid = Some(price.into_inner());
                 }
             }
-            if level.ask > 0.0 {
+            if order_flow.bid_ask.ask > 0.0 {
                 if best_ask.is_none() || price.into_inner() < best_ask.unwrap() {
                     best_ask = Some(price.into_inner());
                 }
@@ -594,14 +634,14 @@ impl OrderBookData {
         let mut ask_volume = 0.0;
         
         if let Some(bid_price) = best_bid {
-            if let Some(level) = self.price_levels.get(&OrderedFloat(bid_price)) {
-                bid_volume = level.bid;
+            if let Some(order_flow) = self.order_flows.get(&OrderedFloat(bid_price)) {
+                bid_volume = order_flow.bid_ask.bid;
             }
         }
         
         if let Some(ask_price) = best_ask {
-            if let Some(level) = self.price_levels.get(&OrderedFloat(ask_price)) {
-                ask_volume = level.ask;
+            if let Some(order_flow) = self.order_flows.get(&OrderedFloat(ask_price)) {
+                ask_volume = order_flow.bid_ask.ask;
             }
         }
         
@@ -1291,13 +1331,13 @@ fn ui(f: &mut Frame, app: &mut App) {
             // 获取所有价格并排序，只显示合理的价位
             // 买单：价格 <= best_bid，卖单：价格 >= best_ask
             let filtered_prices: Vec<f64> = orderbook
-                .price_levels
+                .order_flows
                 .iter()
-                .filter(|(price, level)| {
+                .filter(|(price, order_flow)| {
                     let price_val = price.into_inner();
-                    let has_valid_bid = level.bid > 0.0 && 
+                    let has_valid_bid = order_flow.bid_ask.bid > 0.0 && 
                         best_bid.map_or(false, |bb| price_val <= bb);
-                    let has_valid_ask = level.ask > 0.0 && 
+                    let has_valid_ask = order_flow.bid_ask.ask > 0.0 && 
                         best_ask.map_or(false, |ba| price_val >= ba);
                     has_valid_bid || has_valid_ask
                 })
@@ -1315,9 +1355,9 @@ fn ui(f: &mut Frame, app: &mut App) {
                 }
                 
                 let price_ordered = OrderedFloat(*price);
-                let level = orderbook.price_levels.get(&price_ordered).unwrap();
-                let bid_vol = level.bid;
-                let ask_vol = level.ask;
+                let order_flow = orderbook.order_flows.get(&price_ordered).unwrap();
+                let bid_vol = order_flow.bid_ask.bid;
+                let ask_vol = order_flow.bid_ask.ask;
                 
                 // 获取成交量信息
                 let sell_trade_vol = orderbook.get_trade_volume(*price, "sell");
