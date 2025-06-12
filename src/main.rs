@@ -158,9 +158,6 @@ struct OrderFlow {
     // 实时撤单记录
     realtime_cancel_records: CancelRecord,
     
-    // 新增：最优买卖价格
-    best_bid_price: Option<f64>,
-    best_ask_price: Option<f64>,
 }
 
 impl OrderFlow {
@@ -170,8 +167,6 @@ impl OrderFlow {
             history_trade_record: TradeRecord { buy_volume: 0.0, sell_volume: 0.0, timestamp: 0 },
             realtime_trade_record: TradeRecord { buy_volume: 0.0, sell_volume: 0.0, timestamp: 0 },
             realtime_cancel_records: CancelRecord { bid_cancel: 0.0, ask_cancel: 0.0, timestamp: 0 },
-            best_bid_price: None,
-            best_ask_price: None,
         }
     }
 }
@@ -198,6 +193,14 @@ struct OrderBookData {
     highlight_duration: u64,
     // 新增：最后更新ID
     last_update_id: Option<u64>,
+    
+    // 性能优化：缓存最优买卖价格，避免重复计算
+    best_bid_price: Option<f64>,
+    best_ask_price: Option<f64>,
+    
+    // 性能优化：预分配的缓冲区，减少频繁的内存分配
+    prices_to_clear_buffer: Vec<(OrderedFloat<f64>, String)>,
+    cancellations_buffer: Vec<(f64, String, f64)>,
 }
 
 
@@ -227,6 +230,12 @@ impl OrderBookData {
             highlight_start_time: None,
             highlight_duration: 3000,
             last_update_id: None,
+            
+            // 初始化性能优化字段
+            best_bid_price: None,
+            best_ask_price: None,
+            prices_to_clear_buffer: Vec::with_capacity(100), // 预分配合理容量
+            cancellations_buffer: Vec::with_capacity(100),   // 预分配合理容量
         }
     }
 
@@ -447,46 +456,47 @@ impl OrderBookData {
     }
 
     fn update(&mut self, data: &Value) {
-        // 收集需要处理的撤单信息
-        let mut cancellations = Vec::new();
+        // 清空并重用预分配的缓冲区
+        self.prices_to_clear_buffer.clear();
+        self.cancellations_buffer.clear();
+        
+        // 创建一个临时的撤单信息收集器
+        let mut cancellations: Vec<(f64, String, f64)> = Vec::new();
         
         // 处理bids数组
         if let Some(bids) = data["b"].as_array() {
-            // 先获取bids中的最优价格（价格最大的）
-            let mut best_bid_price: Option<f64> = None;
-            for bid in bids {
-                if let Some(price_str) = bid[0].as_str() {
-                    let price = price_str.parse::<f64>().unwrap_or(0.0);
-                    if price > 0.0 {
-                        if let Some(qty_str) = bid[1].as_str() {
-                            let qty = qty_str.parse::<f64>().unwrap_or(0.0);
-                            if qty > 0.0 {
-                                best_bid_price = Some(best_bid_price.map_or(price, |current| current.max(price)));
-                            }
+            // 直接获取bids中的第一个元素作为最优买价（价格最大的）
+            let mut new_best_bid: Option<f64> = None;
+            
+            // 直接使用第一个元素作为最优买价
+            if !bids.is_empty() {
+                if let (Some(price_str), Some(qty_str)) = (bids[0][0].as_str(), bids[0][1].as_str()) {
+                    if let (Ok(price), Ok(qty)) = (price_str.parse::<f64>(), qty_str.parse::<f64>()) {
+                        if price > 0.0 && qty > 0.0 {
+                            new_best_bid = Some(price);
                         }
                     }
                 }
             }
             
-            // 更新所有OrderFlow的best_bid_price
-            for (_, order_flow) in self.order_flows.iter_mut() {
-                order_flow.best_bid_price = best_bid_price;
-            }
+            // 更新OrderBookData的best_bid_price字段
+            self.best_bid_price = new_best_bid;
             
-            // 如果有最优买价，清理所有大于最优买价的bid挂单
-            if let Some(best_bid) = best_bid_price {
-                let prices_to_clear: Vec<OrderedFloat<f64>> = self.order_flows
-                    .iter()
-                    .filter(|(price, order_flow)| {
-                        price.into_inner() > best_bid && order_flow.bid_ask.bid > 0.0
-                    })
-                    .map(|(price, _)| *price)
-                    .collect();
+            // 如果有最优买价，收集所有需要清理的价格
+            if let Some(new_best_bid) = new_best_bid {
+                // 收集需要清理的价格
+                for (price, order_flow) in self.order_flows.iter() {
+                    let price_val = price.0; // 使用.0访问OrderedFloat中的f64值
+                    if price_val > new_best_bid && order_flow.bid_ask.bid > 0.0 {
+                        self.prices_to_clear_buffer.push((*price, "bid".to_string()));
+                    }
+                }
                 
-                for price in prices_to_clear {
-                    if let Some(order_flow) = self.order_flows.get_mut(&price) {
+                // 清理收集的价格
+                for (price, side) in &self.prices_to_clear_buffer {
+                    if let Some(order_flow) = self.order_flows.get_mut(price) {
                         if order_flow.bid_ask.bid > 0.0 {
-                            cancellations.push((price.into_inner(), "bid".to_string(), order_flow.bid_ask.bid));
+                            cancellations.push((price.0, side.clone(), order_flow.bid_ask.bid)); // 使用.0访问OrderedFloat中的f64值
                             order_flow.bid_ask.bid = 0.0;
                         }
                     }
@@ -495,26 +505,25 @@ impl OrderBookData {
             
             // 然后更新bids的具体数量
             for bid in bids {
-                if let (Some(price_str), Some(qty)) = (bid[0].as_str(), bid[1].as_str()) {
-                    let price = price_str.parse::<f64>().unwrap_or(0.0);
-                    let price_ordered = OrderedFloat(price);
-                    let qty_f64 = qty.parse::<f64>().unwrap_or(0.0);
-                    
-                    // 获取或创建该价格的OrderFlow
-                    let order_flow = self.order_flows.entry(price_ordered).or_insert_with(OrderFlow::new);
-                    order_flow.best_bid_price = best_bid_price;
-                    
-                    let old_bid = order_flow.bid_ask.bid;
-                    
-                    if qty_f64 == 0.0 {
-                        if order_flow.bid_ask.bid > 0.0 {
-                            cancellations.push((price, "bid".to_string(), order_flow.bid_ask.bid));
-                        }
-                        order_flow.bid_ask.bid = 0.0;
-                    } else {
-                        order_flow.bid_ask.bid = qty_f64;
-                        if old_bid > qty_f64 {
-                            cancellations.push((price, "bid".to_string(), old_bid - qty_f64));
+                if let (Some(price_str), Some(qty_str)) = (bid[0].as_str(), bid[1].as_str()) {
+                    if let (Ok(price), Ok(qty_f64)) = (price_str.parse::<f64>(), qty_str.parse::<f64>()) {
+                        let price_ordered = OrderedFloat(price);
+                        
+                        // 获取或创建该价格的OrderFlow
+                        let order_flow = self.order_flows.entry(price_ordered).or_insert_with(OrderFlow::new);
+                        
+                        let old_bid = order_flow.bid_ask.bid;
+                        
+                        if qty_f64 == 0.0 {
+                            if order_flow.bid_ask.bid > 0.0 {
+                                cancellations.push((price, "bid".to_string(), order_flow.bid_ask.bid));
+                            }
+                            order_flow.bid_ask.bid = 0.0;
+                        } else {
+                            order_flow.bid_ask.bid = qty_f64;
+                            if old_bid > qty_f64 {
+                                cancellations.push((price, "bid".to_string(), old_bid - qty_f64));
+                            }
                         }
                     }
                 }
@@ -523,41 +532,41 @@ impl OrderBookData {
         
         // 处理asks数组
         if let Some(asks) = data["a"].as_array() {
-            // 先获取asks中的最优价格（价格最小的）
-            let mut best_ask_price: Option<f64> = None;
-            for ask in asks {
-                if let Some(price_str) = ask[0].as_str() {
-                    let price = price_str.parse::<f64>().unwrap_or(0.0);
-                    if price > 0.0 {
-                        if let Some(qty_str) = ask[1].as_str() {
-                            let qty = qty_str.parse::<f64>().unwrap_or(0.0);
-                            if qty > 0.0 {
-                                best_ask_price = Some(best_ask_price.map_or(price, |current| current.min(price)));
-                            }
+            // 直接获取asks中的第一个元素作为最优卖价（价格最小的）
+            let mut new_best_ask: Option<f64> = None;
+            
+            // 直接使用第一个元素作为最优卖价
+            if !asks.is_empty() {
+                if let (Some(price_str), Some(qty_str)) = (asks[0][0].as_str(), asks[0][1].as_str()) {
+                    if let (Ok(price), Ok(qty)) = (price_str.parse::<f64>(), qty_str.parse::<f64>()) {
+                        if price > 0.0 && qty > 0.0 {
+                            new_best_ask = Some(price);
                         }
                     }
                 }
             }
             
-            // 更新所有OrderFlow的best_ask_price
-            for (_, order_flow) in self.order_flows.iter_mut() {
-                order_flow.best_ask_price = best_ask_price;
-            }
+            // 更新best_ask_price字段
+            self.best_ask_price = new_best_ask;
             
             // 如果有最优卖价，清理所有小于最优卖价的ask挂单
-            if let Some(best_ask) = best_ask_price {
-                let prices_to_clear: Vec<OrderedFloat<f64>> = self.order_flows
-                    .iter()
-                    .filter(|(price, order_flow)| {
-                        price.into_inner() < best_ask && order_flow.bid_ask.ask > 0.0
-                    })
-                    .map(|(price, _)| *price)
-                    .collect();
+            if let Some(best_ask) = new_best_ask {
+                // 清空缓冲区以重用
+                self.prices_to_clear_buffer.clear();
                 
-                for price in prices_to_clear {
-                    if let Some(order_flow) = self.order_flows.get_mut(&price) {
+                // 收集需要清理的价格
+                for (price, order_flow) in self.order_flows.iter() {
+                    let price_val = price.0; // 使用.0访问OrderedFloat中的f64值
+                    if price_val < best_ask && order_flow.bid_ask.ask > 0.0 {
+                        self.prices_to_clear_buffer.push((*price, "ask".to_string()));
+                    }
+                }
+                
+                // 处理需要清理的价格
+                for (price, side) in &self.prices_to_clear_buffer {
+                    if let Some(order_flow) = self.order_flows.get_mut(price) {
                         if order_flow.bid_ask.ask > 0.0 {
-                            cancellations.push((price.into_inner(), "ask".to_string(), order_flow.bid_ask.ask));
+                            cancellations.push((price.0, side.clone(), order_flow.bid_ask.ask)); // 使用.0访问OrderedFloat中的f64值
                             order_flow.bid_ask.ask = 0.0;
                         }
                     }
@@ -566,26 +575,25 @@ impl OrderBookData {
             
             // 然后更新asks的具体数量
             for ask in asks {
-                if let (Some(price_str), Some(qty)) = (ask[0].as_str(), ask[1].as_str()) {
-                    let price = price_str.parse::<f64>().unwrap_or(0.0);
-                    let price_ordered = OrderedFloat(price);
-                    let qty_f64 = qty.parse::<f64>().unwrap_or(0.0);
-                    
-                    // 获取或创建该价格的OrderFlow
-                    let order_flow = self.order_flows.entry(price_ordered).or_insert_with(OrderFlow::new);
-                    order_flow.best_ask_price = best_ask_price;
-                    
-                    let old_ask = order_flow.bid_ask.ask;
-                    
-                    if qty_f64 == 0.0 {
-                        if order_flow.bid_ask.ask > 0.0 {
-                            cancellations.push((price, "ask".to_string(), order_flow.bid_ask.ask));
-                        }
-                        order_flow.bid_ask.ask = 0.0;
-                    } else {
-                        order_flow.bid_ask.ask = qty_f64;
-                        if old_ask > qty_f64 {
-                            cancellations.push((price, "ask".to_string(), old_ask - qty_f64));
+                if let (Some(price_str), Some(qty_str)) = (ask[0].as_str(), ask[1].as_str()) {
+                    if let (Ok(price), Ok(qty_f64)) = (price_str.parse::<f64>(), qty_str.parse::<f64>()) {
+                        let price_ordered = OrderedFloat(price);
+                        
+                        // 获取或创建该价格的OrderFlow
+                        let order_flow = self.order_flows.entry(price_ordered).or_insert_with(OrderFlow::new);
+                        
+                        let old_ask = order_flow.bid_ask.ask;
+                        
+                        if qty_f64 == 0.0 {
+                            if order_flow.bid_ask.ask > 0.0 {
+                                cancellations.push((price, "ask".to_string(), order_flow.bid_ask.ask));
+                            }
+                            order_flow.bid_ask.ask = 0.0;
+                        } else {
+                            order_flow.bid_ask.ask = qty_f64;
+                            if old_ask > qty_f64 {
+                                cancellations.push((price, "ask".to_string(), old_ask - qty_f64));
+                            }
                         }
                     }
                 }
@@ -597,25 +605,6 @@ impl OrderBookData {
             self.detect_cancellation(price, &side, volume);
         }
         
-        // 注释掉流动性不平衡检测
-        /*
-        // 在更新完订单簿后，立即计算挂单量比率
-        if let (Some(best_bid), Some(best_ask)) = (self.get_best_bid(), self.get_best_ask()) {
-            let (bid_volume, ask_volume) = self.get_best_volumes();
-            
-            // 调用失衡检测（不依赖交易，纯粹基于挂单量）
-            self.microstructure_analyzer.detect_liquidity_imbalance(
-                Some(best_bid),
-                Some(best_ask),
-                bid_volume,
-                ask_volume,
-                0.0,  // 无交易价格
-                0.0,  // 无交易量
-                ""    // 无交易方向
-            );
-        }
-        */
-        
         self.clean_old_trades();
         self.clean_old_cancels();
         
@@ -623,96 +612,19 @@ impl OrderBookData {
         // self.auto_clean_unreasonable_orders();
     }
     
-    // 使用 BTreeMap 的优势 - O(log n) 时间复杂度获取最佳买价
+    // 优化为O(1)时间复杂度获取最佳买价
     fn get_best_bid(&self) -> Option<f64> {
-        self.order_flows
-            .iter()
-            .rev()  // 从高到低遍历
-            .find(|(_, order_flow)| order_flow.bid_ask.bid > 0.0)
-            .map(|(price, _)| price.into_inner())
+        self.best_bid_price
     }
     
-    // 使用 BTreeMap 的优势 - O(log n) 时间复杂度获取最佳卖价
+    // 优化为O(1)时间复杂度获取最佳卖价
     fn get_best_ask(&self) -> Option<f64> {
-        self.order_flows
-            .iter()  // 从低到高遍历
-            .find(|(_, order_flow)| order_flow.bid_ask.ask > 0.0)
-            .map(|(price, _)| price.into_inner())
+        self.best_ask_price
     }
     
-    // 自动清理不合理的挂单数据
-    fn auto_clean_unreasonable_orders(&mut self) {
-        let best_bid = self.get_best_bid();
-        let best_ask = self.get_best_ask();
-        
-        // 如果没有最佳买价或卖价，则不进行清理
-        if best_bid.is_none() || best_ask.is_none() {
-            return;
-        }
-        
-        let best_bid_price = best_bid.unwrap();
-        let best_ask_price = best_ask.unwrap();
-        
-        // 收集需要清理的价格
-        let mut prices_to_clean = Vec::new();
-        
-        for (price, order_flow) in &self.order_flows {
-            let price_val = price.into_inner();
-            
-            // 检查买单挂单：价格大于best_bid的买单挂单需要清理（不合理）
-            if order_flow.bid_ask.bid > 0.0 && price_val > best_bid_price {
-                prices_to_clean.push((price_val, "bid"));
-            }
-            
-            // 检查卖单挂单：价格小于best_ask的卖单挂单需要清理（不合理）
-            if order_flow.bid_ask.ask > 0.0 && price_val < best_ask_price {
-                prices_to_clean.push((price_val, "ask"));
-            }
-        }
-        
-        // 执行清理
-        let mut cleaned_count = 0;
-        for (price, side) in prices_to_clean {
-            let price_ordered = OrderedFloat(price);
-            if let Some(order_flow) = self.order_flows.get_mut(&price_ordered) {
-                match side {
-                    "bid" => {
-                        if order_flow.bid_ask.bid > 0.0 {
-                            order_flow.bid_ask.bid = 0.0;
-                            cleaned_count += 1;
-                        }
-                    },
-                    "ask" => {
-                        if order_flow.bid_ask.ask > 0.0 {
-                            order_flow.bid_ask.ask = 0.0;
-                            cleaned_count += 1;
-                        }
-                    },
-                    _ => {}
-                }
-            }
-        }
-    }
-    
-    // 获取最佳买卖价
+    // 获取最佳买卖价 - 优化为O(1)时间复杂度
     fn get_best_bid_ask(&self) -> (Option<f64>, Option<f64>) {
-        let mut best_bid = None;
-        let mut best_ask = None;
-        
-        for (price, order_flow) in &self.order_flows {
-            if order_flow.bid_ask.bid > 0.0 {
-                if best_bid.is_none() || price.into_inner() > best_bid.unwrap() {
-                    best_bid = Some(price.into_inner());
-                }
-            }
-            if order_flow.bid_ask.ask > 0.0 {
-                if best_ask.is_none() || price.into_inner() < best_ask.unwrap() {
-                    best_ask = Some(price.into_inner());
-                }
-            }
-        }
-        
-        (best_bid, best_ask)
+        (self.best_bid_price, self.best_ask_price)
     }
     
     // 获取最佳价位的挂单量
@@ -871,14 +783,13 @@ impl OrderBookData {
         if let Some(bids) = depth_data["bids"].as_array() {
             for bid in bids {
                 if let (Some(price_str), Some(qty_str)) = (bid[0].as_str(), bid[1].as_str()) {
-                    let price = price_str.parse::<f64>().unwrap_or(0.0);
-                    let qty = qty_str.parse::<f64>().unwrap_or(0.0);
-                    
-                    if price > 0.0 && qty > 0.0 {
-                        best_bid_price = Some(best_bid_price.map_or(price, |current| current.max(price)));
-                        let price_ordered = OrderedFloat(price);
-                        let order_flow = self.order_flows.entry(price_ordered).or_insert_with(OrderFlow::new);
-                        order_flow.bid_ask.bid = qty;
+                    if let (Ok(price), Ok(qty)) = (price_str.parse::<f64>(), qty_str.parse::<f64>()) {
+                        if price > 0.0 && qty > 0.0 {
+                            best_bid_price = Some(best_bid_price.map_or(price, |current| current.max(price)));
+                            let price_ordered = OrderedFloat(price);
+                            let order_flow = self.order_flows.entry(price_ordered).or_insert_with(OrderFlow::new);
+                            order_flow.bid_ask.bid = qty;
+                        }
                     }
                 }
             }
@@ -888,24 +799,21 @@ impl OrderBookData {
         if let Some(asks) = depth_data["asks"].as_array() {
             for ask in asks {
                 if let (Some(price_str), Some(qty_str)) = (ask[0].as_str(), ask[1].as_str()) {
-                    let price = price_str.parse::<f64>().unwrap_or(0.0);
-                    let qty = qty_str.parse::<f64>().unwrap_or(0.0);
-                    
-                    if price > 0.0 && qty > 0.0 {
-                        best_ask_price = Some(best_ask_price.map_or(price, |current| current.min(price)));
-                        let price_ordered = OrderedFloat(price);
-                        let order_flow = self.order_flows.entry(price_ordered).or_insert_with(OrderFlow::new);
-                        order_flow.bid_ask.ask = qty;
+                    if let (Ok(price), Ok(qty)) = (price_str.parse::<f64>(), qty_str.parse::<f64>()) {
+                        if price > 0.0 && qty > 0.0 {
+                            best_ask_price = Some(best_ask_price.map_or(price, |current| current.min(price)));
+                            let price_ordered = OrderedFloat(price);
+                            let order_flow = self.order_flows.entry(price_ordered).or_insert_with(OrderFlow::new);
+                            order_flow.bid_ask.ask = qty;
+                        }
                     }
                 }
             }
         }
         
-        // 更新所有OrderFlow的最优价格
-        for (_, order_flow) in self.order_flows.iter_mut() {
-            order_flow.best_bid_price = best_bid_price;
-            order_flow.best_ask_price = best_ask_price;
-        }
+        // 更新OrderBookData的最优价格字段
+        self.best_bid_price = best_bid_price;
+        self.best_ask_price = best_ask_price;
         
         // 更新当前价格（取买卖盘中间价）
         if let (Some(best_bid), Some(best_ask)) = (best_bid_price, best_ask_price) {
@@ -1186,26 +1094,7 @@ fn ui(f: &mut Frame, app: &mut App) {
     
     f.render_widget(table, centered_area);
     
-    // 渲染市场信号区域
-    let signals = {
-        let orderbook = app.orderbook.lock();
-        orderbook.get_display_signals()
-    };
-    
-    let signal_block = Block::default()
-        .title("Market Signals")
-        .borders(Borders::ALL);
-    
-    let signal_paragraph = Paragraph::new(signals)
-        .block(signal_block)
-        .style(Style::default().fg(Color::White))
-        .wrap(Wrap { trim: true });
-    
-    f.render_widget(signal_paragraph, signal_area);
-    
-    // 注释掉其他信号区域渲染
-    /*
-    // 将右侧信号区域分为三个垂直部分
+        // 将右侧信号区域分为三个垂直部分
     let signal_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -1223,26 +1112,52 @@ fn ui(f: &mut Frame, app: &mut App) {
     render_orderbook_imbalance(f, app, imbalance_area);
     render_order_momentum(f, app, momentum_area);
     render_iceberg_orders(f, app, iceberg_area);
-    */
 }
 
-// 注释掉其他渲染函数
-/*
 // 渲染订单簿失衡信号
 fn render_orderbook_imbalance(f: &mut Frame, app: &mut App, area: Rect) {
-    // ... 实现代码 ...
+    let block = Block::default()
+        .title("Orderbook Imbalance")
+        .borders(Borders::ALL);
+    
+    let text = "Orderbook Imbalance Signal";
+    let paragraph = Paragraph::new(text)
+        .block(block)
+        .style(Style::default().fg(Color::White))
+        .wrap(Wrap { trim: true });
+    
+    f.render_widget(paragraph, area);
 }
 
-// 渲染订单动能信号（占位符）
+// 渲染订单动能信号
 fn render_order_momentum(f: &mut Frame, app: &mut App, area: Rect) {
-    // ... 实现代码 ...
+    let block = Block::default()
+        .title("Order Momentum")
+        .borders(Borders::ALL);
+    
+    let text = "Order Momentum Signal";
+    let paragraph = Paragraph::new(text)
+        .block(block)
+        .style(Style::default().fg(Color::White))
+        .wrap(Wrap { trim: true });
+    
+    f.render_widget(paragraph, area);
 }
 
-// 渲染冰山订单信号（占位符）
+// 渲染冰山订单信号
 fn render_iceberg_orders(f: &mut Frame, app: &mut App, area: Rect) {
-    // ... 实现代码 ...
+    let block = Block::default()
+        .title("Iceberg Orders")
+        .borders(Borders::ALL);
+    
+    let text = "Iceberg Orders Signal";
+    let paragraph = Paragraph::new(text)
+        .block(block)
+        .style(Style::default().fg(Color::White))
+        .wrap(Wrap { trim: true });
+    
+    f.render_widget(paragraph, area);
 }
-*/
 
 
 

@@ -532,6 +532,8 @@ class OrderBookTrader:
                 # 处理深度数据
                 if data.get('e') == 'depthUpdate':
                     # 更新卖单
+                    print("ask", data.get('a', []))
+                    print("bid", data.get('b', []))
                     for ask in data.get('a', []):
                         try:
                             price = self.round_price(ask[0])
