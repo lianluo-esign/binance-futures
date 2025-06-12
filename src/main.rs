@@ -10,6 +10,7 @@ use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
+    text::{Span, Text, Line},
     widgets::{Block, Borders, Cell, Row, Table, Paragraph, Wrap},
     Frame, Terminal,
 };
@@ -138,9 +139,9 @@ struct TradeRecord {
 
 #[derive(Debug, Clone)]
 struct CancelRecord {
-    bid_cancel: f64,
-    ask_cancel: f64,
-    timestamp: u64,
+    bid_cancel: f64,         // 当前实时买单撤单量
+    ask_cancel: f64,         // 当前实时卖单撤单量
+    timestamp: u64,          // 时间戳
 }
 
 // 新的OrderFlow结构体，整合了价格水平、交易记录和撤单记录
@@ -169,6 +170,14 @@ impl OrderFlow {
             realtime_cancel_records: CancelRecord { bid_cancel: 0.0, ask_cancel: 0.0, timestamp: 0 },
         }
     }
+}
+
+// 添加失衡信号结构体
+#[derive(Debug, Clone)]
+struct ImbalanceSignal {
+    timestamp: u64,
+    signal_type: String, // "buy" 或 "sell"
+    ratio: f64,         // 占比
 }
 
 // 订单簿数据管理 - 使用 BTreeMap<OrderedFloat<f64>, OrderFlow>
@@ -201,6 +210,16 @@ struct OrderBookData {
     // 性能优化：预分配的缓冲区，减少频繁的内存分配
     prices_to_clear_buffer: Vec<(OrderedFloat<f64>, String)>,
     cancellations_buffer: Vec<(f64, String, f64)>,
+    
+    // 添加OrderBook Imbalance相关字段
+    bid_volume_ratio: f64,                // 买单量占比
+    ask_volume_ratio: f64,                // 卖单量占比
+    imbalance_signals: Vec<ImbalanceSignal>, // 失衡信号列表
+    last_imbalance_check: u64,           // 上次检查失衡的时间戳
+    continuous_imbalance_start: Option<u64>, // 连续失衡开始的时间戳
+    current_imbalance_type: Option<String>, // 当前失衡类型 "buy" 或 "sell"
+    cancel_signals: Vec<ImbalanceSignal>, // 撤单信号列表，复用ImbalanceSignal结构体
+    last_cancel_check: u64,              // 上次检查撤单的时间戳
 }
 
 
@@ -236,6 +255,16 @@ impl OrderBookData {
             best_ask_price: None,
             prices_to_clear_buffer: Vec::with_capacity(100), // 预分配合理容量
             cancellations_buffer: Vec::with_capacity(100),   // 预分配合理容量
+            
+            // 初始化OrderBook Imbalance相关字段
+            bid_volume_ratio: 0.5,
+            ask_volume_ratio: 0.5,
+            imbalance_signals: Vec::new(),
+            last_imbalance_check: 0,
+            continuous_imbalance_start: None,
+            current_imbalance_type: None,
+            cancel_signals: Vec::new(),
+            last_cancel_check: 0,
         }
     }
 
@@ -608,8 +637,257 @@ impl OrderBookData {
         self.clean_old_trades();
         self.clean_old_cancels();
         
+        // 计算买卖盘失衡 - 使用calculate_volume_ratio替代check_orderbook_imbalance
+        self.calculate_volume_ratio();
+        
+        // 检测撤单信号
+        self.detect_cancel_signal();
+        
         // 自动清理不合理的挂单数据
         // self.auto_clean_unreasonable_orders();
+    }
+
+    // 检测撤单信号
+    fn detect_cancel_signal(&mut self) {
+        let current_time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or(Duration::from_secs(0))
+            .as_millis() as u64;
+        
+        // 每500毫秒检查一次撤单信号
+        if current_time - self.last_cancel_check < 500 {
+            return;
+        }
+            
+        self.last_cancel_check = current_time;
+        
+        // 获取最优买卖价格
+        let (best_bid, best_ask) = self.get_best_bid_ask();
+        
+        // 检查最优买价的撤单信号
+        if let Some(bid_price) = best_bid {
+            let price_ordered = OrderedFloat(bid_price);
+            if let Some(order_flow) = self.order_flows.get(&price_ordered) {
+                let bid_volume = order_flow.bid_ask.bid;
+                let bid_cancel = order_flow.realtime_cancel_records.bid_cancel;
+                
+                // 如果撤单量大于挂单量的90%
+                if bid_volume > 0.0 && bid_cancel > bid_volume * 0.9 {
+                    // 添加撤单卖出信号
+                    self.add_cancel_signal("sell", bid_cancel / bid_volume);
+                }
+            }
+        }
+        
+        // 检查最优卖价的撤单信号
+        if let Some(ask_price) = best_ask {
+            let price_ordered = OrderedFloat(ask_price);
+            if let Some(order_flow) = self.order_flows.get(&price_ordered) {
+                let ask_volume = order_flow.bid_ask.ask;
+                let ask_cancel = order_flow.realtime_cancel_records.ask_cancel;
+                
+                // 如果撤单量大于挂单量的90%
+                if ask_volume > 0.0 && ask_cancel > ask_volume * 0.9 {
+                    // 添加撤单买入信号
+                    self.add_cancel_signal("buy", ask_cancel / ask_volume);
+                }
+            }
+        }
+    }
+
+    // 添加撤单信号
+    fn add_cancel_signal(&mut self, signal_type: &str, ratio: f64) {
+        let current_time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or(Duration::from_secs(0))
+            .as_millis() as u64;
+        
+        self.cancel_signals.push(ImbalanceSignal {
+            timestamp: current_time,
+            signal_type: signal_type.to_string(),
+            ratio: ratio,
+        });
+        
+        // 限制信号列表大小，保留最近的20个信号
+        if self.cancel_signals.len() > 20 {
+            self.cancel_signals.remove(0);
+        }
+    }
+    
+    // 检查订单簿失衡
+    fn check_orderbook_imbalance(&mut self) {
+        let current_time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or(Duration::from_secs(0))
+            .as_millis() as u64;
+        
+        // 每500毫秒检查一次失衡
+        if current_time - self.last_imbalance_check < 500 {
+            return;
+        }
+        
+        self.last_imbalance_check = current_time;
+        
+        // 计算买卖盘总量
+        let bid_volume: f64 = self.order_flows.values().map(|of| of.bid_ask.bid).sum();
+        let ask_volume: f64 = self.order_flows.values().map(|of| of.bid_ask.ask).sum();
+        
+        // 计算买卖盘占比
+        let total_volume = bid_volume + ask_volume;
+        if total_volume > 0.0 {
+            self.bid_volume_ratio = bid_volume / total_volume;
+            self.ask_volume_ratio = ask_volume / total_volume;
+        } else {
+            self.bid_volume_ratio = 0.5;
+            self.ask_volume_ratio = 0.5;
+        }
+        
+        // 检测失衡 - 如果一方占比超过70%，则认为存在失衡
+        let imbalance_threshold = 0.7; // 70%
+        
+        let new_imbalance_type = if self.bid_volume_ratio >= imbalance_threshold {
+            Some("buy".to_string())
+        } else if self.ask_volume_ratio >= imbalance_threshold {
+            Some("sell".to_string())
+        } else {
+            None
+        };
+        
+        // 如果失衡类型发生变化
+        if new_imbalance_type != self.current_imbalance_type {
+            // 如果有新的失衡
+            if let Some(imbalance_type) = &new_imbalance_type {
+                // 记录失衡开始时间
+                self.continuous_imbalance_start = Some(current_time);
+                
+                // 添加新的失衡信号
+                let ratio = if imbalance_type == "buy" {
+                    self.bid_volume_ratio
+                } else {
+                    self.ask_volume_ratio
+                };
+                
+                let signal = ImbalanceSignal {
+                    timestamp: current_time,
+                    signal_type: imbalance_type.clone(),
+                    ratio,
+                };
+                
+                self.imbalance_signals.push(signal);
+                
+                // 限制信号列表大小
+                if self.imbalance_signals.len() > 100 {
+                    self.imbalance_signals.remove(0);
+                }
+            } else {
+                // 失衡结束
+                self.continuous_imbalance_start = None;
+            }
+            
+            // 更新当前失衡类型
+            self.current_imbalance_type = new_imbalance_type;
+        }
+    }
+    
+    // 计算最优价格上的挂单量比例
+    fn calculate_volume_ratio(&mut self) {
+        let (bid_volume, ask_volume) = self.get_best_volumes();
+        let total_volume = bid_volume + ask_volume;
+        
+        if total_volume > 0.0 {
+            self.bid_volume_ratio = bid_volume / total_volume;
+            self.ask_volume_ratio = ask_volume / total_volume;
+        } else {
+            self.bid_volume_ratio = 0.5;
+            self.ask_volume_ratio = 0.5;
+        }
+        
+        // 检测失衡信号
+        self.detect_imbalance_signal();
+    }
+    
+    // 检测失衡信号
+    fn detect_imbalance_signal(&mut self) {
+        let current_time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or(Duration::from_secs(0))
+            .as_millis() as u64;
+        
+        // 每次更新时检查
+        self.last_imbalance_check = current_time;
+        
+        // 检测是否有失衡
+        let has_buy_imbalance = self.bid_volume_ratio >= 0.9;
+        let has_sell_imbalance = self.ask_volume_ratio >= 0.9;
+        
+        match (has_buy_imbalance, has_sell_imbalance, &self.current_imbalance_type) {
+            (true, false, Some(imbalance_type)) if imbalance_type == "buy" => {
+                // 继续买入失衡
+                if let Some(start_time) = self.continuous_imbalance_start {
+                    if current_time - start_time >= 1000 { // 持续1秒
+                        // 添加买入失衡信号
+                        self.add_imbalance_signal("buy", self.bid_volume_ratio);
+                        // 重置计时器，避免连续触发
+                        self.continuous_imbalance_start = Some(current_time);
+                    }
+                }
+            },
+            (false, true, Some(imbalance_type)) if imbalance_type == "sell" => {
+                // 继续卖出失衡
+                if let Some(start_time) = self.continuous_imbalance_start {
+                    if current_time - start_time >= 1000 { // 持续1秒
+                        // 添加卖出失衡信号
+                        self.add_imbalance_signal("sell", self.ask_volume_ratio);
+                        // 重置计时器，避免连续触发
+                        self.continuous_imbalance_start = Some(current_time);
+                    }
+                }
+            },
+            (true, false, None) => {
+                // 开始新的买入失衡
+                self.continuous_imbalance_start = Some(current_time);
+                self.current_imbalance_type = Some("buy".to_string());
+            },
+            (true, false, Some(imbalance_type)) if imbalance_type != "buy" => {
+                // 开始新的买入失衡
+                self.continuous_imbalance_start = Some(current_time);
+                self.current_imbalance_type = Some("buy".to_string());
+            },
+            (false, true, None) => {
+                // 开始新的卖出失衡
+                self.continuous_imbalance_start = Some(current_time);
+                self.current_imbalance_type = Some("sell".to_string());
+            },
+            (false, true, Some(imbalance_type)) if imbalance_type != "sell" => {
+                // 开始新的卖出失衡
+                self.continuous_imbalance_start = Some(current_time);
+                self.current_imbalance_type = Some("sell".to_string());
+            },
+            _ => {
+                // 没有失衡或失衡结束
+                self.continuous_imbalance_start = None;
+                self.current_imbalance_type = None;
+            }
+        }
+    }
+    
+    // 添加失衡信号
+    fn add_imbalance_signal(&mut self, signal_type: &str, ratio: f64) {
+        let current_time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or(Duration::from_secs(0))
+            .as_millis() as u64;
+        
+        self.imbalance_signals.push(ImbalanceSignal {
+            timestamp: current_time,
+            signal_type: signal_type.to_string(),
+            ratio: ratio,
+        });
+        
+        // 限制信号列表大小，保留最近的20个信号
+        if self.imbalance_signals.len() > 20 {
+            self.imbalance_signals.remove(0);
+        }
     }
     
     // 优化为O(1)时间复杂度获取最佳买价
@@ -1094,7 +1372,7 @@ fn ui(f: &mut Frame, app: &mut App) {
     
     f.render_widget(table, centered_area);
     
-        // 将右侧信号区域分为三个垂直部分
+    // 将右侧信号区域分为三个垂直部分
     let signal_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -1120,7 +1398,99 @@ fn render_orderbook_imbalance(f: &mut Frame, app: &mut App, area: Rect) {
         .title("Orderbook Imbalance")
         .borders(Borders::ALL);
     
-    let text = "Orderbook Imbalance Signal";
+    let inner_area = block.inner(area);
+    
+    // 获取OrderBookData中的数据
+    let (bid_ratio, ask_ratio, imbalance_signals, cancel_signals) = {
+        let orderbook = app.orderbook.lock();
+        (
+            orderbook.bid_volume_ratio, 
+            orderbook.ask_volume_ratio, 
+            orderbook.imbalance_signals.clone(),
+            orderbook.cancel_signals.clone()
+        )
+    };
+    
+    // 创建显示内容
+    let mut content = Vec::new();
+    
+    // 添加比例信息
+    content.push(format!("买单占比: {:.2}% | 卖单占比: {:.2}%", bid_ratio * 100.0, ask_ratio * 100.0));
+    
+    // 创建横向条
+    let bar_width = inner_area.width.saturating_sub(2) as usize;
+    let bid_bar_width = (bid_ratio * bar_width as f64) as usize;
+    
+    let mut bar = String::new();
+    for _ in 0..bid_bar_width {
+        bar.push('█');
+    }
+    for _ in bid_bar_width..bar_width {
+        bar.push('░');
+    }
+    
+    // content.push(bar);
+    content.push(String::new()); // 空行
+    
+    // 添加失衡信号
+    content.push("失衡信号:".to_string());
+    
+    // 创建Text对象和Line列表
+    let mut lines = Vec::new();
+    
+    // 添加基本信息
+    lines.push(Line::from(Span::raw(format!("买单占比: {:.2}% | 卖单占比: {:.2}%", bid_ratio * 100.0, ask_ratio * 100.0))));
+    lines.push(Line::from(Span::raw(format!("{bar}"))));
+    lines.push(Line::from(Span::raw(""))); // 空行
+    lines.push(Line::from(Span::raw("失衡信号:")));
+    
+    // 显示失衡信号
+    for signal in imbalance_signals.iter().rev() {
+        // 使用标准库计算时间
+        let time = std::time::UNIX_EPOCH + std::time::Duration::from_millis(signal.timestamp);
+        let seconds = time.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let hours = (seconds / 3600) % 24;
+        let minutes = (seconds / 60) % 60;
+        let secs = seconds % 60;
+        let formatted_time = format!("{:02}:{:02}:{:02}", hours, minutes, secs);
+        
+        // 创建信号文本，使用普通文字
+        let signal_text = format!("[{formatted_time}] {}{:.2}%", 
+            if signal.signal_type == "buy" { "失衡信号 [买入] - 占比: " } else { "失衡信号 [卖出] - 占比: " },
+            signal.ratio * 100.0
+        );
+        
+        // 使用Span::raw而不是Span::styled，不应用任何样式
+        lines.push(Line::from(Span::raw(signal_text)));
+    }
+    
+    // 添加空行和撤单信号标题
+    lines.push(Line::from(Span::raw(""))); // 空行
+    lines.push(Line::from(Span::raw("撤单信号:")));
+    
+    // 显示撤单信号
+    for signal in cancel_signals.iter().rev() {
+        // 使用标准库计算时间
+        let time = std::time::UNIX_EPOCH + std::time::Duration::from_millis(signal.timestamp);
+        let seconds = time.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let hours = (seconds / 3600) % 24;
+        let minutes = (seconds / 60) % 60;
+        let secs = seconds % 60;
+        let formatted_time = format!("{:02}:{:02}:{:02}", hours, minutes, secs);
+        
+        // 创建信号文本，使用普通文字
+        let signal_text = format!("[{formatted_time}] {}{:.2}%", 
+            if signal.signal_type == "buy" { "撤单信号 [买入] - 占比: " } else { "撤单信号 [卖出] - 占比: " },
+            signal.ratio * 100.0
+        );
+        
+        lines.push(Line::from(Span::raw(signal_text)));
+    }
+    
+    // 创建Text对象
+    let text = Text::from(lines);
+    
+    // 创建段落
     let paragraph = Paragraph::new(text)
         .block(block)
         .style(Style::default().fg(Color::White))
