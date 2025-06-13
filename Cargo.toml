@@ -1,23 +1,15 @@
 [package]
-name = "future-orderbook"
+name = "binance-futures"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-ordered-float = "4.2"
-ratatui = "0.24"
-crossterm = "0.27"
-tokio = { version = "1.0", features = ["full"] }
-tokio-tungstenite = { version = "0.20", features = ["native-tls"] }
-futures-util = "0.3"
-serde = { version = "1.0", features = ["derive"] }
+crossbeam-queue = "0.3"
+crossterm = "0.29"
+ratatui = "0.29"
 serde_json = "1.0"
+tungstenite = "0.26.2"
 url = "2.4"
+ordered-float = "5.0.0"
 parking_lot = "0.12"
-log = "0.4"
-env_logger = "0.10"
-reqwest = { version = "0.11", features = ["json"] }
-
-[[bin]]
-name = "future-orderbook"
-path = "src/main.rs"
+reqwest = { version = "0.12", features = ["json"] }
