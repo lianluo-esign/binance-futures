@@ -138,7 +138,7 @@ struct OrderBookData {
     
     // 新增：大订单 HashMap，key为价格，value为BigOrder
     big_orders: HashMap<OrderedFloat<f64>, BigOrder>,
-
+    last_big_order_check: u64,  // 添加这一行，用于记录上次检测大订单的时间
     active_trades_buffer: HashMap<OrderedFloat<f64>, (f64, f64)>, // 价格 -> (买单成交量, 卖单成交量)
 }
 
@@ -182,6 +182,7 @@ impl OrderBookData {
             
             // 初始化大订单 HashMap
             big_orders: HashMap::new(),
+            last_big_order_check: 0,  // 初始化为0
         }
     }
     
@@ -621,20 +622,30 @@ impl OrderBookData {
         // 检查是否需要重置历史成交记录
         self.reset_history_trade_records();
         
-        // 检测大挂单（冰山订单）
-        let threshold = 10.0; // 阈值设为10个BTC
-        
-        // 获取最优买卖价格
-        let (best_bid, best_ask) = self.get_best_bid_ask();
-        
-        // 获取当前时间戳
+        // 调用检测大订单的方法，而不是在update中直接检测
+        self.detect_big_orders();
+    }
+    
+    // 检测大订单的方法 - 独立于update方法，每秒执行一次
+    fn detect_big_orders(&mut self) {
         let current_time = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or(Duration::from_secs(0))
             .as_millis() as u64;
         
-        // 清除旧的大订单记录（可选，如果您想保留一段时间的历史记录）
-        // self.big_orders.retain(|_, order| current_time - order.timestamp < 3600000); // 保留1小时内的记录
+        // 每1000毫秒(1秒)检查一次大订单
+        if current_time - self.last_big_order_check < 1000 {
+            return;
+        }
+        
+        self.last_big_order_check = current_time;
+        
+        // 清空之前的大订单记录
+        self.big_orders.clear();
+        
+        // 获取最优买卖价格
+        let (best_bid, best_ask) = self.get_best_bid_ask();
+        let threshold = 10.0; // 阈值设为10个BTC
         
         // 遍历所有价格水平，检查是否有大于等于阈值的挂单，但排除最优价格
         for (price, order_flow) in &self.order_flows {
@@ -650,9 +661,6 @@ impl OrderBookData {
                             volume: order_flow.bid_ask.bid,
                             timestamp: current_time,
                         });
-                        
-                        // 同时添加到iceberg_signals用于兼容现有显示逻辑
-                        // self.add_iceberg_signal("buy", order_flow.bid_ask.bid);
                     }
                 } else {
                     // 保存到big_orders HashMap
@@ -661,9 +669,6 @@ impl OrderBookData {
                         volume: order_flow.bid_ask.bid,
                         timestamp: current_time,
                     });
-                    
-                    // 同时添加到iceberg_signals用于兼容现有显示逻辑
-                    // self.add_iceberg_signal("buy", order_flow.bid_ask.bid);
                 }
             }
             
@@ -677,9 +682,6 @@ impl OrderBookData {
                             volume: order_flow.bid_ask.ask,
                             timestamp: current_time,
                         });
-                        
-                        // 同时添加到iceberg_signals用于兼容现有显示逻辑
-                        // self.add_iceberg_signal("sell", order_flow.bid_ask.ask);
                     }
                 } else {
                     // 保存到big_orders HashMap
@@ -688,13 +690,9 @@ impl OrderBookData {
                         volume: order_flow.bid_ask.ask,
                         timestamp: current_time,
                     });
-                    
-                    // 同时添加到iceberg_signals用于兼容现有显示逻辑
-                    // self.add_iceberg_signal("sell", order_flow.bid_ask.ask);
                 }
             }
         }
-   
     }
 
     // 检测撤单信号
@@ -1263,31 +1261,16 @@ fn ui(f: &mut Frame, app: &mut App) {
                     Cell::from(buy_trade_str).style(Style::default().fg(Color::Green)),
                     Cell::from(ask_cancel_str).style(Style::default().fg(Color::Gray)),
                     {
-                        // 主动成交订单列 - 使用字符条形图显示
+                        // 主动成交订单列 - 直接显示数字而不是条形图
                         let total_vol = history_buy_trade_vol + history_sell_trade_vol;
                         let mut active_trade_str = String::new();
                         
                         if total_vol > 0.0 {
-                            // 最大显示30个字符
-                            let max_chars = 30;
-                            
-                            // 修改逻辑：每1个BTC对应一个色块
-                            // 计算买单和卖单应该显示的字符数量
-                            let buy_chars = (history_buy_trade_vol.min(30.0) as usize).min(max_chars);
-                            let sell_chars = (history_sell_trade_vol.min(30.0) as usize).min(max_chars - buy_chars);
-                            
-                            // 添加买单字符
-                            for _ in 0..buy_chars {
-                                active_trade_str.push('█');
-                            }
-                            
-                            // 添加卖单字符
-                            for _ in 0..sell_chars {
-                                active_trade_str.push('░');
-                            }
-                            
-                            // 添加总量
-                            active_trade_str.push_str(&format!(" {:.3}", total_vol));
+                            // 直接显示买单和卖单的数量
+                            active_trade_str = format!("买:{:.3} 卖:{:.3} 总:{:.3}", 
+                                history_buy_trade_vol, 
+                                history_sell_trade_vol, 
+                                total_vol);
                         }
                         
                         Cell::from(active_trade_str).style(Style::default().fg(Color::White))
@@ -1317,7 +1300,7 @@ fn ui(f: &mut Frame, app: &mut App) {
                 Cell::from("Ask Vol").style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
                 Cell::from("Buy Trade").style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
                 Cell::from("Ask Cancel").style(Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
-                Cell::from("Active Trade").style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+                Cell::from("History Trades").style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
             ])
         )
         .block(block)
@@ -1479,7 +1462,7 @@ fn render_order_momentum(f: &mut Frame, app: &mut App, area: Rect) {
 // 渲染冰山订单信号
 fn render_iceberg_orders(f: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::default()
-        .title("Iceberg Orders")
+        .title("大订单")
         .borders(Borders::ALL);
     
     let inner_area = block.inner(area);
