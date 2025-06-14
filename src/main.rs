@@ -575,7 +575,7 @@ impl WebSocketManager {
     fn connect(&mut self, symbol: &str) -> Result<(), Box<dyn std::error::Error>> {
         let symbol_lower = symbol.to_lowercase();
         let url_string = format!(
-            "wss://fstream.binance.com/stream?streams={}@depth20@100ms/{}@aggTrade/{}@bookTicker",
+            "wss://fstream.binance.com/stream?streams={}@depth10@100ms/{}@aggTrade/{}@bookTicker",
             symbol_lower, symbol_lower, symbol_lower
         );
         
@@ -606,7 +606,6 @@ impl WebSocketManager {
             return Ok(0);
         }
         
-        let mut messages_processed = 0;
         // 移除消息数量限制，处理所有可用消息 - 高频交易系统优化
         
         if let Some(ref mut socket) = self.socket {
@@ -629,7 +628,7 @@ impl WebSocketManager {
                                     };
                                     
                                     event_buffer.push(event);
-                                    messages_processed += 1;
+                                   
                                 }
                             }
                         }
@@ -655,8 +654,7 @@ impl WebSocketManager {
                 }
             }
         }
-        
-        Ok(messages_processed)
+        return Ok(0);
     }
 
     fn is_connected(&self) -> bool {
@@ -713,7 +711,7 @@ impl ReactiveApp {
     }
 
     /// 单线程事件循环核心 - 处理所有事件
-    fn tick(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    fn event_loop(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         // 1. 读取WebSocket消息到事件缓冲区
         if self.websocket_manager.is_connected() {
             let _ = self.websocket_manager.read_messages(&mut self.event_buffer);
@@ -744,7 +742,8 @@ impl ReactiveApp {
                     self.orderbook.handle_book_ticker(&data);
                 }
                 EventType::Signal(signal) => {
-                    // 处理信号
+                    // 处理信号'
+                    
                 }
                 EventType::WebSocketError(error) => {
                     // 处理WebSocket错误
@@ -1151,7 +1150,7 @@ fn render_iceberg_orders(f: &mut Frame, app: &ReactiveApp, area: Rect) {
 }
 
 // ==================== 主函数 ====================
-
+// 基于ringbuffer的纯粹的单线程无锁事件驱动架构的低延迟高频交易系统
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 移除 env_logger::init();
     
@@ -1177,15 +1176,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 初始化WebSocket连接
     if let Err(e) = app.initialize() {
         eprintln!("初始化失败: {}", e);
-        // 继续运行，稍后会尝试重连
+        return Err(e);
     }
-    
-    println!("启动单线程事件驱动系统: {}", symbol);
     
     // 主事件循环（单线程）
     loop {
         // 核心事件处理
-        if let Err(e) = app.tick() {
+        if let Err(e) = app.event_loop() {
             eprintln!("事件处理错误: {}", e);
         }
         
