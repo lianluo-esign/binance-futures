@@ -193,7 +193,7 @@ impl OrderBookData {
             order_flows: BTreeMap::new(),
             current_price: None,
             last_trade_side: None,
-            trade_display_duration: 1000,
+            trade_display_duration: 3000,
             cancel_display_duration: 5000,
             max_trade_records: 1000,
             max_cancel_records: 500,
@@ -362,11 +362,11 @@ impl OrderBookData {
             
             match side {
                 "buy" => {
-                    order_flow.realtime_trade_record.buy_volume += qty_f64;
+                    order_flow.realtime_trade_record.buy_volume = qty_f64;
                     order_flow.history_trade_record.buy_volume += qty_f64;
                 },
                 "sell" => {
-                    order_flow.realtime_trade_record.sell_volume += qty_f64;
+                    order_flow.realtime_trade_record.sell_volume = qty_f64;
                     order_flow.history_trade_record.sell_volume += qty_f64;
                 },
                 _ => {}
