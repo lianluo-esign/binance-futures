@@ -88,7 +88,7 @@ enum EventType {
     DepthUpdate(Value),
     Trade(Value),
     BookTicker(Value),  // 新增
-    Signal(String),
+    Signal(Value),  // 修改为Value类型，保存丰富的信号数据
     WebSocketError(String),
 }
 
@@ -180,6 +180,11 @@ struct OrderBookData {
     big_orders: HashMap<OrderedFloat<f64>, BigOrder>,
     last_big_order_check: u64,
     active_trades_buffer: HashMap<OrderedFloat<f64>, (f64, f64)>,
+    
+    // 新增：500ms比率缓冲区
+    ratio_buffer: Vec<(u64, f64, f64)>, // (timestamp, bid_ratio, ask_ratio)
+    buffer_window_ms: u64, // 500ms窗口
+    signal_threshold: f64, // 0.75阈值
 }
 
 impl OrderBookData {
@@ -218,6 +223,11 @@ impl OrderBookData {
             iceberg_signals: Vec::new(),
             big_orders: HashMap::new(),
             last_big_order_check: 0,
+            
+            // 初始化新字段
+            ratio_buffer: Vec::new(),
+            buffer_window_ms: 500,
+            signal_threshold: 0.75,
         }
     }
 
@@ -296,7 +306,7 @@ impl OrderBookData {
         // 清理过期的实时交易记录
         for (_price, order_flow) in self.order_flows.iter_mut() {
             // 如果实时交易记录超过显示时间（1秒），则重置为0
-            if current_time - order_flow.realtime_trade_record.timestamp > self.trade_display_duration {
+            if current_time.saturating_sub(order_flow.realtime_trade_record.timestamp) > self.trade_display_duration {
                 order_flow.realtime_trade_record.buy_volume = 0.0;
                 order_flow.realtime_trade_record.sell_volume = 0.0;
             }
@@ -417,7 +427,7 @@ impl OrderBookData {
         self.best_ask_price
     }
     
-    fn handle_book_ticker(&mut self, data: &Value) {
+    fn handle_book_ticker(&mut self, data: &Value, event_buffer: &mut RingBuffer<EventType>) {
         // 解析bookTicker数据
         if let (Some(best_bid_str), Some(best_ask_str), Some(best_bid_qty_str), Some(best_ask_qty_str)) = 
             (data["b"].as_str(), data["a"].as_str(), data["B"].as_str(), data["A"].as_str()) {
@@ -457,22 +467,23 @@ impl OrderBookData {
                     }
                 }
                 
-                // 4. 传递bookTicker数据到calculate_volume_ratio进行计算
+                // 4. 传递bookTicker数据和event_buffer到calculate_volume_ratio进行计算
                 self.calculate_volume_ratio(
                     Some(best_bid_price), 
                     Some(best_ask_price), 
                     Some(best_bid_qty), 
-                    Some(best_ask_qty)
+                    Some(best_ask_qty),
+                    event_buffer
                 );
             }
         } else {
             // 如果bookTicker数据解析失败，使用默认计算方式
-            self.calculate_volume_ratio(None, None, None, None);
+            self.calculate_volume_ratio(None, None, None, None, event_buffer);
         }
     }
 
     // 添加计算多空占比的函数
-    fn calculate_volume_ratio(&mut self, best_bid_price: Option<f64>, best_ask_price: Option<f64>, best_bid_qty: Option<f64>, best_ask_qty: Option<f64>) {
+    fn calculate_volume_ratio(&mut self, best_bid_price: Option<f64>, best_ask_price: Option<f64>, best_bid_qty: Option<f64>, best_ask_qty: Option<f64>, event_buffer: &mut RingBuffer<EventType>) {
         let mut total_bid_volume = 0.0;
         let mut total_ask_volume = 0.0;
         
@@ -498,6 +509,91 @@ impl OrderBookData {
         if total_volume > 0.0 {
             self.bid_volume_ratio = total_bid_volume / total_volume;
             self.ask_volume_ratio = total_ask_volume / total_volume;
+            
+            // 获取当前时间戳
+            let current_time = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64;
+            
+            // 添加当前比率到缓冲区
+            self.ratio_buffer.push((current_time, self.bid_volume_ratio, self.ask_volume_ratio));
+            
+            // 清理超过500ms的旧数据
+            self.ratio_buffer.retain(|(timestamp, _, _)| {
+                current_time.saturating_sub(*timestamp) <= self.buffer_window_ms
+            });
+            
+            // 检查500ms内是否所有比率都超过阈值
+            if !self.ratio_buffer.is_empty() && self.ratio_buffer.len() >= 3 {
+                // 检查多头信号：500ms内所有bid_ratio都 >= 0.75
+                let all_bull_signals = self.ratio_buffer.iter().all(|(_, bid_ratio, _)| {
+                    *bid_ratio >= self.signal_threshold
+                });
+                
+                if all_bull_signals {
+                    // 计算平均比率
+                    let avg_ratio: f64 = self.ratio_buffer.iter()
+                        .map(|(_, bid_ratio, _)| bid_ratio)
+                        .sum::<f64>() / self.ratio_buffer.len() as f64;
+                    
+                    // 创建结构化的信号数据
+                    let signal_data = serde_json::json!({
+                        "signal_type": "imbalance",
+                        "direction": "bull",
+                        "timestamp": current_time,
+                        "ratio": avg_ratio,
+                        "description": "多头失衡(500ms累计)",
+                        "window_ms": self.buffer_window_ms,
+                        "sample_count": self.ratio_buffer.len(),
+                        "bid_volume": total_bid_volume,
+                        "ask_volume": total_ask_volume,
+                        "total_volume": total_volume,
+                        "best_bid_price": best_bid_price,
+                        "best_ask_price": best_ask_price
+                    });
+                    
+                    // 推送到事件缓冲区
+                    event_buffer.push(EventType::Signal(signal_data));
+                    
+                    // 清空缓冲区，避免重复信号
+                    self.ratio_buffer.clear();
+                }
+                
+                // 检查空头信号：500ms内所有ask_ratio都 >= 0.75
+                let all_bear_signals = self.ratio_buffer.iter().all(|(_, _, ask_ratio)| {
+                    *ask_ratio >= self.signal_threshold
+                });
+                
+                if all_bear_signals {
+                    // 计算平均比率
+                    let avg_ratio: f64 = self.ratio_buffer.iter()
+                        .map(|(_, _, ask_ratio)| ask_ratio)
+                        .sum::<f64>() / self.ratio_buffer.len() as f64;
+                    
+                    // 创建结构化的信号数据
+                    let signal_data = serde_json::json!({
+                        "signal_type": "imbalance",
+                        "direction": "bear",
+                        "timestamp": current_time,
+                        "ratio": avg_ratio,
+                        "description": "空头失衡(500ms累计)",
+                        "window_ms": self.buffer_window_ms,
+                        "sample_count": self.ratio_buffer.len(),
+                        "bid_volume": total_bid_volume,
+                        "ask_volume": total_ask_volume,
+                        "total_volume": total_volume,
+                        "best_bid_price": best_bid_price,
+                        "best_ask_price": best_ask_price
+                    });
+                    
+                    // 推送到事件缓冲区
+                    event_buffer.push(EventType::Signal(signal_data));
+                    
+                    // 清空缓冲区，避免重复信号
+                    self.ratio_buffer.clear();
+                }
+            }
         } else {
             // 如果没有挂单数据，保持50:50的比例
             self.bid_volume_ratio = 0.5;
@@ -575,7 +671,7 @@ impl WebSocketManager {
     fn connect(&mut self, symbol: &str) -> Result<(), Box<dyn std::error::Error>> {
         let symbol_lower = symbol.to_lowercase();
         let url_string = format!(
-            "wss://fstream.binance.com/stream?streams={}@depth10@100ms/{}@aggTrade/{}@bookTicker",
+            "wss://fstream.binance.com/stream?streams={}@depth20@100ms/{}@aggTrade/{}@bookTicker",
             symbol_lower, symbol_lower, symbol_lower
         );
         
@@ -723,7 +819,7 @@ impl ReactiveApp {
         self.process_events();
         
         // 3. 生成信号
-        self.generate_signals();
+        // self.generate_signals();
         
         Ok(())
     }
@@ -739,11 +835,88 @@ impl ReactiveApp {
                     self.orderbook.add_trade(&data);
                 }
                 EventType::BookTicker(data) => {
-                    self.orderbook.handle_book_ticker(&data);
+                    self.orderbook.handle_book_ticker(&data, &mut self.event_buffer);
                 }
-                EventType::Signal(signal) => {
-                    // 处理信号'
-                    
+                EventType::Signal(signal_data) => {
+                    // 处理信号事件，从事件缓冲区读取数据并填充到imbalance_signals列表
+                    if let Some(signal_type) = signal_data["signal_type"].as_str() {
+                        match signal_type {
+                            "imbalance" => {
+                                // 解析失衡信号数据
+                                if let (Some(timestamp), Some(ratio), Some(description)) = (
+                                    signal_data["timestamp"].as_u64(),
+                                    signal_data["ratio"].as_f64(),
+                                    signal_data["description"].as_str()
+                                ) {
+                                    // 检查是否为重复信号（去重逻辑）
+                                    let is_duplicate = self.orderbook.imbalance_signals.iter().any(|existing| {
+                                        // 检查最近5秒内是否有相同类型和相似比率的信号
+                                        let time_diff = timestamp.saturating_sub(existing.timestamp);
+                                        let ratio_diff = (ratio - existing.ratio).abs();
+                                        
+                                        time_diff < 5000 && // 5秒内
+                                        existing.signal_type == description && // 相同类型
+                                        ratio_diff < 0.01 // 比率差异小于1%
+                                    });
+                                    
+                                    // 只有非重复信号才添加
+                                    if !is_duplicate {
+                                        // 创建ImbalanceSignal并添加到列表
+                                        let imbalance_signal = ImbalanceSignal {
+                                            timestamp,
+                                            signal_type: description.to_string(),
+                                            ratio,
+                                        };
+                                        
+                                        // 添加到orderbook的imbalance_signals列表
+                                        self.orderbook.imbalance_signals.push(imbalance_signal);
+                                        
+                                        // 限制列表长度为50（减少内存使用）
+                                        if self.orderbook.imbalance_signals.len() > 50 {
+                                            self.orderbook.imbalance_signals.remove(0);
+                                        }
+                                    }
+                                }
+                            }
+                            "cancel" => {
+                                // 撤单信号的去重处理
+                                if let (Some(timestamp), Some(ratio), Some(description)) = (
+                                    signal_data["timestamp"].as_u64(),
+                                    signal_data["ratio"].as_f64(),
+                                    signal_data["description"].as_str()
+                                ) {
+                                    // 检查撤单信号重复
+                                    let is_duplicate = self.orderbook.cancel_signals.iter().any(|existing| {
+                                        let time_diff = timestamp.saturating_sub(existing.timestamp);
+                                        let ratio_diff = (ratio - existing.ratio).abs();
+                                        
+                                        time_diff < 3000 && // 3秒内
+                                        existing.signal_type == description && // 相同类型
+                                        ratio_diff < 0.1 // 比率差异小于0.1
+                                    });
+                                    
+                                    if !is_duplicate {
+                                        let cancel_signal = ImbalanceSignal {
+                                            timestamp,
+                                            signal_type: description.to_string(),
+                                            ratio,
+                                        };
+                                        
+                                        self.orderbook.cancel_signals.push(cancel_signal);
+                                        
+                                        // 限制撤单信号列表长度为30
+                                        if self.orderbook.cancel_signals.len() > 30 {
+                                            self.orderbook.cancel_signals.remove(0);
+                                        }
+                             
+                                    }
+                                }
+                            }
+                            _ => {
+                                // 其他类型信号的处理
+                            }
+                        }
+                    }
                 }
                 EventType::WebSocketError(error) => {
                     // 处理WebSocket错误
@@ -753,12 +926,12 @@ impl ReactiveApp {
     }
 
     /// 生成信号
-    fn generate_signals(&mut self) {
-        let signals = self.signal_generator.check_signals(&self.orderbook);
-        for signal in signals {
-            self.event_buffer.push(EventType::Signal(signal));
-        }
-    }
+    // fn generate_signals(&mut self) {
+    //     let signals = self.signal_generator.check_signals(&self.orderbook);
+    //     for signal in signals {
+    //         self.event_buffer.push(EventType::Signal(signal));
+    //     }
+    // }
 
     fn scroll_up(&mut self) {
         if self.scroll_offset > 0 {
@@ -808,6 +981,16 @@ impl ReactiveApp {
 }
 
 // ==================== UI渲染函数 ====================
+
+// 安全的字符串截断函数
+fn safe_truncate(s: &str, max_len: usize) -> String {
+    if s.chars().count() <= max_len {
+        s.to_string()
+    } else {
+        let truncated: String = s.chars().take(max_len.saturating_sub(3)).collect();
+        format!("{}...", truncated)
+    }
+}
 
 fn render_ui(f: &mut Frame, app: &mut ReactiveApp) {
     let size = f.area();
@@ -927,7 +1110,7 @@ fn render_orderbook(f: &mut Frame, app: &mut ReactiveApp, area: Rect) {
                     {
                         let total_vol = history_buy_trade_vol + history_sell_trade_vol;
                         let active_trade_str = if total_vol > 0.0 {
-                            format!("买:{:.3} 卖:{:.3} 总:{:.3}", 
+                            format!("B:{:.3} S:{:.3} T:{:.3}", 
                                 history_buy_trade_vol, 
                                 history_sell_trade_vol, 
                                 total_vol)
@@ -980,7 +1163,7 @@ fn render_orderbook(f: &mut Frame, app: &mut ReactiveApp, area: Rect) {
             Constraint::Length(10), // Ask Vol
             Constraint::Length(10), // Buy Trade
             Constraint::Length(10), // Ask Cancel
-            Constraint::Length(15), // History Trades
+            Constraint::Length(25), // History Trades
         ]
     )
     .header(
@@ -1027,24 +1210,22 @@ fn render_orderbook_imbalance(f: &mut Frame, app: &ReactiveApp, area: Rect) {
         .title("Orderbook Imbalance")
         .borders(Borders::ALL);
     
-    let inner_area = block.inner(area);
-    
     // 获取OrderBookData中的数据
-    let (bid_ratio, ask_ratio, imbalance_signals, cancel_signals) = (
+    let (bid_ratio, ask_ratio, imbalance_signals) = (
         app.orderbook.bid_volume_ratio, 
         app.orderbook.ask_volume_ratio, 
-        app.orderbook.imbalance_signals.clone(),
-        app.orderbook.cancel_signals.clone()
+        app.orderbook.imbalance_signals.clone()
     );
     
     // 创建Text对象和Line列表
     let mut lines = Vec::new();
     
     // 添加基本信息
-    lines.push(Line::from(Span::raw(format!("买单占比: {:.2}% | 卖单占比: {:.2}%", bid_ratio * 100.0, ask_ratio * 100.0))));
+    let basic_info = format!("买单占比: {:.2}% | 卖单占比: {:.2}%", bid_ratio * 100.0, ask_ratio * 100.0);
+    lines.push(Line::from(Span::raw(basic_info)));
     
     // 创建横向条
-    let bar_width = inner_area.width.saturating_sub(2) as usize;
+    let bar_width = 60; // 固定宽度
     let bid_bar_width = (bid_ratio * bar_width as f64) as usize;
     
     let mut bar = String::new();
@@ -1055,12 +1236,11 @@ fn render_orderbook_imbalance(f: &mut Frame, app: &ReactiveApp, area: Rect) {
         bar.push('░');
     }
     
-    lines.push(Line::from(Span::raw(format!("{bar}"))));
+    lines.push(Line::from(Span::raw(bar)));
     lines.push(Line::from(Span::raw(""))); // 空行
-    lines.push(Line::from(Span::raw("失衡信号:")));
     
-    // 显示失衡信号
-    for signal in imbalance_signals.iter().rev().take(5) {
+    // 显示失衡信号 - 让框架自动处理行数
+    for signal in imbalance_signals.iter().rev().take(20) { // 显示最近20个信号，让框架自动裁剪
         let time = SystemTime::UNIX_EPOCH + Duration::from_millis(signal.timestamp);
         let seconds = time.duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs();
         let hours = (seconds / 3600) % 24;
@@ -1070,31 +1250,16 @@ fn render_orderbook_imbalance(f: &mut Frame, app: &ReactiveApp, area: Rect) {
         
         let signal_text = format!("[{}] {} 失衡: {:.2}%", 
             formatted_time, signal.signal_type, signal.ratio * 100.0);
-        lines.push(Line::from(Span::raw(signal_text)));
-    }
-    
-    // 显示撤单信号
-    lines.push(Line::from(Span::raw(""))); // 空行
-    lines.push(Line::from(Span::raw("撤单信号:")));
-    
-    for signal in cancel_signals.iter().rev().take(3) {
-        let time = SystemTime::UNIX_EPOCH + Duration::from_millis(signal.timestamp);
-        let seconds = time.duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs();
-        let hours = (seconds / 3600) % 24;
-        let minutes = (seconds / 60) % 60;
-        let secs = seconds % 60;
-        let formatted_time = format!("{:02}:{:02}:{:02}", hours, minutes, secs);
         
-        let signal_text = format!("[{}] {} 撤单: {:.2} BTC", 
-            formatted_time, signal.signal_type, signal.ratio);
         lines.push(Line::from(Span::raw(signal_text)));
     }
     
+    // 创建Text并渲染 - 让Paragraph自动处理换行和裁剪
     let text = Text::from(lines);
     let paragraph = Paragraph::new(text)
         .block(block)
-        .style(Style::default().fg(Color::White))
-        .wrap(Wrap { trim: true });
+        .wrap(Wrap { trim: true })
+        .scroll((0, 0)); // 可以添加滚动功能
     
     f.render_widget(paragraph, area);
 }
