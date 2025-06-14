@@ -188,7 +188,7 @@ impl OrderBookData {
             order_flows: BTreeMap::new(),
             current_price: None,
             last_trade_side: None,
-            trade_display_duration: 10000,
+            trade_display_duration: 1000,
             cancel_display_duration: 5000,
             max_trade_records: 1000,
             max_cancel_records: 500,
@@ -287,6 +287,48 @@ impl OrderBookData {
         }
     }
 
+    fn clean_old_trades(&mut self) {
+        let current_time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        
+        // 清理过期的实时交易记录
+        for (_price, order_flow) in self.order_flows.iter_mut() {
+            // 如果实时交易记录超过显示时间（1秒），则重置为0
+            if current_time - order_flow.realtime_trade_record.timestamp > self.trade_display_duration {
+                order_flow.realtime_trade_record.buy_volume = 0.0;
+                order_flow.realtime_trade_record.sell_volume = 0.0;
+            }
+        }
+        
+        // 限制记录数量 - 如果OrderFlow数量超过限制，移除最旧的记录
+        if self.order_flows.len() > self.max_trade_records {
+            let to_remove = self.order_flows.len() - self.max_trade_records;
+            let mut keys_to_remove = Vec::new();
+            
+            // 找出没有活跃数据的OrderFlow进行移除
+            for (price, order_flow) in &self.order_flows {
+                if order_flow.bid_ask.bid == 0.0 && 
+                   order_flow.bid_ask.ask == 0.0 && 
+                   order_flow.realtime_trade_record.buy_volume == 0.0 && 
+                   order_flow.realtime_trade_record.sell_volume == 0.0 && 
+                   order_flow.realtime_cancel_records.bid_cancel == 0.0 && 
+                   order_flow.realtime_cancel_records.ask_cancel == 0.0 {
+                    keys_to_remove.push(*price);
+                    if keys_to_remove.len() >= to_remove {
+                        break;
+                    }
+                }
+            }
+            
+            // 移除收集的键
+            for price in keys_to_remove {
+                self.order_flows.remove(&price);
+            }
+        }
+    }
+
     fn add_trade(&mut self, data: &Value) {
         if let (Some(price_str), Some(qty), Some(is_buyer_maker)) = (
             data["p"].as_str(),
@@ -322,6 +364,9 @@ impl OrderBookData {
             
             order_flow.realtime_trade_record.timestamp = current_time;
             order_flow.history_trade_record.timestamp = current_time;
+            
+            // 添加清理过期交易数据的调用
+            self.clean_old_trades();
         }
     }
 
@@ -374,40 +419,89 @@ impl OrderBookData {
     
     fn handle_book_ticker(&mut self, data: &Value) {
         // 解析bookTicker数据
-        if let (Some(best_bid_str), Some(best_ask_str)) = 
-            (data["b"].as_str(), data["a"].as_str()) {
+        if let (Some(best_bid_str), Some(best_ask_str), Some(best_bid_qty_str), Some(best_ask_qty_str)) = 
+            (data["b"].as_str(), data["a"].as_str(), data["B"].as_str(), data["A"].as_str()) {
             
-            if let (Ok(best_bid_price), Ok(best_ask_price)) = 
-                (best_bid_str.parse::<f64>(), best_ask_str.parse::<f64>()) {
+            if let (Ok(best_bid_price), Ok(best_ask_price), Ok(best_bid_qty), Ok(best_ask_qty)) = 
+                (best_bid_str.parse::<f64>(), best_ask_str.parse::<f64>(), 
+                 best_bid_qty_str.parse::<f64>(), best_ask_qty_str.parse::<f64>()) {
                 
-                // 更新最优买卖价
+                // 1. 先更新order_flow里面对应价格的挂单数据
+                let best_bid_ordered = OrderedFloat(best_bid_price);
+                let best_ask_ordered = OrderedFloat(best_ask_price);
+                
+                // 更新最优买价的挂单量
+                let bid_order_flow = self.order_flows.entry(best_bid_ordered).or_insert_with(OrderFlow::new);
+                bid_order_flow.bid_ask.bid = best_bid_qty;
+                
+                // 更新最优卖价的挂单量
+                let ask_order_flow = self.order_flows.entry(best_ask_ordered).or_insert_with(OrderFlow::new);
+                ask_order_flow.bid_ask.ask = best_ask_qty;
+                
+                // 2. 然后更新最优买卖价格
                 self.best_bid_price = Some(best_bid_price);
                 self.best_ask_price = Some(best_ask_price);
                 
-                // 清理不合理的挂单
-                let mut prices_to_clear = Vec::new();
-                
+                // 3. 修正清理逻辑 - 清理不合理的挂单
                 for (price, order_flow) in self.order_flows.iter_mut() {
                     let price_val = price.0;
                     
-                    // 清理大于best_bid_price的ask挂单
-                    if price_val > best_bid_price && order_flow.bid_ask.ask > 0.0 {
-                        prices_to_clear.push((*price, "ask".to_string(), order_flow.bid_ask.ask));
+                    // 清理价格低于或等于最优买价的ask挂单（ask价格应该高于bid价格）
+                    if price_val <= best_bid_price {
                         order_flow.bid_ask.ask = 0.0;
                     }
                     
-                    // 清理小于best_ask_price的bid挂单
-                    if price_val < best_ask_price && order_flow.bid_ask.bid > 0.0 {
-                        prices_to_clear.push((*price, "bid".to_string(), order_flow.bid_ask.bid));
+                    // 清理价格高于或等于最优卖价的bid挂单（bid价格应该低于ask价格）
+                    if price_val >= best_ask_price {
                         order_flow.bid_ask.bid = 0.0;
                     }
                 }
                 
-                // 处理清理的挂单作为撤单
-                for (price, side, volume) in prices_to_clear {
-                    self.detect_cancellation(price.0, &side, volume);
+                // 4. 传递bookTicker数据到calculate_volume_ratio进行计算
+                self.calculate_volume_ratio(
+                    Some(best_bid_price), 
+                    Some(best_ask_price), 
+                    Some(best_bid_qty), 
+                    Some(best_ask_qty)
+                );
+            }
+        } else {
+            // 如果bookTicker数据解析失败，使用默认计算方式
+            self.calculate_volume_ratio(None, None, None, None);
+        }
+    }
+
+    // 添加计算多空占比的函数
+    fn calculate_volume_ratio(&mut self, best_bid_price: Option<f64>, best_ask_price: Option<f64>, best_bid_qty: Option<f64>, best_ask_qty: Option<f64>) {
+        let mut total_bid_volume = 0.0;
+        let mut total_ask_volume = 0.0;
+        
+        // 如果有bookTicker数据，优先使用最优买卖价的数量
+        if let (Some(bid_qty), Some(ask_qty)) = (best_bid_qty, best_ask_qty) {
+            total_bid_volume = bid_qty;
+            total_ask_volume = ask_qty;
+        } else {
+            // 否则基于当前orderflow数据计算总的买卖挂单量
+            for (price, order_flow) in &self.order_flows {
+                // 只计算有效的挂单量（大于0的）
+                if order_flow.bid_ask.bid > 0.0 {
+                    total_bid_volume += order_flow.bid_ask.bid;
+                }
+                if order_flow.bid_ask.ask > 0.0 {
+                    total_ask_volume += order_flow.bid_ask.ask;
                 }
             }
+        }
+        
+        let total_volume = total_bid_volume + total_ask_volume;
+        
+        if total_volume > 0.0 {
+            self.bid_volume_ratio = total_bid_volume / total_volume;
+            self.ask_volume_ratio = total_ask_volume / total_volume;
+        } else {
+            // 如果没有挂单数据，保持50:50的比例
+            self.bid_volume_ratio = 0.5;
+            self.ask_volume_ratio = 0.5;
         }
     }
     
@@ -765,99 +859,55 @@ fn render_orderbook(f: &mut Frame, app: &mut ReactiveApp, area: Rect) {
     let mut rows = Vec::new();
     let mut current_price_index = None;
     
-    if let Some(current_price) = app.orderbook.current_price {
-        let best_bid = app.orderbook.get_best_bid();
-        let best_ask = app.orderbook.get_best_ask();
-        
-        // 获取所有价格并排序，只显示合理的价位
-        let filtered_prices: Vec<f64> = app.orderbook
-            .order_flows
-            .iter()
-            .filter(|(price, order_flow)| {
-                let price_val = price.0;
-                let has_valid_bid = order_flow.bid_ask.bid > 0.0 && 
-                    best_bid.map_or(false, |bb| price_val <= bb);
-                let has_valid_ask = order_flow.bid_ask.ask > 0.0 && 
-                    best_ask.map_or(false, |ba| price_val >= ba);
-                has_valid_bid || has_valid_ask
-            })
-            .map(|(price, _)| price.0)
-            .collect();
-        
-        // BTreeMap 默认是升序，我们需要降序显示
-        let mut sorted_prices = filtered_prices;
+    // 直接获取orderbook中的所有价格数据，不做任何过滤
+    let all_prices: Vec<f64> = app.orderbook
+        .order_flows
+        .keys()
+        .map(|price| price.0)
+        .collect();
+    
+    if !all_prices.is_empty() {
+        // 按价格降序排列
+        let mut sorted_prices = all_prices;
         sorted_prices.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
         
-        // 生成表格行
+        // 为每个价格生成表格行
         for (i, price) in sorted_prices.iter().enumerate() {
-            if (price - current_price).abs() < 0.000001 {
-                current_price_index = Some(i);
+            // 检查是否为当前价格
+            if let Some(current_price) = app.orderbook.current_price {
+                if (price - current_price).abs() < 0.000001 {
+                    current_price_index = Some(i);
+                }
             }
             
             let price_ordered = OrderedFloat(*price);
             if let Some(order_flow) = app.orderbook.order_flows.get(&price_ordered) {
+                // 直接使用orderbook中的实时数据，不做任何条件判断或过滤
                 let bid_vol = order_flow.bid_ask.bid;
                 let ask_vol = order_flow.bid_ask.ask;
                 
-                // 获取成交量信息
+                // 获取所有相关数据
                 let sell_trade_vol = app.orderbook.get_trade_volume(*price, "sell");
                 let buy_trade_vol = app.orderbook.get_trade_volume(*price, "buy");
-                
-                // 获取撤单量信息
                 let bid_cancel_vol = app.orderbook.get_cancel_volume(*price, "bid");
                 let ask_cancel_vol = app.orderbook.get_cancel_volume(*price, "ask");
-                
-                // 获取历史成交量信息
                 let history_sell_trade_vol = app.orderbook.get_history_trade_volume(*price, "sell");
                 let history_buy_trade_vol = app.orderbook.get_history_trade_volume(*price, "buy");
 
-                // Bid挂单显示逻辑
-                let bid_str = if bid_vol > 0.0 {
-                    format!("{:.3}", bid_vol)
-                } else { 
-                    String::new() 
-                };
+                // 构建显示字符串（只有数值大于0才显示，否则显示空字符串）
+                let bid_str = if bid_vol > 0.0 { format!("{:.3}", bid_vol) } else { String::new() };
+                let ask_str = if ask_vol > 0.0 { format!("{:.3}", ask_vol) } else { String::new() };
+                let sell_trade_str = if sell_trade_vol > 0.0 { format!("@{:.3}", sell_trade_vol) } else { String::new() };
+                let buy_trade_str = if buy_trade_vol > 0.0 { format!("@{:.3}", buy_trade_vol) } else { String::new() };
+                let bid_cancel_str = if bid_cancel_vol > 0.0 { format!("-{:.3}", bid_cancel_vol) } else { String::new() };
+                let ask_cancel_str = if ask_cancel_vol > 0.0 { format!("-{:.3}", ask_cancel_vol) } else { String::new() };
                 
-                // Ask挂单显示逻辑
-                let ask_str = if ask_vol > 0.0 {
-                    format!("{:.3}", ask_vol)
-                } else { 
-                    String::new() 
-                };
-                
-                // 成交量显示逻辑
-                let sell_trade_str = if sell_trade_vol > 0.0 { 
-                    format!("@{:.3}", sell_trade_vol) 
-                } else { 
-                    String::new() 
-                };
-                
-                let buy_trade_str = if buy_trade_vol > 0.0 { 
-                    format!("@{:.3}", buy_trade_vol) 
-                } else { 
-                    String::new() 
-                };
-                
-                // 撤单量显示逻辑
-                let bid_cancel_str = if bid_cancel_vol > 0.0 {
-                    format!("-{:.3}", bid_cancel_vol)
-                } else { 
-                    String::new() 
-                };
-                
-                let ask_cancel_str = if ask_cancel_vol > 0.0 {
-                    format!("-{:.3}", ask_cancel_vol)
-                } else { 
-                    String::new() 
-                };
-                
-                // 创建行
+                // 创建行 - 显示所有价位，不做任何过滤
                 let row = Row::new(vec![
                     Cell::from(bid_cancel_str).style(Style::default().fg(Color::Gray)),
                     Cell::from(sell_trade_str).style(Style::default().fg(Color::Red)),
                     Cell::from(bid_str).style(Style::default().fg(Color::Green)),
                     {
-                        // 价格列 - 格式化为字符串显示
                         let price_str = format!("{:.2}", price);
                         let mut price_cell = Cell::from(price_str).style(Style::default().fg(Color::White));
                         if Some(i) == current_price_index {
@@ -876,17 +926,15 @@ fn render_orderbook(f: &mut Frame, app: &mut ReactiveApp, area: Rect) {
                     Cell::from(buy_trade_str).style(Style::default().fg(Color::Green)),
                     Cell::from(ask_cancel_str).style(Style::default().fg(Color::Gray)),
                     {
-                        // 主动成交订单列
                         let total_vol = history_buy_trade_vol + history_sell_trade_vol;
-                        let mut active_trade_str = String::new();
-                        
-                        if total_vol > 0.0 {
-                            active_trade_str = format!("买:{:.3} 卖:{:.3} 总:{:.3}", 
+                        let active_trade_str = if total_vol > 0.0 {
+                            format!("买:{:.3} 卖:{:.3} 总:{:.3}", 
                                 history_buy_trade_vol, 
                                 history_sell_trade_vol, 
-                                total_vol);
-                        }
-                        
+                                total_vol)
+                        } else {
+                            String::new()
+                        };
                         Cell::from(active_trade_str).style(Style::default().fg(Color::White))
                     },
                 ]);
@@ -896,14 +944,33 @@ fn render_orderbook(f: &mut Frame, app: &mut ReactiveApp, area: Rect) {
         }
     }
     
-    // 在创建表格之前调用auto_scroll
+    // 如果orderbook完全没有数据，显示等待状态
+    if rows.is_empty() {
+        let status_message = if app.websocket_manager.is_connected() {
+            "连接正常，等待订单薄数据..."
+        } else {
+            "WebSocket连接断开，尝试重连中..."
+        };
+        
+        let empty_row = Row::new(vec![
+            Cell::from(""),
+            Cell::from(""),
+            Cell::from(""),
+            Cell::from(status_message).style(Style::default().fg(Color::Yellow)),
+            Cell::from(""),
+            Cell::from(""),
+            Cell::from(""),
+            Cell::from(""),
+        ]);
+        rows.push(empty_row);
+    }
+    
+    // 应用滚动逻辑
     let visible_rows_count = centered_area.height.saturating_sub(3) as usize;
     app.auto_scroll(current_price_index, visible_rows_count);
-
-    // 应用滚动偏移
     let visible_rows: Vec<_> = rows.into_iter().skip(app.scroll_offset).collect();
     
-    // 创建表格
+    // 创建并渲染表格
     let table = Table::new(
         visible_rows,
         [
@@ -917,19 +984,19 @@ fn render_orderbook(f: &mut Frame, app: &mut ReactiveApp, area: Rect) {
             Constraint::Length(15), // History Trades
         ]
     )
-        .header(
-            Row::new(vec![
-                Cell::from("Bid Cancel").style(Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
-                Cell::from("Sell Trade").style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-                Cell::from("Bid Vol").style(Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-                Cell::from("Price").style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-                Cell::from("Ask Vol").style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
-                Cell::from("Buy Trade").style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-                Cell::from("Ask Cancel").style(Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
-                Cell::from("History Trades").style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-            ])
-        )
-        .block(block);
+    .header(
+        Row::new(vec![
+            Cell::from("Bid Cancel").style(Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+            Cell::from("Sell Trade").style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Cell::from("Bid Vol").style(Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+            Cell::from("Price").style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Cell::from("Ask Vol").style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+            Cell::from("Buy Trade").style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Cell::from("Ask Cancel").style(Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+            Cell::from("History Trades").style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+        ])
+    )
+    .block(block);
     
     f.render_widget(table, centered_area);
 }
