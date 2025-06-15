@@ -102,6 +102,7 @@ enum EventType {
 struct PriceLevel {
     bid: f64,
     ask: f64,
+    timestamp: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -115,6 +116,14 @@ struct TradeRecord {
 struct CancelRecord {
     bid_cancel: f64,
     ask_cancel: f64,
+    timestamp: u64,
+}
+
+#[derive(Debug, Clone)]
+struct IncreaseOrder {
+    bid: f64,
+    ask: f64,
+    timestamp: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -123,15 +132,17 @@ struct OrderFlow {
     history_trade_record: TradeRecord,
     realtime_trade_record: TradeRecord,
     realtime_cancel_records: CancelRecord,
+    realtime_increase_order: IncreaseOrder,
 }
 
 impl OrderFlow {
     fn new() -> Self {
         Self {
-            bid_ask: PriceLevel { bid: 0.0, ask: 0.0 },
+            bid_ask: PriceLevel { bid: 0.0, ask: 0.0 , timestamp: 0},
             history_trade_record: TradeRecord { buy_volume: 0.0, sell_volume: 0.0, timestamp: 0 },
             realtime_trade_record: TradeRecord { buy_volume: 0.0, sell_volume: 0.0, timestamp: 0 },
-            realtime_cancel_records: CancelRecord { bid_cancel: 0.0, ask_cancel: 0.0 },
+            realtime_cancel_records: CancelRecord { bid_cancel: 0.0, ask_cancel: 0.0 , timestamp: 0},
+            realtime_increase_order: IncreaseOrder { bid: 0.0, ask: 0.0, timestamp: 0 },
         }
     }
 }
@@ -147,6 +158,16 @@ struct ImbalanceSignal {
 struct BigOrder {
     order_type: String,
     volume: f64,
+    timestamp: u64,
+}
+
+
+#[derive(Debug, Clone)]
+struct BookTickerSnapshot {
+    best_bid_price: f64,
+    best_ask_price: f64,
+    best_bid_qty: f64,
+    best_ask_qty: f64,
     timestamp: u64,
 }
 
@@ -190,6 +211,11 @@ struct OrderBookData {
     ratio_buffer: Vec<(u64, f64, f64)>, // (timestamp, bid_ratio, ask_ratio)
     buffer_window_ms: u64, // 500ms窗口
     signal_threshold: f64, // 0.75阈值
+    
+    // 新增：订单簿快照功能
+    order_flow_snapshot: BTreeMap<OrderedFloat<f64>, (f64, f64)>, // (bid_qty, ask_qty)
+    last_snapshot_time: u64,
+    bookticker_snapshot: Option<BookTickerSnapshot>,
 }
 
 impl OrderBookData {
@@ -233,12 +259,99 @@ impl OrderBookData {
             ratio_buffer: Vec::new(),
             buffer_window_ms: 500,
             signal_threshold: 0.75,
+            
+            // 初始化快照相关字段
+            order_flow_snapshot: BTreeMap::new(),
+            last_snapshot_time: 0,
+            bookticker_snapshot: None,
         }
     }
 
-    fn update(&mut self, data: &Value) {
-        let mut cancellations: Vec<(f64, String, f64)> = Vec::new();
+    // 新增：创建订单簿快照
+    fn create_order_flow_snapshot(&mut self) {
+        let current_time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
         
+        // 清空旧快照
+        self.order_flow_snapshot.clear();
+        
+        // 创建当前order_flow的快照
+        for (price, order_flow) in &self.order_flows {
+            self.order_flow_snapshot.insert(
+                *price, 
+                (order_flow.bid_ask.bid, order_flow.bid_ask.ask)
+            );
+        }
+        
+        self.last_snapshot_time = current_time;
+    }
+
+    /// 基于depth update触发的orderflow diff计算撤单和增单
+    fn calculate_order_changes_on_depth_update(&mut self) {
+        let current_time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        
+        // 如果没有快照，创建第一个快照并返回
+        if self.order_flow_snapshot.is_empty() {
+            self.create_order_flow_snapshot();
+            return;
+        }
+        
+        // 对每个价格级别进行diff计算
+        for (price, order_flow) in &mut self.order_flows {
+            let current_bid = order_flow.bid_ask.bid;
+            let current_ask = order_flow.bid_ask.ask;
+            
+            // 获取快照中的数据
+            let (snapshot_bid, snapshot_ask) = self.order_flow_snapshot
+                .get(price)
+                .copied()
+                .unwrap_or((0.0, 0.0));
+            
+            // 计算差异
+            let bid_diff = current_bid - snapshot_bid;
+            let ask_diff = current_ask - snapshot_ask;
+            
+            // 更新撤单记录 (realtime_order_cancel)
+            if bid_diff < -0.0001 { // bid减少 = 撤买单
+                order_flow.realtime_cancel_records.bid_cancel = bid_diff.abs();
+                order_flow.realtime_cancel_records.timestamp = current_time;
+            }
+            
+            if ask_diff < -0.0001 { // ask减少 = 撤卖单
+                order_flow.realtime_cancel_records.ask_cancel = ask_diff.abs();
+                order_flow.realtime_cancel_records.timestamp = current_time;
+            }
+            
+            // 更新增加订单记录 (realtime_increase_order)
+            if bid_diff > 0.0001 { // bid增加 = 新增买单
+                order_flow.realtime_increase_order.bid = bid_diff;
+                order_flow.realtime_increase_order.timestamp = current_time;
+            }
+            
+            if ask_diff > 0.0001 { // ask增加 = 新增卖单
+                order_flow.realtime_increase_order.ask = ask_diff;
+                order_flow.realtime_increase_order.timestamp = current_time;
+            }
+        }
+        
+        // 计算完成后，更新快照为当前状态
+        self.create_order_flow_snapshot();
+        
+        // 清理过期的撤单和增加订单记录
+        self.clean_old_order_changes(current_time);
+    }
+
+    fn on_update_depth(&mut self, data: &Value) {
+        let current_time = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64;
+
         // 处理bids数组
         if let Some(bids) = data["b"].as_array() {
             // 获取最优买价（价格最高的）
@@ -265,6 +378,7 @@ impl OrderBookData {
                         let price_ordered = OrderedFloat(price);
                         let order_flow = self.order_flows.entry(price_ordered).or_insert_with(OrderFlow::new);
                         order_flow.bid_ask.bid = qty_f64;
+                        order_flow.bid_ask.timestamp = current_time;
                     }
                 }
             }
@@ -296,10 +410,14 @@ impl OrderBookData {
                         let price_ordered = OrderedFloat(price);
                         let order_flow = self.order_flows.entry(price_ordered).or_insert_with(OrderFlow::new);
                         order_flow.bid_ask.ask = qty_f64;
+                        order_flow.bid_ask.timestamp = current_time;
                     }
                 }
             }
         }
+        
+        // 在depth update后计算订单变化（撤单和增单）
+        self.calculate_order_changes_on_depth_update();
     }
 
     fn clean_old_trades(&mut self) {
@@ -344,7 +462,7 @@ impl OrderBookData {
         }
     }
 
-    fn add_trade(&mut self, data: &Value) {
+    fn on_tick(&mut self, data: &Value, event_buffer: &mut RingBuffer<EventType>) {
         if let (Some(price_str), Some(qty), Some(is_buyer_maker)) = (
             data["p"].as_str(),
             data["q"].as_str(),
@@ -354,6 +472,8 @@ impl OrderBookData {
             let price_ordered = OrderedFloat(price);
             let qty_f64 = qty.parse::<f64>().unwrap_or(0.0);
             let side = if is_buyer_maker { "sell" } else { "buy" };
+            
+            self.detect_order_impact_signal(price, qty_f64, is_buyer_maker, event_buffer);
             
             self.last_trade_side = Some(side.to_string());
             self.current_price = Some(price);
@@ -382,6 +502,69 @@ impl OrderBookData {
             
             // 添加清理过期交易数据的调用
             self.clean_old_trades();
+        }
+    }
+
+    // 新增：检测订单冲击信号
+    fn detect_order_impact_signal(&mut self, trade_price: f64, trade_quantity: f64, is_buyer_maker: bool, event_buffer: &mut RingBuffer<EventType>) {
+        if let Some(ref snapshot) = self.bookticker_snapshot {
+            let current_time = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64;
+            
+            // 主动买单：is_buyer_maker = false 表示主动买入（taker买入）
+            // 主动卖单：is_buyer_maker = true 表示主动卖出（taker卖出）
+            
+            if !is_buyer_maker {
+                // 主动买单：检查成交量是否大于快照中的best ask量
+                if trade_quantity >= snapshot.best_ask_qty {
+                    let signal_data = serde_json::json!({
+                        "signal_type": "order_impact",
+                        "direction": "buy",
+                        "timestamp": current_time,
+                        "trade_price": trade_price,
+                        "trade_quantity": trade_quantity,
+                        "best_ask_price": snapshot.best_ask_price,
+                        "best_ask_quantity": snapshot.best_ask_qty,
+                        "impact_ratio": trade_quantity / snapshot.best_ask_qty,
+                        "description": format!("订单冲击买入信号: 成交量{:.4} >= 最优卖价挂单量{:.4}", trade_quantity, snapshot.best_ask_qty)
+                    });
+                    
+                    event_buffer.push(EventType::Signal(signal_data));
+                }
+            } else {
+                // 主动卖单：检查成交量是否大于快照中的best bid量
+                if trade_quantity >= snapshot.best_bid_qty {
+                    let signal_data = serde_json::json!({
+                        "signal_type": "order_impact",
+                        "direction": "sell",
+                        "timestamp": current_time,
+                        "trade_price": trade_price,
+                        "trade_quantity": trade_quantity,
+                        "best_bid_price": snapshot.best_bid_price,
+                        "best_bid_quantity": snapshot.best_bid_qty,
+                        "impact_ratio": trade_quantity / snapshot.best_bid_qty,
+                        "description": format!("订单冲击卖出信号: 成交量{:.4} >= 最优买价挂单量{:.4}", trade_quantity, snapshot.best_bid_qty)
+                    });
+                    
+                    event_buffer.push(EventType::Signal(signal_data));
+                }
+            }
+        }
+    }
+    
+    // 新增：获取增加订单数量的辅助函数
+    fn get_realtime_increase_volume(&self, price: f64, side: &str) -> f64 {
+        let price_ordered = OrderedFloat(price);
+        if let Some(order_flow) = self.order_flows.get(&price_ordered) {
+            match side {
+                "bid" => order_flow.realtime_increase_order.bid,
+                "ask" => order_flow.realtime_increase_order.ask,
+                _ => 0.0,
+            }
+        } else {
+            0.0
         }
     }
 
@@ -423,17 +606,14 @@ impl OrderBookData {
             0.0
         }
     }
-
-    fn get_best_bid(&self) -> Option<f64> {
-        self.best_bid_price
-    }
     
-    fn get_best_ask(&self) -> Option<f64> {
-        self.best_ask_price
-    }
-    
-    fn handle_book_ticker(&mut self, data: &Value, event_buffer: &mut RingBuffer<EventType>) {
+    fn on_book_ticker(&mut self, data: &Value, event_buffer: &mut RingBuffer<EventType>) {
         // 解析bookTicker数据
+        let current_time = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64;
+
         if let (Some(best_bid_str), Some(best_ask_str), Some(best_bid_qty_str), Some(best_ask_qty_str)) = 
             (data["b"].as_str(), data["a"].as_str(), data["B"].as_str(), data["A"].as_str()) {
             
@@ -448,15 +628,26 @@ impl OrderBookData {
                 // 更新最优买价的挂单量
                 let bid_order_flow = self.order_flows.entry(best_bid_ordered).or_insert_with(OrderFlow::new);
                 bid_order_flow.bid_ask.bid = best_bid_qty;
+                bid_order_flow.bid_ask.timestamp = current_time;
                 
                 // 更新最优卖价的挂单量
                 let ask_order_flow = self.order_flows.entry(best_ask_ordered).or_insert_with(OrderFlow::new);
                 ask_order_flow.bid_ask.ask = best_ask_qty;
-                
+                ask_order_flow.bid_ask.timestamp = current_time;
+
                 // 2. 然后更新最优买卖价格
                 self.best_bid_price = Some(best_bid_price);
                 self.best_ask_price = Some(best_ask_price);
-                
+
+                // 创建快照
+                self.bookticker_snapshot = Some(BookTickerSnapshot {
+                    best_bid_price,
+                    best_ask_price,
+                    best_bid_qty,
+                    best_ask_qty,
+                    timestamp: current_time,
+                });
+
                 // 3. 修正清理逻辑 - 清理不合理的挂单
                 for (price, order_flow) in self.order_flows.iter_mut() {
                     let price_val = price.0;
@@ -606,18 +797,20 @@ impl OrderBookData {
         }
     }
     
-    fn detect_cancellation(&mut self, price: f64, side: &str, volume: f64) {
-        let price_ordered = OrderedFloat(price);
-        let order_flow = self.order_flows.entry(price_ordered).or_insert_with(OrderFlow::new);
-        
-        match side {
-            "bid" => {
-                order_flow.realtime_cancel_records.bid_cancel += volume;
+    /// 清理过期的撤单和增加订单记录
+    fn clean_old_order_changes(&mut self, current_time: u64) {
+        for (_price, order_flow) in self.order_flows.iter_mut() {
+            // 清理过期的撤单记录（5秒后清理）
+            if current_time.saturating_sub(order_flow.realtime_cancel_records.timestamp) > self.cancel_display_duration {
+                order_flow.realtime_cancel_records.bid_cancel = 0.0;
+                order_flow.realtime_cancel_records.ask_cancel = 0.0;
             }
-            "ask" => {
-                order_flow.realtime_cancel_records.ask_cancel += volume;
+            
+            // 清理过期的增加订单记录（3秒后清理）
+            if current_time.saturating_sub(order_flow.realtime_increase_order.timestamp) > 3000 {
+                order_flow.realtime_increase_order.bid = 0.0;
+                order_flow.realtime_increase_order.ask = 0.0;
             }
-            _ => {}
         }
     }
 }
@@ -810,21 +1003,18 @@ impl ReactiveApp {
     }
 
     /// 处理所有事件
-    fn process_events(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        // 1. 读取WebSocket消息到事件缓冲区
-        if self.websocket_manager.is_connected() {
-            let _ = self.websocket_manager.read_messages(&mut self.event_buffer);
-        } else if self.websocket_manager.should_reconnect() {
-            self.websocket_manager.attempt_reconnect(&self.symbol);
+    fn event_loop(&mut self) {
+        loop {
+            // 1. 读取WebSocket消息到事件缓冲区
+            if self.websocket_manager.is_connected() {
+                let _ = self.websocket_manager.read_messages(&mut self.event_buffer);
+            } else if self.websocket_manager.should_reconnect() {
+                self.websocket_manager.attempt_reconnect(&self.symbol);
+            }
+            
+            // 2. 处理事件缓冲区中的事件
+            self.handle_events();
         }
-        
-        // 2. 处理事件缓冲区中的事件
-        self.handle_events();
-        
-        // 3. 生成信号
-        // self.generate_signals();
-        
-        Ok(())
     }
 
     /// 处理事件缓冲区中的事件（非阻塞）
@@ -833,13 +1023,13 @@ impl ReactiveApp {
         while let Some(event) = self.event_buffer.pop() {
             match event {
                 EventType::DepthUpdate(data) => {
-                    self.orderbook.update(&data);
+                    self.orderbook.on_update_depth(&data);
                 }
                 EventType::Trade(data) => {
-                    self.orderbook.add_trade(&data);
+                    self.orderbook.on_tick(&data, &mut self.event_buffer);
                 }
                 EventType::BookTicker(data) => {
-                    self.orderbook.handle_book_ticker(&data, &mut self.event_buffer);
+                    self.orderbook.on_book_ticker(&data, &mut self.event_buffer);
                 }
                 EventType::Signal(signal_data) => {
                     // 处理信号事件，从事件缓冲区读取数据并填充到imbalance_signals列表
@@ -1068,6 +1258,9 @@ fn render_orderbook(f: &mut Frame, app: &mut ReactiveApp, area: Rect) {
                 let ask_cancel_vol = app.orderbook.get_cancel_volume(*price, "ask");
                 let history_sell_trade_vol = app.orderbook.get_history_trade_volume(*price, "sell");
                 let history_buy_trade_vol = app.orderbook.get_history_trade_volume(*price, "buy");
+                // 获取增单数据
+                let bid_increase_vol = app.orderbook.get_realtime_increase_volume(*price, "bid");
+                let ask_increase_vol = app.orderbook.get_realtime_increase_volume(*price, "ask");
 
                 // 构建显示字符串（只有数值大于0才显示，否则显示空字符串）
                 let bid_str = if bid_vol > 0.0 { format!("{:.3}", bid_vol) } else { String::new() };
@@ -1076,6 +1269,8 @@ fn render_orderbook(f: &mut Frame, app: &mut ReactiveApp, area: Rect) {
                 let buy_trade_str = if buy_trade_vol > 0.0 { format!("@{:.3}", buy_trade_vol) } else { String::new() };
                 let bid_cancel_str = if bid_cancel_vol > 0.0 { format!("-{:.3}", bid_cancel_vol) } else { String::new() };
                 let ask_cancel_str = if ask_cancel_vol > 0.0 { format!("-{:.3}", ask_cancel_vol) } else { String::new() };
+                let bid_increase_str = if bid_increase_vol > 0.0 { format!("+{:.3}", bid_increase_vol) } else { String::new() };
+                let ask_increase_str = if ask_increase_vol > 0.0 { format!("+{:.3}", ask_increase_vol) } else { String::new() };
                 
                 // 创建行 - 显示所有价位，不做任何过滤
                 let row = Row::new(vec![
@@ -1100,6 +1295,8 @@ fn render_orderbook(f: &mut Frame, app: &mut ReactiveApp, area: Rect) {
                     Cell::from(ask_str).style(Style::default().fg(Color::Red)),
                     Cell::from(buy_trade_str).style(Style::default().fg(Color::Green)),
                     Cell::from(ask_cancel_str).style(Style::default().fg(Color::Gray)),
+                    Cell::from(bid_increase_str).style(Style::default().fg(Color::Blue)),
+                    Cell::from(ask_increase_str).style(Style::default().fg(Color::Blue)),
                     {
                         let total_vol = history_buy_trade_vol + history_sell_trade_vol;
                         let active_trade_str = if total_vol > 0.0 {
@@ -1136,6 +1333,8 @@ fn render_orderbook(f: &mut Frame, app: &mut ReactiveApp, area: Rect) {
             Cell::from(""),
             Cell::from(""),
             Cell::from(""),
+            Cell::from(""),
+            Cell::from(""),
         ]);
         rows.push(empty_row);
     }
@@ -1156,6 +1355,8 @@ fn render_orderbook(f: &mut Frame, app: &mut ReactiveApp, area: Rect) {
             Constraint::Length(10), // Ask Vol
             Constraint::Length(10), // Buy Trade
             Constraint::Length(10), // Ask Cancel
+            Constraint::Length(10), // Bid Increase
+            Constraint::Length(10), // Ask Increase
             Constraint::Length(25), // History Trades
         ]
     )
@@ -1168,6 +1369,8 @@ fn render_orderbook(f: &mut Frame, app: &mut ReactiveApp, area: Rect) {
             Cell::from("Ask Vol").style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
             Cell::from("Buy Trade").style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
             Cell::from("Ask Cancel").style(Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+            Cell::from("Bid Increase").style(Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD)),
+            Cell::from("Ask Increase").style(Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD)),
             Cell::from("History Trades").style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
         ])
     )
@@ -1375,8 +1578,8 @@ fn cleanup_ui_terminal(mut terminal: Terminal<CrosstermBackend<io::Stdout>>) {
 }
 
 // ==================== 主函数 ====================
-// 基于ringbuffer的纯粹的单线程无锁事件驱动架构的低延迟高频交易系统
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+// 基于ringbuffer的单线程无锁事件驱动架构的低延迟高频交易系统
+fn main() {
     let disable_ui = false;  // 控制UI界面是否显示
     // 读取环境变量SYMBOL，默认为BTCUSDT
     let symbol = env::var("SYMBOL").unwrap_or_else(|_| "BTCUSDT".to_string());
@@ -1395,7 +1598,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 初始化WebSocket连接
     if let Err(e) = app.initialize() {
         eprintln!("初始化失败: {}", e);
-        return Err(e);
+        return;
     }
 
     // 启动UI线程（如果启用UI）
@@ -1404,12 +1607,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ui_thread();
         });
     }
-    
-    // 主事件循环
-    loop {
-        // 核心事件处理（保持原有逻辑不变）
-        if let Err(e) = app.process_events() {
-            eprintln!("事件处理错误: {}", e);
-        }
-    }
+
+    app.event_loop();
+
 }
