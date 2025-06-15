@@ -161,6 +161,18 @@ struct BigOrder {
     timestamp: u64,
 }
 
+#[derive(Debug, Clone)]
+struct OrderImpactSignal {
+    timestamp: u64,
+    direction: String,  // "buy" 或 "sell"
+    trade_price: f64,
+    trade_quantity: f64,
+    best_price: f64,    // 对应的最优买价或卖价
+    best_quantity: f64, // 对应的最优买量或卖量
+    impact_ratio: f64,  // 冲击比率
+    description: String,
+}
+
 
 #[derive(Debug, Clone)]
 struct BookTickerSnapshot {
@@ -202,11 +214,14 @@ struct OrderBookData {
     cancel_signals: Vec<ImbalanceSignal>,
     last_cancel_check: u64,
     
+    // 新增：订单冲击信号列表
+    order_impact_signals: Vec<OrderImpactSignal>,
+    
     iceberg_signals: Vec<ImbalanceSignal>,
     big_orders: HashMap<OrderedFloat<f64>, BigOrder>,
     last_big_order_check: u64,
     active_trades_buffer: HashMap<OrderedFloat<f64>, (f64, f64)>,
-    
+      
     // 新增：500ms比率缓冲区
     ratio_buffer: Vec<(u64, f64, f64)>, // (timestamp, bid_ratio, ask_ratio)
     buffer_window_ms: u64, // 500ms窗口
@@ -254,6 +269,9 @@ impl OrderBookData {
             iceberg_signals: Vec::new(),
             big_orders: HashMap::new(),
             last_big_order_check: 0,
+            
+            // 初始化订单冲击信号
+            order_impact_signals: Vec::new(),
             
             // 初始化新字段
             ratio_buffer: Vec::new(),
@@ -815,37 +833,6 @@ impl OrderBookData {
     }
 }
 
-/// 信号生成器
-struct SignalGenerator {
-    last_check_time: Instant,
-}
-
-impl SignalGenerator {
-    fn new() -> Self {
-        Self {
-            last_check_time: Instant::now(),
-        }
-    }
-
-    fn check_signals(&mut self, orderbook: &OrderBookData) -> Vec<String> {
-        let mut signals = Vec::new();
-        
-        // 检查失衡信号
-        if orderbook.bid_volume_ratio > 0.7 {
-            signals.push("买单失衡信号".to_string());
-        } else if orderbook.ask_volume_ratio > 0.7 {
-            signals.push("卖单失衡信号".to_string());
-        }
-        
-        // 检查大订单信号
-        if !orderbook.big_orders.is_empty() {
-            signals.push("大订单信号".to_string());
-        }
-        
-        signals
-    }
-}
-
 /// WebSocket 连接管理器（非阻塞）
 struct WebSocketManager {
     socket: Option<WebSocket<MaybeTlsStream<TcpStream>>>,
@@ -973,11 +960,9 @@ impl WebSocketManager {
 struct ReactiveApp {
     event_buffer: RingBuffer<EventType>,
     orderbook: OrderBookData,
-    signal_generator: SignalGenerator,
     websocket_manager: WebSocketManager,
     scroll_offset: usize,
     auto_scroll: bool,
-    last_update: Instant,
     symbol: String,
 }
 
@@ -986,11 +971,11 @@ impl ReactiveApp {
         Self {
             event_buffer: RingBuffer::new(10000), // 10K事件缓冲区
             orderbook: OrderBookData::new(),
-            signal_generator: SignalGenerator::new(),
+         
             websocket_manager: WebSocketManager::new(),
             scroll_offset: 0,
             auto_scroll: true,
-            last_update: Instant::now(),
+       
             symbol,
         }
     }
@@ -1035,6 +1020,57 @@ impl ReactiveApp {
                     // 处理信号事件，从事件缓冲区读取数据并填充到imbalance_signals列表
                     if let Some(signal_type) = signal_data["signal_type"].as_str() {
                         match signal_type {
+                            "order_impact" => {
+                                // 处理订单冲击信号（无去重逻辑）
+                                if let (
+                                    Some(timestamp),
+                                    Some(direction),
+                                    Some(trade_price),
+                                    Some(trade_quantity),
+                                    Some(impact_ratio),
+                                    Some(description)
+                                ) = (
+                                    signal_data["timestamp"].as_u64(),
+                                    signal_data["direction"].as_str(),
+                                    signal_data["trade_price"].as_f64(),
+                                    signal_data["trade_quantity"].as_f64(),
+                                    signal_data["impact_ratio"].as_f64(),
+                                    signal_data["description"].as_str()
+                                ) {
+                                    // 获取最优价格和数量
+                                    let (best_price, best_quantity) = if direction == "buy" {
+                                        (
+                                            signal_data["best_ask_price"].as_f64().unwrap_or(0.0),
+                                            signal_data["best_ask_quantity"].as_f64().unwrap_or(0.0)
+                                        )
+                                    } else {
+                                        (
+                                            signal_data["best_bid_price"].as_f64().unwrap_or(0.0),
+                                            signal_data["best_bid_quantity"].as_f64().unwrap_or(0.0)
+                                        )
+                                    };
+                                    
+                                    // 直接创建并添加订单冲击信号，无去重处理
+                                    let order_impact_signal = OrderImpactSignal {
+                                        timestamp,
+                                        direction: direction.to_string(),
+                                        trade_price,
+                                        trade_quantity,
+                                        best_price,
+                                        best_quantity,
+                                        impact_ratio,
+                                        description: description.to_string(),
+                                    };
+                                    
+                                    // 直接添加到orderbook的order_impact_signals列表
+                                    self.orderbook.order_impact_signals.push(order_impact_signal);
+                                    
+                                    // 限制列表长度为30（减少内存使用）
+                                    if self.orderbook.order_impact_signals.len() > 30 {
+                                        self.orderbook.order_impact_signals.remove(0);
+                                    }
+                                }
+                            }
                             "imbalance" => {
                                 // 解析失衡信号数据
                                 if let (Some(timestamp), Some(ratio), Some(description)) = (
@@ -1118,14 +1154,6 @@ impl ReactiveApp {
             }
         }
     }
-
-    /// 生成信号
-    // fn generate_signals(&mut self) {
-    //     let signals = self.signal_generator.check_signals(&self.orderbook);
-    //     for signal in signals {
-    //         self.event_buffer.push(EventType::Signal(signal));
-    //     }
-    // }
 
     fn scroll_up(&mut self) {
         if self.scroll_offset > 0 {
@@ -1460,16 +1488,92 @@ fn render_orderbook_imbalance(f: &mut Frame, app: &ReactiveApp, area: Rect) {
     f.render_widget(paragraph, area);
 }
 
-// 渲染订单动量信号
-fn render_order_momentum(f: &mut Frame, _app: &ReactiveApp, area: Rect) {
+// 渲染订单动量信号（增强版）
+fn render_order_momentum(f: &mut Frame, app: &ReactiveApp, area: Rect) {
     let block = Block::default()
-        .title("Order Momentum")
+        .title("Order Impact")
         .borders(Borders::ALL);
     
-    let text = Text::from("订单动量分析");
+    let order_impact_signals = &app.orderbook.order_impact_signals;
+    let mut lines = Vec::new();
+    
+    // 计算最近5分钟的统计信息
+    let current_time = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let five_minutes_ago = current_time - 300_000; // 5分钟前
+    
+    let recent_signals: Vec<_> = order_impact_signals
+        .iter()
+        .filter(|s| s.timestamp > five_minutes_ago)
+        .collect();
+    
+    let buy_count = recent_signals.iter().filter(|s| s.direction == "buy").count();
+    let sell_count = recent_signals.iter().filter(|s| s.direction == "sell").count();
+    
+    // 显示统计信息
+    let stats_line = format!("5分钟内: 买入冲击{}次 | 卖出冲击{}次", buy_count, sell_count);
+    lines.push(Line::from(Span::styled(stats_line, Style::default().fg(Color::Cyan))));
+    lines.push(Line::from(Span::raw(""))); // 空行
+    
+    // 显示最近的信号
+    for signal in order_impact_signals.iter().rev().take(12) {
+        // 时间格式化
+        let time = SystemTime::UNIX_EPOCH + Duration::from_millis(signal.timestamp);
+        let seconds = time.duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs();
+        let hours = (seconds / 3600) % 24;
+        let minutes = (seconds / 60) % 60;
+        let secs = seconds % 60;
+        let formatted_time = format!("{:02}:{:02}:{:02}", hours, minutes, secs);
+        
+        // 根据冲击强度设置颜色
+        let intensity_color = if signal.impact_ratio >= 3.0 {
+            Color::Magenta // 强冲击
+        } else if signal.impact_ratio >= 2.0 {
+            if signal.direction == "buy" { Color::Green } else { Color::Red }
+        } else {
+            Color::Yellow // 弱冲击
+        };
+        
+        let (symbol, direction_text) = match signal.direction.as_str() {
+            "buy" => ("🔥↗", "买入冲击"),
+            "sell" => ("🔥↘", "卖出冲击"),
+            _ => ("?", "未知")
+        };
+        
+        // 主信息行
+        let main_line = format!(
+            "[{}] {} {:.4} ({:.1}x)",
+            formatted_time,
+            symbol,
+            signal.trade_price,
+            signal.impact_ratio
+        );
+        
+        lines.push(Line::from(Span::styled(main_line, Style::default().fg(intensity_color))));
+        
+        // 详细信息行
+        let detail_line = format!(
+            "  成交:{:.4} vs 挂单:{:.4}",
+            signal.trade_quantity,
+            signal.best_quantity
+        );
+        
+        lines.push(Line::from(Span::styled(detail_line, Style::default().fg(Color::Gray))));
+    }
+    
+    if order_impact_signals.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "等待订单冲击信号...", 
+            Style::default().fg(Color::DarkGray)
+        )));
+    }
+    
+    let text = Text::from(lines);
     let paragraph = Paragraph::new(text)
         .block(block)
-        .style(Style::default().fg(Color::White));
+        .wrap(Wrap { trim: true });
     
     f.render_widget(paragraph, area);
 }
