@@ -26,6 +26,11 @@ use tungstenite::{
     Message, WebSocket,
 };
 
+use std::sync::atomic::{AtomicPtr, Ordering};
+use std::ptr;
+
+static APP_PTR: AtomicPtr<ReactiveApp> = AtomicPtr::new(ptr::null_mut());
+
 // ==================== 核心数据结构 ====================
 
 /// 高性能循环缓冲区
@@ -702,8 +707,6 @@ impl WebSocketManager {
             return Ok(0);
         }
         
-        // 移除消息数量限制，处理所有可用消息 - 高频交易系统优化
-        
         if let Some(ref mut socket) = self.socket {
             loop {
                 match socket.read() {
@@ -750,7 +753,7 @@ impl WebSocketManager {
                 }
             }
         }
-        return Ok(0);
+        Ok(0)
     }
 
     fn is_connected(&self) -> bool {
@@ -806,8 +809,8 @@ impl ReactiveApp {
         Ok(())
     }
 
-    /// 单线程事件循环核心 - 处理所有事件
-    fn event_loop(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    /// 处理所有事件
+    fn process_events(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         // 1. 读取WebSocket消息到事件缓冲区
         if self.websocket_manager.is_connected() {
             let _ = self.websocket_manager.read_messages(&mut self.event_buffer);
@@ -816,7 +819,7 @@ impl ReactiveApp {
         }
         
         // 2. 处理事件缓冲区中的事件
-        self.process_events();
+        self.handle_events();
         
         // 3. 生成信号
         // self.generate_signals();
@@ -825,7 +828,8 @@ impl ReactiveApp {
     }
 
     /// 处理事件缓冲区中的事件（非阻塞）
-    fn process_events(&mut self) {
+    fn handle_events(&mut self) {
+        // 这里的while循环是为了加速处理evebt buffer当中存在的事件 清空buffer然后进入下一轮 避免消息阻塞
         while let Some(event) = self.event_buffer.pop() {
             match event {
                 EventType::DepthUpdate(data) => {
@@ -981,17 +985,6 @@ impl ReactiveApp {
 }
 
 // ==================== UI渲染函数 ====================
-
-// 安全的字符串截断函数
-fn safe_truncate(s: &str, max_len: usize) -> String {
-    if s.chars().count() <= max_len {
-        s.to_string()
-    } else {
-        let truncated: String = s.chars().take(max_len.saturating_sub(3)).collect();
-        format!("{}...", truncated)
-    }
-}
-
 fn render_ui(f: &mut Frame, app: &mut ReactiveApp) {
     let size = f.area();
     
@@ -1314,11 +1307,77 @@ fn render_iceberg_orders(f: &mut Frame, app: &ReactiveApp, area: Rect) {
     f.render_widget(paragraph, area);
 }
 
+// UI线程函数，采用与主线程相同的调用方式
+fn ui_thread() {
+    // 设置UI终端
+    let mut terminal = setup_ui_terminal().expect("Failed to setup UI terminal");
+    
+    loop {
+        // 每50ms刷新一次UI
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        
+        // 直接通过原子指针访问app实例（无锁）
+        let app_ptr = APP_PTR.load(Ordering::Acquire);
+        if !app_ptr.is_null() {
+            unsafe {
+                let app = &mut *app_ptr;
+                // 采用与主线程相同的调用方式
+                let _ = terminal.draw(|f| render_ui(f, app));
+            }
+        }
+        
+        // 处理UI事件（退出等）
+        if crossterm::event::poll(Duration::from_millis(0)).unwrap_or(false) {
+            if let Ok(Event::Key(key)) = crossterm::event::read() {
+                if key.kind == KeyEventKind::Press {
+                    match key.code {
+                        KeyCode::Char('q') | KeyCode::Esc => break,
+                        KeyCode::Up => {
+                            unsafe {
+                                let app = &mut *app_ptr;
+                                app.scroll_up();
+                            }
+                        },
+                        KeyCode::Down => {
+                            unsafe {
+                                let app = &mut *app_ptr;
+                                app.scroll_down();
+                            }
+                        },
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    
+    cleanup_ui_terminal(terminal);
+}
+
+// 设置UI终端
+fn setup_ui_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>, Box<dyn std::error::Error>> {
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    let backend = CrosstermBackend::new(stdout);
+    Ok(Terminal::new(backend)?)
+}
+
+// 清理UI终端
+fn cleanup_ui_terminal(mut terminal: Terminal<CrosstermBackend<io::Stdout>>) {
+    let _ = disable_raw_mode();
+    let _ = execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    );
+    let _ = terminal.show_cursor();
+}
+
 // ==================== 主函数 ====================
 // 基于ringbuffer的纯粹的单线程无锁事件驱动架构的低延迟高频交易系统
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // 移除 env_logger::init();
-    
+    let disable_ui = false;  // 控制UI界面是否显示
     // 读取环境变量SYMBOL，默认为BTCUSDT
     let symbol = env::var("SYMBOL").unwrap_or_else(|_| "BTCUSDT".to_string());
     
@@ -1328,69 +1387,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     }
     
-    // 设置终端
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
-    
     // 创建响应式应用
     let mut app = ReactiveApp::new(symbol.clone());
-    
+    // 设置全局app指针
+    APP_PTR.store(&mut app as *mut ReactiveApp, Ordering::Release);
+
     // 初始化WebSocket连接
     if let Err(e) = app.initialize() {
         eprintln!("初始化失败: {}", e);
         return Err(e);
     }
-    
-    // 主事件循环（单线程）
-    loop {
-        // 核心事件处理
-        if let Err(e) = app.event_loop() {
-            eprintln!("事件处理错误: {}", e);
-        }
-        
-        // 渲染UI
-        terminal.draw(|f| render_ui(f, &mut app))?;
-        
-        // 处理键盘输入（非阻塞）
-        if crossterm::event::poll(Duration::from_millis(0))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press {
-                    if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
-                        if let KeyCode::Char('c') = key.code {
-                            break;
-                        }
-                    }
-                    
-                    match key.code {
-                        KeyCode::Up => app.scroll_up(),
-                        KeyCode::Down => app.scroll_down(),
-                        KeyCode::Char('q') => break,
-                        KeyCode::Char('r') => {
-                            // 手动重连
-                            app.websocket_manager.attempt_reconnect(&symbol);
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
-        
-        // 短暂休眠以避免过度占用CPU（微秒级精度）
-        std::thread::sleep(Duration::from_micros(100));
+
+    // 启动UI线程（如果启用UI）
+    if !disable_ui {
+        std::thread::spawn(|| {
+            ui_thread();
+        });
     }
     
-    // 清理终端
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
-    terminal.show_cursor()?;
-    
-    println!("程序正常退出");
-    Ok(())
+    // 主事件循环
+    loop {
+        // 核心事件处理（保持原有逻辑不变）
+        if let Err(e) = app.process_events() {
+            eprintln!("事件处理错误: {}", e);
+        }
+    }
 }
