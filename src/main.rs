@@ -1660,9 +1660,27 @@ fn cleanup_ui_terminal(mut terminal: Terminal<CrosstermBackend<io::Stdout>>) {
     let _ = terminal.show_cursor();
 }
 
+fn core_affinity_setup() {
+    // 绑定到当前线程到第一个CPU核心（通常是CPU0）
+    let core_ids = core_affinity::get_core_ids().unwrap();
+    
+    // 绑定到第一个CPU核心（通常是CPU0）
+    if let Some(core_id) = core_ids.get(1) {
+        if core_affinity::set_for_current(*core_id) {
+            println!("Successfully bound to CPU core {:?}", core_id);
+        } else {
+            eprintln!("Failed to set CPU affinity");
+        }
+    }
+}
+
 // ==================== 主函数 ====================
 // 基于ringbuffer的单线程无锁事件驱动架构的低延迟高频交易系统
 fn main() {
+
+    // CPU亲和性设置
+    core_affinity_setup();
+  
     let disable_ui = false;  // 控制UI界面是否显示
     // 读取环境变量SYMBOL，默认为BTCUSDT
     let symbol = env::var("SYMBOL").unwrap_or_else(|_| "BTCUSDT".to_string());
