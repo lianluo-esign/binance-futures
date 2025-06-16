@@ -26,15 +26,12 @@ use tungstenite::{
     Message, WebSocket,
 };
 
-use std::sync::atomic::{AtomicPtr, Ordering};
-use std::ptr;
 
-static APP_PTR: AtomicPtr<ReactiveApp> = AtomicPtr::new(ptr::null_mut());
 
 // ==================== 核心数据结构 ====================
 
 /// 高性能循环缓冲区
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct RingBuffer<T> {
     buffer: Vec<Option<T>>,
     capacity: usize,
@@ -183,6 +180,7 @@ struct BookTickerSnapshot {
     timestamp: u64,
 }
 
+#[derive(Debug, Clone)]
 /// 订单簿数据管理
 struct OrderBookData {
     order_flows: BTreeMap<OrderedFloat<f64>, OrderFlow>,
@@ -376,7 +374,7 @@ impl OrderBookData {
             let mut new_best_bid: Option<f64> = None;
             
             // 直接使用第一个元素作为最优买价
-            if !bids.is_empty() {
+            if !bids.is_empty() && bids[0].as_array().map_or(false, |arr| arr.len() >= 2) {
                 if let (Some(price_str), Some(qty_str)) = (bids[0][0].as_str(), bids[0][1].as_str()) {
                     if let (Ok(price), Ok(qty)) = (price_str.parse::<f64>(), qty_str.parse::<f64>()) {
                         if price > 0.0 && qty > 0.0 {
@@ -408,7 +406,7 @@ impl OrderBookData {
             let mut new_best_ask: Option<f64> = None;
             
             // 直接使用第一个元素作为最优卖价
-            if !asks.is_empty() {
+            if !asks.is_empty() && asks[0].as_array().map_or(false, |arr| arr.len() >= 2) {
                 if let (Some(price_str), Some(qty_str)) = (asks[0][0].as_str(), asks[0][1].as_str()) {
                     if let (Ok(price), Ok(qty)) = (price_str.parse::<f64>(), qty_str.parse::<f64>()) {
                         if price > 0.0 && qty > 0.0 {
@@ -833,6 +831,7 @@ impl OrderBookData {
     }
 }
 
+#[derive(Debug)]
 /// WebSocket 连接管理器（非阻塞）
 struct WebSocketManager {
     socket: Option<WebSocket<MaybeTlsStream<TcpStream>>>,
@@ -891,24 +890,30 @@ impl WebSocketManager {
             loop {
                 match socket.read() {
                     Ok(Message::Text(text)) => {
-                        if let Ok(data) = serde_json::from_str::<Value>(&text) {
-                            if let Some(stream) = data["stream"].as_str() {
-                                if let Some(event_data) = data["data"].as_object() {
-                                    let event_value = serde_json::Value::Object(event_data.clone());
-                                    
-                                    let event = if stream.contains("depth") {
-                                        EventType::DepthUpdate(event_value)
-                                    } else if stream.contains("aggTrade") {
-                                        EventType::Trade(event_value)
-                                    } else if stream.contains("bookTicker") {
-                                        EventType::BookTicker(event_value)
-                                    } else {
-                                        continue;
-                                    };
-                                    
-                                    event_buffer.push(event);
-                                   
+                        match serde_json::from_str::<Value>(&text) {
+                            Ok(data) => {
+                                if let Some(stream) = data["stream"].as_str() {
+                                    if let Some(event_data) = data["data"].as_object() {
+                                        let event_value = serde_json::Value::Object(event_data.clone());
+                                        
+                                        let event = if stream.contains("depth") {
+                                            EventType::DepthUpdate(event_value)
+                                        } else if stream.contains("aggTrade") {
+                                            EventType::Trade(event_value)
+                                        } else if stream.contains("bookTicker") {
+                                            EventType::BookTicker(event_value)
+                                        } else {
+                                            continue;
+                                        };
+                                        
+                                        event_buffer.push(event);
+                                       
+                                    }
                                 }
+                            }
+                            Err(e) => {
+                                eprintln!("JSON 解析错误: {}", e);
+                                continue;
                             }
                         }
                     }
@@ -956,6 +961,7 @@ impl WebSocketManager {
     }
 }
 
+#[derive(Debug)]
 /// 响应式应用主结构（单线程）
 struct ReactiveApp {
     event_buffer: RingBuffer<EventType>,
@@ -987,25 +993,32 @@ impl ReactiveApp {
         Ok(())
     }
 
-    /// 处理所有事件
+    /// 处理单次事件循环（非阻塞）
     fn event_loop(&mut self) {
-        loop {
-            // 1. 读取WebSocket消息到事件缓冲区
-            if self.websocket_manager.is_connected() {
-                let _ = self.websocket_manager.read_messages(&mut self.event_buffer);
-            } else if self.websocket_manager.should_reconnect() {
-                self.websocket_manager.attempt_reconnect(&self.symbol);
-            }
-            
-            // 2. 处理事件缓冲区中的事件
-            self.handle_events();
+        // 1. 读取WebSocket消息到事件缓冲区
+        if self.websocket_manager.is_connected() {
+            let _ = self.websocket_manager.read_messages(&mut self.event_buffer);
+        } else if self.websocket_manager.should_reconnect() {
+            self.websocket_manager.attempt_reconnect(&self.symbol);
         }
+        
+        // 2. 处理事件缓冲区中的事件
+        self.handle_events();
     }
 
     /// 处理事件缓冲区中的事件（非阻塞）
     fn handle_events(&mut self) {
-        // 这里的while循环是为了加速处理evebt buffer当中存在的事件 清空buffer然后进入下一轮 避免消息阻塞
+        // 限制每次处理的事件数量，避免UI阻塞
+        let mut processed_count = 0;
+        const MAX_EVENTS_PER_CYCLE: usize = 100;
+        
         while let Some(event) = self.event_buffer.pop() {
+            if processed_count >= MAX_EVENTS_PER_CYCLE {
+                // 将事件放回缓冲区
+                self.event_buffer.push(event);
+                break;
+            }
+            processed_count += 1;
             match event {
                 EventType::DepthUpdate(data) => {
                     self.orderbook.on_update_depth(&data);
@@ -1030,12 +1043,12 @@ impl ReactiveApp {
                                     Some(impact_ratio),
                                     Some(description)
                                 ) = (
-                                    signal_data["timestamp"].as_u64(),
-                                    signal_data["direction"].as_str(),
-                                    signal_data["trade_price"].as_f64(),
-                                    signal_data["trade_quantity"].as_f64(),
-                                    signal_data["impact_ratio"].as_f64(),
-                                    signal_data["description"].as_str()
+                                    signal_data.get("timestamp").and_then(|v| v.as_u64()),
+                                    signal_data.get("direction").and_then(|v| v.as_str()),
+                                    signal_data.get("trade_price").and_then(|v| v.as_f64()),
+                                    signal_data.get("trade_quantity").and_then(|v| v.as_f64()),
+                                    signal_data.get("impact_ratio").and_then(|v| v.as_f64()),
+                                    signal_data.get("description").and_then(|v| v.as_str())
                                 ) {
                                     // 获取最优价格和数量
                                     let (best_price, best_quantity) = if direction == "buy" {
@@ -1167,7 +1180,16 @@ impl ReactiveApp {
         self.auto_scroll = false;
     }
 
-    fn auto_scroll(&mut self, current_price_index: Option<usize>, visible_rows: usize) {
+
+
+    fn get_buffer_status(&self) -> (usize, usize) {
+        (self.event_buffer.len(), self.event_buffer.capacity())
+    }
+}
+
+impl ReactiveApp {
+    // 移动auto_scroll函数到ReactiveApp的impl块内
+    fn auto_scroll(&self, current_price_index: Option<usize>, visible_rows: usize) -> usize {
         if let Some(price_index) = current_price_index {
             let visible_start = self.scroll_offset;
             let visible_end = self.scroll_offset + visible_rows;
@@ -1179,31 +1201,31 @@ impl ReactiveApp {
                 // 如果距离上边界或下边界3行以内，调整滚动位置让游标居中
                 if relative_position <= 3 || relative_position >= visible_rows.saturating_sub(3) {
                     let center_position = visible_rows / 2;
-                    self.scroll_offset = if price_index >= center_position {
+                    if price_index >= center_position {
                         price_index - center_position
                     } else {
                         0
-                    };
+                    }
+                } else {
+                    self.scroll_offset
                 }
             } else {
                 // 如果不在可见区域，立即跳转到居中位置
                 let center_position = visible_rows / 2;
-                self.scroll_offset = if price_index >= center_position {
+                if price_index >= center_position {
                     price_index - center_position
                 } else {
                     0
-                };
+                }
             }
+        } else {
+            self.scroll_offset
         }
-    }
-
-    fn get_buffer_status(&self) -> (usize, usize) {
-        (self.event_buffer.len(), self.event_buffer.capacity())
     }
 }
 
 // ==================== UI渲染函数 ====================
-fn render_ui(f: &mut Frame, app: &mut ReactiveApp) {
+fn render_ui(f: &mut Frame, app: &ReactiveApp) {
     let size = f.area();
     
     // 创建左右布局
@@ -1222,7 +1244,7 @@ fn render_ui(f: &mut Frame, app: &mut ReactiveApp) {
     render_signals(f, app, signal_area);
 }
 
-fn render_orderbook(f: &mut Frame, app: &mut ReactiveApp, area: Rect) {
+fn render_orderbook(f: &mut Frame, app: &ReactiveApp, area: Rect) {
     let (buffer_len, buffer_cap) = app.get_buffer_status();
     let connection_status = if app.websocket_manager.is_connected() {
         "已连接"
@@ -1367,10 +1389,12 @@ fn render_orderbook(f: &mut Frame, app: &mut ReactiveApp, area: Rect) {
         rows.push(empty_row);
     }
     
-    // 应用滚动逻辑
+    // 应用滚动逻辑 - 使用ReactiveApp的方法
     let visible_rows_count = centered_area.height.saturating_sub(3) as usize;
-    app.auto_scroll(current_price_index, visible_rows_count);
-    let visible_rows: Vec<_> = rows.into_iter().skip(app.scroll_offset).collect();
+    let new_scroll_offset = app.auto_scroll(current_price_index, visible_rows_count);
+    
+    // 使用计算出的滚动偏移
+    let visible_rows: Vec<_> = rows.into_iter().skip(new_scroll_offset).collect();
     
     // 创建并渲染表格
     let table = Table::new(
@@ -1412,9 +1436,9 @@ fn render_signals(f: &mut Frame, app: &ReactiveApp, area: Rect) {
     let signal_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Percentage(40), // Orderbook Imbalance 占40%
-            Constraint::Percentage(30), // Order Momentum 占30%
-            Constraint::Percentage(30), // Iceberg Orders 占30%
+            Constraint::Percentage(20), // Orderbook Imbalance 占40%
+            Constraint::Percentage(20), // Order Momentum 占30%
+            Constraint::Percentage(20), // Iceberg Orders 占30%
         ])
         .split(area);
     
@@ -1614,52 +1638,7 @@ fn render_iceberg_orders(f: &mut Frame, app: &ReactiveApp, area: Rect) {
     f.render_widget(paragraph, area);
 }
 
-// UI线程函数，采用与主线程相同的调用方式
-fn ui_thread() {
-    // 设置UI终端
-    let mut terminal = setup_ui_terminal().expect("Failed to setup UI terminal");
-    
-    loop {
-        // 每50ms刷新一次UI
-        std::thread::sleep(std::time::Duration::from_millis(1));
-        
-        // 直接通过原子指针访问app实例（无锁）
-        let app_ptr = APP_PTR.load(Ordering::Acquire);
-        if !app_ptr.is_null() {
-            unsafe {
-                let app = &mut *app_ptr;
-                // 采用与主线程相同的调用方式
-                let _ = terminal.draw(|f| render_ui(f, app));
-            }
-        }
-        
-        // 处理UI事件（退出等）
-        if crossterm::event::poll(Duration::from_millis(0)).unwrap_or(false) {
-            if let Ok(Event::Key(key)) = crossterm::event::read() {
-                if key.kind == KeyEventKind::Press {
-                    match key.code {
-                        KeyCode::Char('q') | KeyCode::Esc => break,
-                        KeyCode::Up => {
-                            unsafe {
-                                let app = &mut *app_ptr;
-                                app.scroll_up();
-                            }
-                        },
-                        KeyCode::Down => {
-                            unsafe {
-                                let app = &mut *app_ptr;
-                                app.scroll_down();
-                            }
-                        },
-                        _ => {}
-                    }
-                }
-            }
-        }
-    }
-    
-    cleanup_ui_terminal(terminal);
-}
+
 
 // 设置UI终端
 fn setup_ui_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>, Box<dyn std::error::Error>> {
@@ -1696,22 +1675,47 @@ fn main() {
     
     // 创建响应式应用
     let mut app = ReactiveApp::new(symbol.clone());
-    // 设置全局app指针
-    APP_PTR.store(&mut app as *mut ReactiveApp, Ordering::Release);
-
+    
     // 初始化WebSocket连接
     if let Err(e) = app.initialize() {
         eprintln!("初始化失败: {}", e);
         return;
     }
-
-    // 启动UI线程（如果启用UI）
-    if !disable_ui {
-        std::thread::spawn(|| {
-            ui_thread();
-        });
+    
+    // 设置UI终端（如果启用UI）
+    let mut terminal = if !disable_ui {
+        Some(setup_ui_terminal().expect("Failed to setup UI terminal"))
+    } else {
+        None
+    };
+    
+    // 主事件循环 - 集成WebSocket处理和UI刷新
+    loop {
+        // 处理WebSocket事件
+        app.event_loop();
+        
+        // 刷新UI（如果启用）
+        if let Some(ref mut term) = terminal {
+            let _ = term.draw(|f| render_ui(f, &mut app));
+            
+            // 处理UI事件（非阻塞）
+            if crossterm::event::poll(Duration::from_millis(0)).unwrap_or(false) {
+                if let Ok(Event::Key(key)) = crossterm::event::read() {
+                    if key.kind == KeyEventKind::Press {
+                        match key.code {
+                            KeyCode::Char('q') | KeyCode::Esc => break,
+                            KeyCode::Up => app.scroll_up(),
+                            KeyCode::Down => app.scroll_down(),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
     }
-
-    app.event_loop();
-
+    
+    // 清理UI终端
+    if let Some(term) = terminal {
+        cleanup_ui_terminal(term);
+    }
 }
