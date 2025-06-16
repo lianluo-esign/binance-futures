@@ -229,6 +229,20 @@ struct OrderBookData {
     order_flow_snapshot: BTreeMap<OrderedFloat<f64>, (f64, f64)>, // (bid_qty, ask_qty)
     last_snapshot_time: u64,
     bookticker_snapshot: Option<BookTickerSnapshot>,
+    
+    // 新增：实时波动速度相关字段
+    price_speed: f64, // 当前波动速度 (tick/200ms)
+    tick_buffer: Vec<u64>, // 存储tick的时间戳
+    speed_window_ms: u64, // 200ms窗口
+
+    speed_history: Vec<(u64, f64)>, // 存储历史速度数据 (timestamp, speed)
+    avg_speed_window_ms: u64, // 5秒窗口 = 5000ms
+    avg_speed: f64, // 5秒平均速度
+
+    // 波动率相关
+    volatility_buffer: Vec<(u64, f64)>, // 存储tick价格数据 (timestamp, price)
+    volatility_window_ms: u64, // 5秒窗口 = 5000ms
+    volatility: f64, // 5秒价格波动率
 }
 
 impl OrderBookData {
@@ -280,6 +294,20 @@ impl OrderBookData {
             order_flow_snapshot: BTreeMap::new(),
             last_snapshot_time: 0,
             bookticker_snapshot: None,
+            
+            // 初始化实时波动速度相关字段
+            price_speed: 0.0,
+            tick_buffer: Vec::new(),
+            speed_window_ms: 100,
+
+            speed_history: Vec::new(),
+            avg_speed_window_ms: 5000, // 5秒窗口
+            avg_speed: 0.0,
+
+            // 波动率
+            volatility_buffer: Vec::new(),
+            volatility_window_ms: 5000, // 5秒窗口
+            volatility: 0.0,
         }
     }
 
@@ -302,6 +330,88 @@ impl OrderBookData {
         }
         
         self.last_snapshot_time = current_time;
+    }
+
+    fn calculate_volatility(&mut self, timestamp: u64, price: f64) {
+        // 添加当前tick的时间戳和价格
+        self.volatility_buffer.push((timestamp, price));
+        
+        // 清理超过5秒窗口的旧数据
+        let cutoff_time = timestamp.saturating_sub(self.volatility_window_ms);
+        self.volatility_buffer.retain(|&(ts, _)| ts >= cutoff_time);
+        
+        // 至少需要2个数据点才能计算波动率
+        if self.volatility_buffer.len() < 2 {
+            self.volatility = 0.0;
+            return;
+        }
+        
+        // 计算对数收益率
+        let mut returns = Vec::new();
+        for i in 1..self.volatility_buffer.len() {
+            let prev_price = self.volatility_buffer[i-1].1;
+            let curr_price = self.volatility_buffer[i].1;
+            
+            // 避免除以零
+            if prev_price > 0.0 {
+                let log_return = (curr_price / prev_price).ln();
+                returns.push(log_return);
+            }
+        }
+        
+        // 计算标准差（波动率）
+        if !returns.is_empty() {
+            let mean: f64 = returns.iter().sum::<f64>() / returns.len() as f64;
+            let variance: f64 = returns.iter()
+                .map(|&r| (r - mean).powi(2))
+                .sum::<f64>() / returns.len() as f64;
+            
+            // 将标准差乘以100000使数值更明显
+            self.volatility = variance.sqrt() * 100000.0;
+        } else {
+            self.volatility = 0.0;
+        }
+    }
+    
+    // 获取波动率
+    fn get_volatility(&self) -> f64 {
+        self.volatility
+    }
+
+    fn calculate_price_speed(&mut self, timestamp: u64) {
+        // 添加当前tick的时间戳
+        self.tick_buffer.push(timestamp);
+        
+        // 清理超过200ms窗口的旧数据
+        let cutoff_time = timestamp.saturating_sub(self.speed_window_ms);
+        self.tick_buffer.retain(|&ts| ts >= cutoff_time);
+        
+        // 计算当前200ms窗口内的tick数量
+        self.price_speed = self.tick_buffer.len() as f64;
+        
+        // 记录当前速度到历史数据
+        self.speed_history.push((timestamp, self.price_speed));
+        
+        // 清理超过5秒窗口的旧速度数据
+        let avg_cutoff_time = timestamp.saturating_sub(self.avg_speed_window_ms);
+        self.speed_history.retain(|&(ts, _)| ts >= avg_cutoff_time);
+        
+        // 计算5秒平均速度
+        if !self.speed_history.is_empty() {
+            let total_speed: f64 = self.speed_history.iter().map(|&(_, speed)| speed).sum();
+            self.avg_speed = total_speed / self.speed_history.len() as f64;
+        } else {
+            self.avg_speed = 0.0;
+        }
+    }
+    
+    // 新增：获取当前波动速度
+    fn get_price_speed(&self) -> f64 {
+        self.price_speed
+    }
+
+    fn get_avg_price_speed(&self) -> f64 {
+        self.avg_speed
     }
 
     /// 基于depth update触发的orderflow diff计算撤单和增单
@@ -498,7 +608,9 @@ impl OrderBookData {
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_millis() as u64;
+
             
+
             let order_flow = self.order_flows.entry(price_ordered).or_insert_with(OrderFlow::new);
             
             match side {
@@ -515,6 +627,9 @@ impl OrderBookData {
             
             order_flow.realtime_trade_record.timestamp = current_time;
             order_flow.history_trade_record.timestamp = current_time;
+
+            self.calculate_price_speed(current_time);
+            self.calculate_volatility(current_time, price);
             
             // 添加清理过期交易数据的调用
             self.clean_old_trades();
@@ -975,7 +1090,7 @@ struct ReactiveApp {
 impl ReactiveApp {
     fn new(symbol: String) -> Self {
         Self {
-            event_buffer: RingBuffer::new(10000), // 10K事件缓冲区
+            event_buffer: RingBuffer::new(1000), // 1K事件缓冲区
             orderbook: OrderBookData::new(),
          
             websocket_manager: WebSocketManager::new(),
@@ -1079,7 +1194,7 @@ impl ReactiveApp {
                                     self.orderbook.order_impact_signals.push(order_impact_signal);
                                     
                                     // 限制列表长度为30（减少内存使用）
-                                    if self.orderbook.order_impact_signals.len() > 30 {
+                                    if self.orderbook.order_impact_signals.len() > 50 {
                                         self.orderbook.order_impact_signals.remove(0);
                                     }
                                 }
@@ -1432,24 +1547,114 @@ fn render_orderbook(f: &mut Frame, app: &ReactiveApp, area: Rect) {
 }
 
 fn render_signals(f: &mut Frame, app: &ReactiveApp, area: Rect) {
-    // 将右侧信号区域分为三个垂直部分
+    // 将右侧信号区域分为五个垂直部分（增加了波动率区域）
     let signal_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Percentage(20), // Orderbook Imbalance 占40%
-            Constraint::Percentage(20), // Order Momentum 占30%
-            Constraint::Percentage(20), // Iceberg Orders 占30%
+            Constraint::Percentage(10), // Orderbook Imbalance 占20%
+            Constraint::Percentage(60), // Order Momentum 占20%
+            Constraint::Percentage(15), // Price Speed 占20%
+            Constraint::Percentage(15), // Volatility 占20%（新增）
         ])
         .split(area);
     
     let imbalance_area = signal_chunks[0];
     let momentum_area = signal_chunks[1];
-    let iceberg_area = signal_chunks[2];
+    let price_speed_area = signal_chunks[2];
+    let volatility_area = signal_chunks[3]; // 新增：波动率区域
     
-    // 渲染三个信号区域
+    // 渲染各个信号区域
     render_orderbook_imbalance(f, app, imbalance_area);
     render_order_momentum(f, app, momentum_area);
-    render_iceberg_orders(f, app, iceberg_area);
+    render_price_speed(f, app, price_speed_area);
+    render_volatility(f, app, volatility_area); // 新增：渲染波动率
+}
+
+// 渲染Price Speed函数
+fn render_price_speed(f: &mut Frame, app: &ReactiveApp, area: Rect) {
+    let block = Block::default()
+        .title("Price Speed")
+        .borders(Borders::ALL);
+    
+    let mut lines = Vec::new();
+    
+    // 获取当前的price_speed值和平均值
+    let speed = app.orderbook.price_speed;
+    let avg_speed = app.orderbook.get_avg_price_speed();
+    
+    // 添加基本信息
+    let speed_info = format!("当前速度: {:.0} ticks/100ms", speed);
+    lines.push(Line::from(Span::styled(speed_info, Style::default().fg(Color::Cyan))));
+    
+    
+    // 创建色块来表示当前速度
+    let max_blocks = 50; // 最大显示的色块数量
+    let blocks_to_show = speed.min(max_blocks as f64) as usize;
+    
+    // 根据速度值选择颜色
+    let color = if speed >= 30.0 {
+        Color::Red // 高速
+    } else if speed >= 15.0 {
+        Color::Yellow // 中速
+    } else {
+        Color::Green // 低速
+    };
+    
+    // 创建色块字符串
+    let mut blocks = String::new();
+    for _ in 0..blocks_to_show {
+        blocks.push('█');
+    }
+    
+    lines.push(Line::from(Span::styled(blocks, Style::default().fg(color))));
+
+    // 创建色块来表示平均速度
+    let avg_blocks_to_show = avg_speed.min(max_blocks as f64) as usize;
+    
+    // 根据平均速度值选择颜色
+    let avg_color = if avg_speed >= 30.0 {
+        Color::Red // 高速
+    } else if avg_speed >= 15.0 {
+        Color::Yellow // 中速
+    } else {
+        Color::Green // 低速
+    };
+
+     // 平均速度
+     let avg_speed_info = format!("5秒平均速度: {:.1} ticks", avg_speed);
+     lines.push(Line::from(Span::styled(avg_speed_info, Style::default().fg(Color::Yellow))));
+     
+     // 创建平均速度色块字符串
+     let mut avg_blocks = String::new();
+     for _ in 0..avg_blocks_to_show {
+         avg_blocks.push('▓'); // 使用不同的字符区分平均速度
+     }
+     
+     lines.push(Line::from(Span::styled(avg_blocks, Style::default().fg(avg_color))));
+    
+    // 添加速度级别说明
+    let speed_level = if avg_speed >= 30.0 {
+        "高速行情"
+    } else if avg_speed >= 15.0 {
+        "中速行情"
+    } else if avg_speed >= 5.0 {
+        "低速行情"
+    } else {
+        "平静行情"
+    };
+    
+    lines.push(Line::from(Span::styled(
+        format!("行情状态: {}", speed_level),
+        Style::default().fg(avg_color).add_modifier(Modifier::BOLD)
+    )));
+    
+    // 创建Text并渲染
+    let text = Text::from(lines);
+    let paragraph = Paragraph::new(text)
+        .block(block)
+        .wrap(Wrap { trim: true });
+    
+    f.render_widget(paragraph, area);
 }
 
 // 渲染订单簿失衡信号
@@ -1515,7 +1720,7 @@ fn render_orderbook_imbalance(f: &mut Frame, app: &ReactiveApp, area: Rect) {
 // 渲染订单动量信号（增强版）
 fn render_order_momentum(f: &mut Frame, app: &ReactiveApp, area: Rect) {
     let block = Block::default()
-        .title("Order Impact")
+        .title("Order Momentum")
         .borders(Borders::ALL);
     
     let order_impact_signals = &app.orderbook.order_impact_signals;
@@ -1542,7 +1747,7 @@ fn render_order_momentum(f: &mut Frame, app: &ReactiveApp, area: Rect) {
     lines.push(Line::from(Span::raw(""))); // 空行
     
     // 显示最近的信号
-    for signal in order_impact_signals.iter().rev().take(12) {
+    for signal in order_impact_signals.iter().rev().take(15) {
         // 时间格式化
         let time = SystemTime::UNIX_EPOCH + Duration::from_millis(signal.timestamp);
         let seconds = time.duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs();
@@ -1561,8 +1766,8 @@ fn render_order_momentum(f: &mut Frame, app: &ReactiveApp, area: Rect) {
         };
         
         let (symbol, direction_text) = match signal.direction.as_str() {
-            "buy" => ("🔥↗", "买入冲击"),
-            "sell" => ("🔥↘", "卖出冲击"),
+            "buy" => ("↗", "买入冲击"),
+            "sell" => ("↘", "卖出冲击"),
             _ => ("?", "未知")
         };
         
@@ -1594,6 +1799,70 @@ fn render_order_momentum(f: &mut Frame, app: &ReactiveApp, area: Rect) {
         )));
     }
     
+    let text = Text::from(lines);
+    let paragraph = Paragraph::new(text)
+        .block(block)
+        .wrap(Wrap { trim: true });
+    
+    f.render_widget(paragraph, area);
+}
+
+// 渲染波动率函数
+fn render_volatility(f: &mut Frame, app: &ReactiveApp, area: Rect) {
+    let block = Block::default()
+        .title("Price Volatility")
+        .borders(Borders::ALL);
+    
+    let mut lines = Vec::new();
+    
+    // 获取当前的波动率值
+    let volatility = app.orderbook.get_volatility();
+    
+    // 添加基本信息 - 使用放大后的标准差值显示
+    let volatility_info = format!("5秒波动率(标准差): {:.2}", volatility);
+    lines.push(Line::from(Span::styled(volatility_info, Style::default().fg(Color::Cyan))));
+    
+    lines.push(Line::from(Span::raw(""))); // 空行
+    
+    // 创建色块来表示波动率 - 每0.01对应一个'#'字符，最多显示100个
+    let blocks_per_unit = 1.0 / 0.01; // 每单位对应的块数（1.0 / 0.01 = 100）
+    let blocks_to_show = ((volatility * blocks_per_unit) as usize).min(100); // 最多显示100个
+    
+    // 根据波动率值选择颜色
+    let color = if volatility >= 0.5 {
+        Color::Red // 高波动
+    } else if volatility >= 0.2 {
+        Color::Yellow // 中波动
+    } else {
+        Color::Green // 低波动
+    };
+    
+    // 创建色块字符串，使用'#'字符
+    let mut blocks = String::new();
+    for _ in 0..blocks_to_show {
+        blocks.push('#');
+    }
+    
+    lines.push(Line::from(Span::styled(blocks, Style::default().fg(color))));
+    
+    // 添加波动率级别说明
+    lines.push(Line::from(Span::raw(""))); // 空行
+    let volatility_level = if volatility >= 0.5 {
+        "高波动市场"
+    } else if volatility >= 0.2 {
+        "中等波动市场"
+    } else if volatility >= 0.1 {
+        "低波动市场"
+    } else {
+        "平稳市场"
+    };
+    
+    lines.push(Line::from(Span::styled(
+        format!("市场状态: {}", volatility_level),
+        Style::default().fg(color).add_modifier(Modifier::BOLD)
+    )));
+    
+    // 创建Text并渲染
     let text = Text::from(lines);
     let paragraph = Paragraph::new(text)
         .block(block)
