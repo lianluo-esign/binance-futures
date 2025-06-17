@@ -1,4 +1,4 @@
-基于ringbuffer的纯粹的单线程无锁事件驱动架构的低延迟高频交易系统
+基于优化的低延迟的ringbuffer的纯粹的单线程无锁事件驱动架构的低延迟高频交易系统
 
 1. 纯事件驱动 ：信号生成通过事件发布，不直接修改状态
 2. 解耦合 ：SignalGenerator 与 OrderBook解耦
@@ -7,6 +7,7 @@
 5. 可扩展性 ：易于添加新的信号类型
 6. 内存效率 ：避免在 OrderBook 中存储信号历史
 7. UI界面的渲染规则为：UI基于orderbook的数据状态实时渲染，纯数据状态驱动渲染，而不是基于事件流触发。
+8. ringbuffer支持充分利用L1/L2缓存的功能
 
 需求1:
 实时计算撤单/增加订单功能，每次当前新的depth update的获取，和上一次update的时候的订单薄的数据中的order_flow数据的snapshot 做diff， 如果当前的order_flow的bid变多了 就是增加了挂单，如果bid变少了 就是撤单了，
