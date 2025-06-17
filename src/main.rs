@@ -1117,12 +1117,12 @@ impl ReactiveApp {
             self.websocket_manager.attempt_reconnect(&self.symbol);
         }
         
-        // 2. 处理事件缓冲区中的事件
-        self.handle_events();
+        // 2. 事件派发
+        self.dispatch_event();
     }
 
-    /// 处理事件缓冲区中的事件（非阻塞）
-    fn handle_events(&mut self) {
+    /// 事件派发函数
+    fn dispatch_event(&mut self) {
         // 限制每次处理的事件数量，避免UI阻塞
         let mut processed_count = 0;
         const MAX_EVENTS_PER_CYCLE: usize = 100;
@@ -1443,7 +1443,7 @@ fn render_orderbook(f: &mut Frame, app: &ReactiveApp, area: Rect) {
                     Cell::from(sell_trade_str).style(Style::default().fg(Color::Red)),
                     Cell::from(bid_str).style(Style::default().fg(Color::Green)),
                     {
-                        let price_str = format!("{:.2}", price);
+                        let price_str = format!("{:.3}", price);
                         let mut price_cell = Cell::from(price_str).style(Style::default().fg(Color::White));
                         if Some(i) == current_price_index {
                             if let Some(ref last_side) = app.orderbook.last_trade_side {
@@ -1515,15 +1515,15 @@ fn render_orderbook(f: &mut Frame, app: &ReactiveApp, area: Rect) {
     let table = Table::new(
         visible_rows,
         [
-            Constraint::Length(10), // Bid Cancel
-            Constraint::Length(10), // Sell Trade
-            Constraint::Length(10), // Bid Vol
-            Constraint::Length(12), // Price
-            Constraint::Length(10), // Ask Vol
-            Constraint::Length(10), // Buy Trade
-            Constraint::Length(10), // Ask Cancel
-            Constraint::Length(10), // Bid Increase
-            Constraint::Length(10), // Ask Increase
+            Constraint::Length(11), // Bid Cancel
+            Constraint::Length(11), // Sell Trade
+            Constraint::Length(11), // Bid Vol
+            Constraint::Length(11), // Price
+            Constraint::Length(11), // Ask Vol
+            Constraint::Length(11), // Buy Trade
+            Constraint::Length(11), // Ask Cancel
+            Constraint::Length(11), // Bid Increase
+            Constraint::Length(11), // Ask Increase
             Constraint::Length(25), // History Trades
         ]
     )
