@@ -439,7 +439,7 @@ impl OrderBookData {
 
             // 波动率
             volatility_buffer: Vec::new(),
-            volatility_window_ms: 5000, // 5秒窗口
+            volatility_window_ms: 60000, // 5秒窗口
             volatility: 0.0,
         }
     }
@@ -1439,34 +1439,65 @@ impl ReactiveApp {
     // 移动auto_scroll函数到ReactiveApp的impl块内
     fn auto_scroll(&self, current_price_index: Option<usize>, visible_rows: usize) -> usize {
         if let Some(price_index) = current_price_index {
+            // 如果auto_scroll为false，保持当前滚动位置
+            if !self.auto_scroll {
+                return self.scroll_offset;
+            }
+            
             let visible_start = self.scroll_offset;
             let visible_end = self.scroll_offset + visible_rows;
             
-            // 检查游标是否在可见区域内
-            if price_index >= visible_start && price_index < visible_end {
-                let relative_position = price_index - visible_start;
+            // 定义边界阈值和滚动速度
+            let edge_threshold = 3; // 距离边界3行开始滚动
+            let scroll_speed = 2;   // 每次滚动2行
+            let mut new_scroll_offset = self.scroll_offset;
+            
+            // 检查价格是否在可见区域内
+            let price_visible = price_index >= visible_start && price_index < visible_end;
+            
+            if price_visible {
+                // 计算当前价格在可见区域中的相对位置
+                let visible_position = price_index - visible_start;
                 
-                // 如果距离上边界或下边界3行以内，调整滚动位置让游标居中
-                if relative_position <= 3 || relative_position >= visible_rows.saturating_sub(3) {
-                    let center_position = visible_rows / 2;
-                    if price_index >= center_position {
-                        price_index - center_position
+                // 如果当前价格接近可见区域底部，向下滚动
+                if visible_position >= visible_rows.saturating_sub(edge_threshold) {
+                    // 将当前价格位置设置为距离底部 edge_threshold 行
+                    let target_scroll = price_index.saturating_sub(visible_rows.saturating_sub(edge_threshold));
+                    // 平滑滚动
+                    if target_scroll.saturating_sub(self.scroll_offset) > scroll_speed {
+                        new_scroll_offset = self.scroll_offset + scroll_speed;
                     } else {
-                        0
+                        new_scroll_offset = target_scroll;
                     }
-                } else {
-                    self.scroll_offset
+                }
+                // 如果当前价格接近可见区域顶部，向上滚动
+                else if visible_position <= edge_threshold && price_index >= edge_threshold {
+                    // 将当前价格位置设置为距离顶部 edge_threshold 行
+                    let target_scroll = price_index.saturating_sub(edge_threshold);
+                    // 平滑滚动
+                    if self.scroll_offset.saturating_sub(target_scroll) > scroll_speed {
+                        new_scroll_offset = self.scroll_offset.saturating_sub(scroll_speed);
+                    } else {
+                        new_scroll_offset = target_scroll;
+                    }
                 }
             } else {
-                // 如果不在可见区域，立即跳转到居中位置
-                let center_position = visible_rows / 2;
-                if price_index >= center_position {
-                    price_index - center_position
+                // 价格不在可见区域，立即调整滚动位置使价格可见
+                // 计算目标滚动位置，使价格位于可见区域中间
+                let middle_position = visible_rows / 2;
+                if price_index >= middle_position {
+                    new_scroll_offset = price_index - middle_position;
                 } else {
-                    0
+                    new_scroll_offset = 0;
                 }
             }
+            
+            // 确保滚动位置在有效范围内
+            new_scroll_offset = new_scroll_offset.max(0);
+            
+            return new_scroll_offset;
         } else {
+            // 如果没有当前价格，保持当前滚动位置
             self.scroll_offset
         }
     }
@@ -1605,7 +1636,20 @@ fn render_orderbook(f: &mut Frame, app: &ReactiveApp, area: Rect) {
                         } else {
                             String::new()
                         };
-                        Cell::from(active_trade_str).style(Style::default().fg(Color::White))
+                        
+                        // 根据买卖单比例设置颜色
+                        let text_color = if history_buy_trade_vol >= history_sell_trade_vol * 2.0 {
+                            // 买单大于等于卖单的2倍，显示绿色
+                            Color::Green
+                        } else if history_sell_trade_vol >= history_buy_trade_vol * 2.0 {
+                            // 卖单大于等于买单的2倍，显示红色
+                            Color::Red
+                        } else {
+                            // 其他情况保持白色
+                            Color::White
+                        };
+                        
+                        Cell::from(active_trade_str).style(Style::default().fg(text_color))
                     },
                 ]);
                 
@@ -1952,7 +1996,7 @@ fn render_volatility(f: &mut Frame, app: &ReactiveApp, area: Rect) {
     let volatility = app.orderbook.get_volatility();
     
     // 添加基本信息 - 使用放大后的标准差值显示
-    let volatility_info = format!("5秒波动率(标准差): {:.2}", volatility);
+    let volatility_info = format!("1分钟波动率(标准差): {:.2}", volatility);
     lines.push(Line::from(Span::styled(volatility_info, Style::default().fg(Color::Cyan))));
     
     lines.push(Line::from(Span::raw(""))); // 空行
