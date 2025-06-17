@@ -575,25 +575,25 @@ impl OrderBookData {
             let bid_diff = current_bid - snapshot_bid;
             let ask_diff = current_ask - snapshot_ask;
             
-            // 更新撤单记录 (realtime_order_cancel)
+            // 更新撤单记录 (realtime_cancel_records) - 修改为累加操作
             if bid_diff < -0.0001 { // bid减少 = 撤买单
-                order_flow.realtime_cancel_records.bid_cancel = bid_diff.abs();
+                order_flow.realtime_cancel_records.bid_cancel += bid_diff.abs();
                 order_flow.realtime_cancel_records.timestamp = current_time;
             }
             
             if ask_diff < -0.0001 { // ask减少 = 撤卖单
-                order_flow.realtime_cancel_records.ask_cancel = ask_diff.abs();
+                order_flow.realtime_cancel_records.ask_cancel += ask_diff.abs();
                 order_flow.realtime_cancel_records.timestamp = current_time;
             }
             
-            // 更新增加订单记录 (realtime_increase_order)
+            // 更新增加订单记录 (realtime_increase_order) - 修改为累加操作
             if bid_diff > 0.0001 { // bid增加 = 新增买单
-                order_flow.realtime_increase_order.bid = bid_diff;
+                order_flow.realtime_increase_order.bid += bid_diff;
                 order_flow.realtime_increase_order.timestamp = current_time;
             }
             
             if ask_diff > 0.0001 { // ask增加 = 新增卖单
-                order_flow.realtime_increase_order.ask = ask_diff;
+                order_flow.realtime_increase_order.ask += ask_diff;
                 order_flow.realtime_increase_order.timestamp = current_time;
             }
         }
@@ -687,8 +687,8 @@ impl OrderBookData {
         
         // 清理过期的实时交易记录
         for (_price, order_flow) in self.order_flows.iter_mut() {
-            // 如果实时交易记录超过显示时间（1秒），则重置为0
-            if current_time.saturating_sub(order_flow.realtime_trade_record.timestamp) > self.trade_display_duration {
+            // 修改：如果实时交易记录超过3秒没有更新，则重置为0
+            if current_time.saturating_sub(order_flow.realtime_trade_record.timestamp) > 3000 {
                 order_flow.realtime_trade_record.buy_volume = 0.0;
                 order_flow.realtime_trade_record.sell_volume = 0.0;
             }
@@ -742,17 +742,16 @@ impl OrderBookData {
                 .unwrap()
                 .as_millis() as u64;
 
-            
-
             let order_flow = self.order_flows.entry(price_ordered).or_insert_with(OrderFlow::new);
             
+            // 修改：累加主动成交订单量，而不是替换
             match side {
                 "buy" => {
-                    order_flow.realtime_trade_record.buy_volume = qty_f64;
+                    order_flow.realtime_trade_record.buy_volume += qty_f64;
                     order_flow.history_trade_record.buy_volume += qty_f64;
                 },
                 "sell" => {
-                    order_flow.realtime_trade_record.sell_volume = qty_f64;
+                    order_flow.realtime_trade_record.sell_volume += qty_f64;
                     order_flow.history_trade_record.sell_volume += qty_f64;
                 },
                 _ => {}
@@ -1064,8 +1063,8 @@ impl OrderBookData {
     /// 清理过期的撤单和增加订单记录
     fn clean_old_order_changes(&mut self, current_time: u64) {
         for (_price, order_flow) in self.order_flows.iter_mut() {
-            // 清理过期的撤单记录（5秒后清理）
-            if current_time.saturating_sub(order_flow.realtime_cancel_records.timestamp) > self.cancel_display_duration {
+            // 修改：统一使用3秒作为清除时间
+            if current_time.saturating_sub(order_flow.realtime_cancel_records.timestamp) > 3000 {
                 order_flow.realtime_cancel_records.bid_cancel = 0.0;
                 order_flow.realtime_cancel_records.ask_cancel = 0.0;
             }
