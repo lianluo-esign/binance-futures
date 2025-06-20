@@ -217,32 +217,7 @@ impl<T: Clone> Clone for RingBuffer<T> {
     }
 }
 
-/// 价格行为模式枚举
-#[derive(Debug, Clone, PartialEq)]
-pub enum PriceActionPattern {
-    /// 横盘震荡（在两个价格之间跳动）
-    Rangebound {
-        upper_price: f64,
-        lower_price: f64,
-        duration_ms: u64,
-    },
-    /// 单边上涨
-    BullishTrend {
-        start_price: f64,
-        current_price: f64,
-        consecutive_up_ticks: u32,
-        duration_ms: u64,
-    },
-    /// 单边下跌
-    BearishTrend {
-        start_price: f64,
-        current_price: f64,
-        consecutive_down_ticks: u32,
-        duration_ms: u64,
-    },
-    /// 无明显模式
-    Undefined,
-}
+
 
 /// 事件类型枚举
 #[derive(Debug, Clone)]
@@ -403,16 +378,17 @@ struct OrderBookData {
     volatility_buffer: Vec<(u64, f64)>, // 存储tick价格数据 (timestamp, price)
     volatility_window_ms: u64, // 5秒窗口 = 5000ms
     volatility: f64, // 5秒价格波动率
+    
+    // 新增：基于tick价差的波动率
+    tick_price_diff_queue: Vec<f64>, // 存储相邻tick的价格差值
+    tick_price_diff_window_size: usize, // 队列窗口大小
+    tick_price_diff_volatility: f64, // 基于价差的波动率
+    last_tick_price: Option<f64>, // 上一个tick的价格
 
-    price_pattern_signals: Vec<PricePatternSignal>,
+    current_latency: i64, // 当前延迟（毫秒）
 }
 
-#[derive(Debug, Clone)]
-struct PricePatternSignal {
-    timestamp: u64,
-    pattern_type: String,  // "rangebound", "bullish_trend", "bearish_trend"
-    description: String,
-}
+
 
 impl OrderBookData {
     fn new() -> Self {
@@ -477,8 +453,46 @@ impl OrderBookData {
             volatility_buffer: Vec::new(),
             volatility_window_ms: 60000, // 5秒窗口
             volatility: 0.0,
-            price_pattern_signals: Vec::new(),
+
+            // 初始化新增字段：基于tick价差的波动率
+            tick_price_diff_queue: Vec::with_capacity(10),
+            tick_price_diff_window_size: 10, // 默认窗口大小为10
+            tick_price_diff_volatility: 0.0,
+            last_tick_price: None,
+
+            current_latency: 0,
         }
+    }
+
+    // 计算基于tick价差的波动率
+    fn calculate_tick_price_diff_volatility(&mut self, timestamp: u64, price: f64) {
+        // 忽略无效价格
+        if price <= 0.0 {
+            return;
+        }
+    
+        // 如果有上一个价格，计算价差并添加到队列
+        if let Some(last_price) = self.last_tick_price {
+            // 计算价差的绝对值
+            let price_diff = (price - last_price).abs();
+            
+            // 添加到队列
+            self.tick_price_diff_queue.push(price_diff);
+            
+            // 保持队列大小不超过窗口大小
+            if self.tick_price_diff_queue.len() > self.tick_price_diff_window_size {
+                self.tick_price_diff_queue.remove(0); // 移除最旧的价差
+            }
+            
+            // 计算队列中价差的平均值作为波动率指标
+            if !self.tick_price_diff_queue.is_empty() {
+                let sum: f64 = self.tick_price_diff_queue.iter().sum();
+                self.tick_price_diff_volatility = sum / self.tick_price_diff_queue.len() as f64;
+            }
+        }
+    
+        // 更新上一个价格
+        self.last_tick_price = Some(price);
     }
 
     // 新增：创建订单簿快照
@@ -792,6 +806,16 @@ impl OrderBookData {
             data["q"].as_str(),
             data["m"].as_bool(),
         ) {
+            if let Some(event_time) = data["T"].as_u64() {
+                let local_time = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() as u64;
+                
+                // 计算延迟（毫秒）
+                self.current_latency = local_time as i64 - event_time as i64;
+            }
+
             let price = price_str.parse::<f64>().unwrap_or(0.0);
             let price_ordered = OrderedFloat(price);
             let qty_f64 = qty.parse::<f64>().unwrap_or(0.0);
@@ -827,7 +851,7 @@ impl OrderBookData {
 
             self.calculate_price_speed(current_time);
             self.calculate_volatility(current_time, price);
-            self.on_tick_with_pattern_detection();
+            self.calculate_tick_price_diff_volatility(current_time, price);
             
             // 添加清理过期交易数据的调用
             self.clean_old_trades();
@@ -933,6 +957,22 @@ impl OrderBookData {
             }
         } else {
             0.0
+        }
+    }
+
+    // 获取基于tick价差的波动率
+    fn get_tick_price_diff_volatility(&self) -> f64 {
+        self.tick_price_diff_volatility
+    }
+
+    // 设置tick价差波动率窗口大小
+    fn set_tick_price_diff_window_size(&mut self, size: usize) {
+        if size > 0 {
+            self.tick_price_diff_window_size = size;
+            // 如果当前队列长度超过新窗口大小，裁剪队列
+            while self.tick_price_diff_queue.len() > self.tick_price_diff_window_size {
+                self.tick_price_diff_queue.remove(0);
+            }
         }
     }
     
@@ -1142,192 +1182,6 @@ impl OrderBookData {
             }
         }
     }
-
-    pub fn identify_price_action_pattern(&self, window_ms: u64) -> PriceActionPattern {
-        // 获取当前时间戳
-        let current_time = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
-            
-        // 如果价格缓冲区为空，返回Undefined
-        if self.volatility_buffer.is_empty() {
-            return PriceActionPattern::Undefined;
-        }
-        
-        // 获取指定时间窗口内的价格数据
-        let cutoff_time = current_time.saturating_sub(window_ms);
-        let window_prices: Vec<(u64, f64)> = self.volatility_buffer
-            .iter()
-            .filter(|&(ts, _)| *ts >= cutoff_time)
-            .cloned()
-            .collect();
-            
-        // 如果窗口内数据点不足，返回Undefined
-        if window_prices.len() < 3 {
-            return PriceActionPattern::Undefined;
-        }
-        
-        // 计算价格范围
-        let prices: Vec<f64> = window_prices.iter().map(|&(_, p)| p).collect();
-        let max_price = prices.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
-        let min_price = prices.iter().fold(f64::INFINITY, |a, &b| a.min(b));
-        let price_range = max_price - min_price;
-        
-        // 计算时间窗口的实际持续时间
-        let start_time = window_prices.first().unwrap().0;
-        let end_time = window_prices.last().unwrap().0;
-        let duration_ms = end_time - start_time;
-        
-        // 分析价格方向变化
-        let mut up_ticks = 0;
-        let mut down_ticks = 0;
-        let mut direction_changes = 0;
-        let mut last_direction = 0; // 0: 初始, 1: 上涨, -1: 下跌
-        
-        for i in 1..window_prices.len() {
-            let current_price = window_prices[i].1;
-            let previous_price = window_prices[i-1].1;
-            
-            if current_price > previous_price {
-                // 上涨
-                if last_direction == -1 {
-                    direction_changes += 1;
-                }
-                up_ticks += 1;
-                last_direction = 1;
-            } else if current_price < previous_price {
-                // 下跌
-                if last_direction == 1 {
-                    direction_changes += 1;
-                }
-                down_ticks += 1;
-                last_direction = -1;
-            }
-        }
-        
-        // 判断价格行为模式
-        
-        // 1. 横盘震荡模式：价格范围小且方向变化频繁
-        let price_volatility = price_range / min_price.max(0.01) * 100.0; // 价格波动率（百分比）
-        if price_volatility < 0.1 && direction_changes >= 3 {
-            return PriceActionPattern::Rangebound {
-                upper_price: max_price,
-                lower_price: min_price,
-                duration_ms,
-            };
-        }
-        
-        // 2. 单边上涨模式：连续上涨tick占比高
-        let up_ratio = up_ticks as f64 / (up_ticks + down_ticks) as f64;
-        if up_ratio > 0.7 && up_ticks >= 3 {
-            return PriceActionPattern::BullishTrend {
-                start_price: window_prices.first().unwrap().1,
-                current_price: window_prices.last().unwrap().1,
-                consecutive_up_ticks: up_ticks,
-                duration_ms,
-            };
-        }
-        
-        // 3. 单边下跌模式：连续下跌tick占比高
-        let down_ratio = down_ticks as f64 / (up_ticks + down_ticks) as f64;
-        if down_ratio > 0.7 && down_ticks >= 3 {
-            return PriceActionPattern::BearishTrend {
-                start_price: window_prices.first().unwrap().1,
-                current_price: window_prices.last().unwrap().1,
-                consecutive_down_ticks: down_ticks,
-                duration_ms,
-            };
-        }
-        
-        // 默认返回Undefined
-        PriceActionPattern::Undefined
-    }
-
-    /// 获取当前价格行为模式的描述
-    pub fn get_price_action_description(&self, window_ms: u64) -> String {
-        let pattern = self.identify_price_action_pattern(window_ms);
-        
-        match pattern {
-            PriceActionPattern::Rangebound { upper_price, lower_price, duration_ms } => {
-                format!("Rangebound: Price oscillating between {:.2} - {:.2}, duration {} ms", 
-                       upper_price, lower_price, duration_ms)
-            },
-            PriceActionPattern::BullishTrend { start_price, current_price, consecutive_up_ticks, duration_ms } => {
-                let price_change_percent = (current_price - start_price) / start_price * 100.0;
-                format!("Bullish Trend: From {:.2} up to {:.2}, change {:.2}%, consecutive up ticks {}, duration {} ms", 
-                       start_price, current_price, price_change_percent, consecutive_up_ticks, duration_ms)
-            },
-            PriceActionPattern::BearishTrend { start_price, current_price, consecutive_down_ticks, duration_ms } => {
-                let price_change_percent = (start_price - current_price) / start_price * 100.0;
-                format!("Bearish Trend: From {:.2} down to {:.2}, change {:.2}%, consecutive down ticks {}, duration {} ms", 
-                       start_price, current_price, price_change_percent, consecutive_down_ticks, duration_ms)
-            },
-            PriceActionPattern::Undefined => "No clear pattern identified".to_string(),
-        }
-    }
-
-    /// 在处理tick数据时调用此函数来检测和输出价格行为模式
-    fn on_tick_with_pattern_detection(&mut self) {
-        
-        // 然后检测价格行为模式
-        let window_ms = 3000; // 使用1秒的时间窗口
-        let pattern = self.identify_price_action_pattern(window_ms);
-        
-        // 如果识别出明确的模式，则生成信号
-        if pattern != PriceActionPattern::Undefined {
-            let current_time = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as u64;
-                
-            let description = self.get_price_action_description(window_ms);
-            
-            // 创建信号数据
-            let (pattern_type, signal_data) = match pattern {
-
-                PriceActionPattern::Rangebound { .. } => {
-                    ("rangebound", serde_json::json!({
-                        "signal_type": "price_pattern",
-                        "pattern": "rangebound",
-                        "timestamp": current_time,
-                        "description": description
-                    }))
-                },
-                PriceActionPattern::BullishTrend { .. } => {
-                    ("bullish_trend", serde_json::json!({
-                        "signal_type": "price_pattern",
-                        "pattern": "bullish_trend",
-                        "timestamp": current_time,
-                        "description": description
-                    }))
-                },
-                PriceActionPattern::BearishTrend { .. } => {
-                    ("bearish_trend", serde_json::json!({
-                        "signal_type": "price_pattern",
-                        "pattern": "bearish_trend",
-                        "timestamp": current_time,
-                        "description": description
-                    }))
-                },
-                _ => return,
-            };
-            
-            // 保存信号到OrderBookData中
-            self.price_pattern_signals.push(PricePatternSignal {
-                timestamp: current_time,
-                pattern_type: pattern_type.to_string(),
-                description: description.clone(),
-            });
-            
-            // 限制信号数量，保留最新的15个
-            if self.price_pattern_signals.len() > 15 {
-                self.price_pattern_signals.remove(0);
-            }
-
-        }
-    }
-
     
 }
 
@@ -1784,9 +1638,12 @@ fn render_orderbook(f: &mut Frame, app: &ReactiveApp, area: Rect) {
     } else {
         "Disconnected"
     };
+
+    // 获取当前延迟并添加到标题
+    let latency = app.orderbook.current_latency;
     
-    let title = format!("Binance Futures Order Book - {} | Buffer: {}/{} | Status: {}", 
-        app.symbol, buffer_len, buffer_cap, connection_status);
+    let title = format!("Binance Futures Order Book - {} | Buffer: {}/{} | Latency: {}ms | Status: {}", 
+        app.symbol, buffer_len, buffer_cap, latency, connection_status);
     
     // 计算订单薄表格区域
     let table_width = area.width.saturating_sub(2);
@@ -1983,10 +1840,9 @@ fn render_signals(f: &mut Frame, app: &ReactiveApp, area: Rect) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Percentage(10), // Orderbook Imbalance 占10%
-            Constraint::Percentage(40), // Order Momentum 占40%
-            Constraint::Percentage(15), // Price Speed 占15%
-            Constraint::Percentage(15), // Volatility 占15%
-            Constraint::Percentage(20), // Price Pattern 占20%（新增）
+            Constraint::Percentage(45), // Order Momentum 占40%
+            Constraint::Percentage(20), // Price Speed 占15%
+            Constraint::Percentage(25), // Volatility 占15%
         ])
         .split(area);
     
@@ -1994,14 +1850,12 @@ fn render_signals(f: &mut Frame, app: &ReactiveApp, area: Rect) {
     let momentum_area = signal_chunks[1];
     let price_speed_area = signal_chunks[2];
     let volatility_area = signal_chunks[3];
-    let price_pattern_area = signal_chunks[4]; // 新增：价格行为模式区域
     
     // 渲染各个信号区域
     render_orderbook_imbalance(f, app, imbalance_area);
     render_order_momentum(f, app, momentum_area);
     render_price_speed(f, app, price_speed_area);
     render_volatility(f, app, volatility_area);
-    render_price_pattern(f, app, price_pattern_area); // 新增：渲染价格行为模式
 }
 
 // 渲染Price Speed函数
@@ -2279,6 +2133,36 @@ fn render_volatility(f: &mut Frame, app: &ReactiveApp, area: Rect) {
     
     lines.push(Line::from(Span::styled(blocks, Style::default().fg(color))));
     
+    // 添加空行
+    lines.push(Line::from(Span::raw(""))); 
+    
+    // 新增：显示基于tick价差的波动率
+    let tick_diff_volatility = app.orderbook.get_tick_price_diff_volatility();
+    let tick_diff_info = format!("Tick price diff volatility: {:.6}", tick_diff_volatility);
+    lines.push(Line::from(Span::styled(tick_diff_info, Style::default().fg(Color::Cyan))));
+    
+    // 为tick价差波动率创建色块
+    // 根据价格差异的大小调整比例因子
+    let scale_factor = 1000.0; // 可以根据实际情况调整
+    let tick_blocks_to_show = ((tick_diff_volatility * scale_factor) as usize).min(100);
+    
+    // 根据tick价差波动率值选择颜色
+    let tick_color = if tick_diff_volatility >= 0.001 {
+        Color::Red // 高波动
+    } else if tick_diff_volatility >= 0.0005 {
+        Color::Yellow // 中波动
+    } else {
+        Color::Green // 低波动
+    };
+    
+    // 创建色块字符串
+    let mut tick_blocks = String::new();
+    for _ in 0..tick_blocks_to_show {
+        tick_blocks.push('█');
+    }
+    
+    lines.push(Line::from(Span::styled(tick_blocks, Style::default().fg(tick_color))));
+    
     // 添加波动率级别说明
     lines.push(Line::from(Span::raw(""))); // 空行
     let volatility_level = if volatility >= 0.5 {
@@ -2340,85 +2224,6 @@ fn render_iceberg_orders(f: &mut Frame, app: &ReactiveApp, area: Rect) {
     
     f.render_widget(paragraph, area);
 }
-
-// 渲染价格行为模式信号
-fn render_price_pattern(f: &mut Frame, app: &ReactiveApp, area: Rect) {
-    let block = Block::default()
-        .title("Price Action Pattern")
-        .borders(Borders::ALL);
-    
-    let mut lines = Vec::new();
-    
-    // 获取价格行为模式信号
-    let price_pattern_signals = &app.orderbook.price_pattern_signals;
-    
-    if price_pattern_signals.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "Waiting for price action pattern signals...",
-            Style::default().fg(Color::Gray)
-        )));
-    } else {
-        // 显示最近的信号
-        for signal in price_pattern_signals.iter().rev() {
-            // 时间格式化
-            let time = SystemTime::UNIX_EPOCH + Duration::from_millis(signal.timestamp);
-            let seconds = time.duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs();
-            let hours = (seconds / 3600) % 24;
-            let minutes = (seconds / 60) % 60;
-            let secs = seconds % 60;
-            let formatted_time = format!("{:02}:{:02}:{:02}", hours, minutes, secs);
-            
-            // 根据模式类型设置颜色
-            let (color, pattern_text) = match signal.pattern_type.as_str() {
-                "rangebound" => (Color::Yellow, "Rangebound"),
-                "bullish_trend" => (Color::Green, "Bullish Trend"),
-                "bearish_trend" => (Color::Red, "Bearish Trend"),
-                _ => (Color::White, "Unknown Pattern"),
-            };
-            
-            // 添加时间和模式类型
-            let info_line = format!("{} - {}", formatted_time, pattern_text);
-            lines.push(Line::from(Span::styled(
-                info_line,
-                Style::default().fg(color).add_modifier(Modifier::BOLD)
-            )));
-            
-            // 添加描述（可能需要截断以适应UI宽度）
-            let max_desc_len = area.width.saturating_sub(4) as usize; // 减去边框和padding
-            
-            // 使用chars()方法安全地处理UTF-8字符
-            let desc = if signal.description.chars().count() > max_desc_len {
-                let mut truncated = String::new();
-                for (i, c) in signal.description.chars().enumerate() {
-                    if i >= max_desc_len.saturating_sub(2) {
-                        break;
-                    }
-                    truncated.push(c);
-                }
-                format!("{}..", truncated)
-            } else {
-                signal.description.clone()
-            };
-            
-            lines.push(Line::from(Span::styled(
-                desc,
-                Style::default().fg(Color::Gray)
-            )));
-            
-            lines.push(Line::from(Span::raw(""))); // 空行分隔
-        }
-    }
-    
-    // 创建Text并渲染
-    let text = Text::from(lines);
-    let paragraph = Paragraph::new(text)
-        .block(block)
-        .wrap(Wrap { trim: true });
-    
-    f.render_widget(paragraph, area);
-}
-
-
 
 // 设置UI终端
 fn setup_ui_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>, Box<dyn std::error::Error>> {
