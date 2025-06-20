@@ -6,3 +6,4 @@ footprint_history.json
 # Added by cargo
 
 /target
+*.log
