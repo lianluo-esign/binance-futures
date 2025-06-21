@@ -107,6 +107,7 @@ impl EventBus {
     /// 处理单个事件 - 同步处理保证顺序性
     pub fn process_next_event(&mut self) -> bool {
         if let Some(event) = self.events.pop() {
+            log::debug!("处理事件: {}", event.event_type.type_name());
             self.process_event_sync(&event);
             self.stats.total_events_processed += 1;
             true
@@ -132,6 +133,15 @@ impl EventBus {
                 break;
             }
         }
+
+        // 更新统计信息
+        self.stats.total_events_processed += processed as u64;
+
+        // 添加调试日志
+        if processed > 0 {
+            log::info!("EventBus处理了 {} 个事件，总处理数: {}", processed, self.stats.total_events_processed);
+        }
+
         processed
     }
 

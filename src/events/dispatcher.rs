@@ -118,49 +118,92 @@ impl EventDispatcher {
     
     /// 处理事件循环 - 同步处理保证顺序性
     pub fn process_events(&self) {
-        if let Ok(mut bus) = self.event_bus.lock() {
-            bus.process_all_events();
+        // 使用超时锁防止阻塞
+        match self.event_bus.try_lock() {
+            Ok(mut bus) => {
+                bus.process_all_events();
+            }
+            Err(_) => {
+                // 如果无法获取锁，记录警告但不阻塞
+                log::warn!("EventBus锁被占用，跳过本次事件处理");
+            }
         }
     }
 
-    /// 处理指定数量的事件
+    /// 处理指定数量的事件 - 非阻塞版本
     pub fn process_events_batch(&self, max_events: usize) -> usize {
-        if let Ok(mut bus) = self.event_bus.lock() {
-            bus.process_events(max_events)
-        } else {
-            0
+        // 使用try_lock避免阻塞
+        match self.event_bus.try_lock() {
+            Ok(mut bus) => {
+                bus.process_events(max_events)
+            }
+            Err(_) => {
+                // 如果无法获取锁，记录警告并返回0
+                log::warn!("EventBus锁被占用，跳过本次批量事件处理");
+                0
+            }
         }
     }
 
-    /// 发布事件到总线
+    /// 发布事件到总线 - 非阻塞版本
     pub fn publish(&self, event: Event) {
-        if let Ok(mut bus) = self.event_bus.lock() {
-            bus.publish(event);
+        match self.event_bus.try_lock() {
+            Ok(mut bus) => {
+                bus.publish(event);
+            }
+            Err(_) => {
+                // 如果无法获取锁，记录警告并丢弃事件
+                log::warn!("EventBus锁被占用，丢弃事件: {:?}", event.event_type.type_name());
+            }
         }
     }
 
-    /// 批量发布事件
+    /// 批量发布事件 - 非阻塞版本
     pub fn publish_batch(&self, events: Vec<Event>) {
-        if let Ok(mut bus) = self.event_bus.lock() {
-            bus.publish_batch(events);
+        match self.event_bus.try_lock() {
+            Ok(mut bus) => {
+                bus.publish_batch(events);
+            }
+            Err(_) => {
+                // 如果无法获取锁，记录警告并丢弃事件
+                log::warn!("EventBus锁被占用，丢弃{}个批量事件", events.len());
+            }
         }
     }
 
-    /// 获取待处理事件数量
+    /// 获取待处理事件数量 - 非阻塞版本
     pub fn pending_events(&self) -> usize {
-        if let Ok(bus) = self.event_bus.lock() {
-            bus.pending_events()
-        } else {
-            0
+        match self.event_bus.try_lock() {
+            Ok(bus) => bus.pending_events(),
+            Err(_) => {
+                // 如果无法获取锁，返回0并记录警告
+                log::warn!("EventBus锁被占用，无法获取待处理事件数量");
+                0
+            }
         }
     }
 
-    /// 获取事件总线统计信息
+    /// 获取事件总线统计信息 - 非阻塞版本
     pub fn get_stats(&self) -> Option<crate::events::event_bus::EventBusStats> {
-        if let Ok(bus) = self.event_bus.lock() {
-            Some(bus.stats().clone())
-        } else {
-            None
+        match self.event_bus.try_lock() {
+            Ok(bus) => Some(bus.stats().clone()),
+            Err(_) => {
+                // 如果无法获取锁，返回None
+                log::warn!("EventBus锁被占用，无法获取统计信息");
+                None
+            }
+        }
+    }
+
+    /// 获取缓冲区使用情况 (当前大小, 最大容量) - 非阻塞版本
+    pub fn get_buffer_usage(&self) -> (usize, usize) {
+        match self.event_bus.try_lock() {
+            Ok(bus) => (bus.pending_events(), bus.capacity()),
+            Err(_) => {
+                // 如果无法获取锁，返回默认值
+                log::warn!("EventBus锁被占用，无法获取缓冲区使用情况");
+                (0, 0)
+            }
         }
     }
 

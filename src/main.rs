@@ -1,4 +1,4 @@
-use binance_futures::{init_logging, Config, ReactiveApp};
+use binance_futures::{init_logging, Config, ReactiveApp, OrderFlow};
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind},
     execute,
@@ -13,10 +13,71 @@ use ratatui::{
     Frame, Terminal,
 };
 use std::{
+    collections::BTreeMap,
     env,
     io,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+use ordered_float::OrderedFloat;
+
+/// 根据价格精度聚合订单簿数据
+/// precision: 价格精度（USD增量），例如1.0表示聚合到1美元增量
+fn aggregate_price_levels(
+    order_flows: &BTreeMap<OrderedFloat<f64>, OrderFlow>,
+    precision: f64,
+) -> BTreeMap<OrderedFloat<f64>, OrderFlow> {
+    if precision <= 0.0 {
+        return order_flows.clone(); // 如果精度无效，返回原始数据
+    }
+
+    let mut aggregated: BTreeMap<OrderedFloat<f64>, OrderFlow> = BTreeMap::new();
+
+    for (price_key, order_flow) in order_flows {
+        let original_price = price_key.0;
+
+        // 使用floor函数进行价格聚合
+        // 例如：10000.1 -> 10000.0, 10000.9 -> 10000.0
+        let aggregated_price = (original_price / precision).floor() * precision;
+        let aggregated_key = OrderedFloat(aggregated_price);
+
+        // 获取或创建聚合价格级别
+        let aggregated_flow = aggregated.entry(aggregated_key).or_insert_with(OrderFlow::new);
+
+        // 聚合买卖价格和数量
+        aggregated_flow.bid_ask.bid += order_flow.bid_ask.bid;
+        aggregated_flow.bid_ask.ask += order_flow.bid_ask.ask;
+        aggregated_flow.bid_ask.timestamp = aggregated_flow.bid_ask.timestamp.max(order_flow.bid_ask.timestamp);
+
+        // 聚合交易记录
+        aggregated_flow.history_trade_record.buy_volume += order_flow.history_trade_record.buy_volume;
+        aggregated_flow.history_trade_record.sell_volume += order_flow.history_trade_record.sell_volume;
+        aggregated_flow.history_trade_record.timestamp = aggregated_flow.history_trade_record.timestamp.max(order_flow.history_trade_record.timestamp);
+
+        aggregated_flow.realtime_trade_record.buy_volume += order_flow.realtime_trade_record.buy_volume;
+        aggregated_flow.realtime_trade_record.sell_volume += order_flow.realtime_trade_record.sell_volume;
+        aggregated_flow.realtime_trade_record.timestamp = aggregated_flow.realtime_trade_record.timestamp.max(order_flow.realtime_trade_record.timestamp);
+
+        // 聚合撤单记录
+        aggregated_flow.realtime_cancel_records.bid_cancel += order_flow.realtime_cancel_records.bid_cancel;
+        aggregated_flow.realtime_cancel_records.ask_cancel += order_flow.realtime_cancel_records.ask_cancel;
+        aggregated_flow.realtime_cancel_records.timestamp = aggregated_flow.realtime_cancel_records.timestamp.max(order_flow.realtime_cancel_records.timestamp);
+
+        // 聚合增加订单
+        aggregated_flow.realtime_increase_order.bid += order_flow.realtime_increase_order.bid;
+        aggregated_flow.realtime_increase_order.ask += order_flow.realtime_increase_order.ask;
+        aggregated_flow.realtime_increase_order.timestamp = aggregated_flow.realtime_increase_order.timestamp.max(order_flow.realtime_increase_order.timestamp);
+    }
+
+    aggregated
+}
+
+/// 根据价格精度聚合交易价格
+fn aggregate_trade_price(price: f64, precision: f64) -> f64 {
+    if precision <= 0.0 {
+        return price; // 如果精度无效，返回原始价格
+    }
+    (price / precision).floor() * precision
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 初始化日志系统
@@ -28,7 +89,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 创建配置
     let config = Config::new(symbol)
         .with_buffer_size(10000)
-        .with_max_reconnects(5);
+        .with_max_reconnects(5)
+        .with_max_visible_rows(3000)    // 设置最大可见行数为3000
+        .with_price_precision(0.01);    // 设置价格精度为0.01 USD (1分)
 
     // 创建应用程序
     let mut app = ReactiveApp::new(config);
@@ -66,27 +129,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// 运行应用程序主循环
+/// 运行应用程序主循环 - 基于稳定的备份版本架构
 fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut ReactiveApp,
 ) -> io::Result<()> {
-    let mut last_tick = Instant::now();
-    let tick_rate = Duration::from_millis(100); // 10 FPS - 更合理的刷新率
-
+    // 主事件循环 - 集成WebSocket处理和UI刷新，与备份版本保持一致
     loop {
         // 处理事件循环
         app.event_loop();
 
-        // 绘制UI
+        // 刷新UI
         terminal.draw(|f| ui(f, app))?;
 
-        // 处理用户输入
-        let timeout = tick_rate
-            .checked_sub(last_tick.elapsed())
-            .unwrap_or_else(|| Duration::from_secs(0));
-
-        if crossterm::event::poll(timeout)? {
+        // 处理UI事件（非阻塞）- 与备份版本完全一致
+        if crossterm::event::poll(Duration::from_millis(0))? {
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
                     match key.code {
@@ -95,30 +152,53 @@ fn run_app(
                             if app.get_scroll_offset() > 0 {
                                 app.set_scroll_offset(app.get_scroll_offset() - 1);
                                 app.set_auto_scroll(false);
+                                app.set_auto_center_enabled(false); // 禁用自动居中
                             }
                         }
                         KeyCode::Down => {
                             app.set_scroll_offset(app.get_scroll_offset() + 1);
                             app.set_auto_scroll(false);
+                            app.set_auto_center_enabled(false); // 禁用自动居中
                         }
                         KeyCode::Home => {
                             app.set_scroll_offset(0);
                             app.set_auto_scroll(false);
+                            app.set_auto_center_enabled(false); // 禁用自动居中
                         }
                         KeyCode::End => {
                             app.set_auto_scroll(true);
+                            app.set_auto_center_enabled(true); // 重新启用自动居中
                         }
                         KeyCode::Char(' ') => {
                             app.set_auto_scroll(!app.is_auto_scroll());
+                            if app.is_auto_scroll() {
+                                app.set_auto_center_enabled(true); // 启用自动滚动时重新启用自动居中
+                            }
+                        }
+                        KeyCode::Char('c') => {
+                            // 'c' 键切换自动居中功能
+                            app.set_auto_center_enabled(!app.is_auto_center_enabled());
+                        }
+                        KeyCode::Char('t') => {
+                            // 't' 键切换价格跟踪功能
+                            app.set_price_tracking_enabled(!app.is_price_tracking_enabled());
+                        }
+                        KeyCode::Char('r') => {
+                            // 'r' 键手动重新居中到当前交易价格
+                            let current_price = app.get_market_snapshot().current_price;
+                            if let Some(price) = current_price {
+                                // 临时启用价格跟踪来触发居中
+                                let was_tracking = app.is_price_tracking_enabled();
+                                app.set_price_tracking_enabled(true);
+                                // 通过设置阈值为0来强制触发重新居中
+                                app.force_recenter_on_current_price();
+                                app.set_price_tracking_enabled(was_tracking);
+                            }
                         }
                         _ => {}
                     }
                 }
             }
-        }
-
-        if last_tick.elapsed() >= tick_rate {
-            last_tick = Instant::now();
         }
 
         if !app.is_running() {
@@ -129,11 +209,11 @@ fn run_app(
     Ok(())
 }
 
-/// UI渲染函数 - 与备份文件保持一致
+/// UI渲染函数 - 双列布局版本
 fn ui(f: &mut Frame, app: &ReactiveApp) {
     let size = f.area();
 
-    // 创建左右布局 - 与备份文件完全一致
+    // 创建双列布局：订单薄、信号
     let horizontal_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
@@ -157,8 +237,15 @@ fn render_orderbook(f: &mut Frame, app: &ReactiveApp, area: Rect) {
         "断开连接"
     };
 
-    let title = format!("Binance Futures Order Book - {} | 事件/秒: {:.1} | 状态: {}",
-        app.get_symbol(), stats.events_processed_per_second, connection_status);
+    // 获取缓冲区使用情况
+    let (current_buffer_size, max_buffer_capacity) = app.get_buffer_usage();
+
+    // 获取价格跟踪状态
+    let price_tracking_status = if app.is_price_tracking_enabled() { "跟踪" } else { "关闭" };
+    let auto_center_status = if app.is_auto_center_enabled() { "居中" } else { "关闭" };
+
+    let title = format!("Binance Futures Order Book - {} | 缓冲区: {}/{} | 事件/秒: {:.1} | 状态: {} | 价格跟踪: {} | 自动居中: {}",
+        app.get_symbol(), current_buffer_size, max_buffer_capacity, stats.events_processed_per_second, connection_status, price_tracking_status, auto_center_status);
 
     // 计算订单薄表格区域
     let table_width = area.width.saturating_sub(2);
@@ -183,18 +270,36 @@ fn render_orderbook(f: &mut Frame, app: &ReactiveApp, area: Rect) {
     let order_flows = app.get_orderbook_manager().get_order_flows();
     let current_price = snapshot.current_price.unwrap_or(50000.0);
 
-    // 如果有真实数据，使用真实数据；否则生成模拟数据用于演示
-    if !order_flows.is_empty() {
-        // 使用真实订单簿数据
-        let mut price_levels: Vec<_> = order_flows.keys().collect();
+    // 获取配置参数
+    let max_visible_rows = app.get_max_visible_rows();
+    let price_precision = app.get_price_precision();
+
+    // 应用价格精度聚合
+    let aggregated_order_flows = aggregate_price_levels(&order_flows, price_precision);
+
+    // 获取最近交易高亮信息并应用价格聚合
+    let (last_trade_price, last_trade_side, _) = app.get_orderbook_manager().get_last_trade_highlight();
+    let aggregated_last_trade_price = last_trade_price.map(|price| aggregate_trade_price(price, price_precision));
+    let should_highlight_trade = app.get_orderbook_manager().should_show_trade_highlight(3000); // 3秒高亮
+
+    // 准备价格值列表用于自动居中计算
+    let price_values: Vec<f64>;
+
+    // 如果有真实数据，使用聚合后的数据；否则生成模拟数据用于演示
+    if !aggregated_order_flows.is_empty() {
+        // 使用聚合后的订单簿数据
+        let mut price_levels: Vec<_> = aggregated_order_flows.keys().collect();
         price_levels.sort_by(|a, b| b.cmp(a)); // 从高价到低价排序
 
-        // 限制显示的价格层级数量
-        let max_levels = 50.min(price_levels.len());
+        // 使用配置的最大可见行数限制显示的价格层级数量
+        let max_levels = max_visible_rows.min(price_levels.len());
+
+        // 提取价格值用于自动居中计算
+        price_values = price_levels.iter().take(max_levels).map(|k| k.0).collect();
 
         for &price_key in price_levels.iter().take(max_levels) {
             let price = price_key.0;
-            let order_flow = &order_flows[price_key];
+            let order_flow = &aggregated_order_flows[price_key];
 
             // 获取真实的订单流数据
             let bid_vol = order_flow.bid_ask.bid;
@@ -229,8 +334,22 @@ fn render_orderbook(f: &mut Frame, app: &ReactiveApp, area: Rect) {
                 {
                     let price_str = format!("{:.2}", price);
                     let mut price_cell = Cell::from(price_str).style(Style::default().fg(Color::White));
-                    if is_current_price {
-                        // 根据价格变化设置高亮颜色
+
+                    // 检查是否为最近交易价格，优先显示交易高亮
+                    if should_highlight_trade &&
+                       aggregated_last_trade_price.map_or(false, |trade_price| (price - trade_price).abs() < 0.001) {
+                        // 根据交易方向设置背景颜色
+                        let trade_bg_color = match last_trade_side.as_deref() {
+                            Some("buy") => Color::Green,   // 买单用绿色背景
+                            Some("sell") => Color::Red,    // 卖单用红色背景
+                            _ => Color::Yellow,            // 未知方向用黄色背景
+                        };
+                        price_cell = price_cell.style(Style::default()
+                            .fg(Color::Black)
+                            .bg(trade_bg_color)
+                            .add_modifier(Modifier::BOLD));
+                    } else if is_current_price {
+                        // 如果不是交易高亮，但是当前价格，使用原有的高亮逻辑
                         let highlight_color = if price >= current_price {
                             Color::Green
                         } else {
@@ -266,6 +385,11 @@ fn render_orderbook(f: &mut Frame, app: &ReactiveApp, area: Rect) {
         let price_range = 50; // 显示50个价格层级
         let price_step = 0.1; // 价格步长
 
+        // 为模拟数据创建价格值列表
+        price_values = (0..price_range)
+            .map(|i| current_price + (price_range as f64 / 2.0 - i as f64) * price_step)
+            .collect();
+
         // 从高价到低价排列
         for i in 0..price_range {
             let price = current_price + (price_range as f64 / 2.0 - i as f64) * price_step;
@@ -295,8 +419,22 @@ fn render_orderbook(f: &mut Frame, app: &ReactiveApp, area: Rect) {
                 {
                     let price_str = format!("{:.2}", price);
                     let mut price_cell = Cell::from(price_str).style(Style::default().fg(Color::White));
-                    if is_current_price {
-                        // 根据价格变化设置高亮颜色
+
+                    // 检查是否为最近交易价格，优先显示交易高亮
+                    if should_highlight_trade &&
+                       aggregated_last_trade_price.map_or(false, |trade_price| (price - trade_price).abs() < 0.001) {
+                        // 根据交易方向设置背景颜色
+                        let trade_bg_color = match last_trade_side.as_deref() {
+                            Some("buy") => Color::Green,   // 买单用绿色背景
+                            Some("sell") => Color::Red,    // 卖单用红色背景
+                            _ => Color::Yellow,            // 未知方向用黄色背景
+                        };
+                        price_cell = price_cell.style(Style::default()
+                            .fg(Color::Black)
+                            .bg(trade_bg_color)
+                            .add_modifier(Modifier::BOLD));
+                    } else if is_current_price {
+                        // 如果不是交易高亮，但是当前价格，使用原有的高亮逻辑
                         let highlight_color = if price >= current_price {
                             Color::Green
                         } else {
@@ -352,9 +490,24 @@ fn render_orderbook(f: &mut Frame, app: &ReactiveApp, area: Rect) {
         rows.push(empty_row);
     }
 
+    // 应用自动居中逻辑
+    let visible_rows_count = centered_area.height.saturating_sub(3) as usize; // 减去边框和表头
+    let auto_center_scroll = app.calculate_auto_center_scroll(&price_values, visible_rows_count);
+
+    // 应用滚动偏移
+    let effective_scroll = if app.is_auto_scroll() {
+        // 自动滚动模式：使用当前滚动偏移（已在事件循环中更新）
+        app.get_scroll_offset()
+    } else {
+        auto_center_scroll
+    };
+
+    // 应用滚动偏移到行数据
+    let visible_rows: Vec<_> = rows.into_iter().skip(effective_scroll).collect();
+
     // 创建并渲染表格 - 与备份文件完全一致的表头和列宽
     let table = Table::new(
-        rows,
+        visible_rows,
         [
             Constraint::Length(10), // Bid Cancel
             Constraint::Length(10), // Sell Trade
@@ -700,6 +853,233 @@ fn render_volatility(f: &mut Frame, app: &ReactiveApp, area: Rect) {
     )));
 
     // 创建Text并渲染
+    let text = Text::from(lines);
+    let paragraph = Paragraph::new(text)
+        .block(block)
+        .wrap(Wrap { trim: true });
+
+    f.render_widget(paragraph, area);
+}
+
+/// 渲染监控面板 - 显示内部健康状态和性能监控
+fn render_monitoring_panel(f: &mut Frame, app: &ReactiveApp, area: Rect) {
+    // 将监控区域分为多个垂直部分
+    let monitoring_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage(20), // 健康状态摘要
+            Constraint::Percentage(25), // 缓冲区监控
+            Constraint::Percentage(25), // 事件处理监控
+            Constraint::Percentage(30), // WebSocket健康监控
+        ])
+        .split(area);
+
+    render_health_summary(f, app, monitoring_chunks[0]);
+    render_buffer_monitoring(f, app, monitoring_chunks[1]);
+    render_event_processing_monitoring(f, app, monitoring_chunks[2]);
+    render_websocket_health_monitoring(f, app, monitoring_chunks[3]);
+}
+
+/// 渲染健康状态摘要
+fn render_health_summary(f: &mut Frame, app: &ReactiveApp, area: Rect) {
+    let monitor = app.get_internal_monitor();
+    let health_summary = monitor.get_health_summary();
+
+    let block = Block::default()
+        .title("系统健康状态")
+        .borders(Borders::ALL);
+
+    let color = if monitor.blocking_detector.is_blocked {
+        Color::Red
+    } else if monitor.buffer_monitor.usage_percentage > 90.0 {
+        Color::Yellow
+    } else {
+        Color::Green
+    };
+
+    let text = Text::from(Line::from(Span::styled(
+        health_summary,
+        Style::default().fg(color).add_modifier(Modifier::BOLD)
+    )));
+
+    let paragraph = Paragraph::new(text)
+        .block(block)
+        .wrap(Wrap { trim: true });
+
+    f.render_widget(paragraph, area);
+}
+
+/// 渲染缓冲区监控
+fn render_buffer_monitoring(f: &mut Frame, app: &ReactiveApp, area: Rect) {
+    let monitor = app.get_internal_monitor();
+    let buffer = &monitor.buffer_monitor;
+
+    let block = Block::default()
+        .title("缓冲区监控")
+        .borders(Borders::ALL);
+
+    let mut lines = Vec::new();
+
+    // 当前使用情况
+    lines.push(Line::from(Span::raw(format!(
+        "使用: {}/{} ({:.1}%)",
+        buffer.current_usage,
+        buffer.max_capacity,
+        buffer.usage_percentage
+    ))));
+
+    // 峰值使用
+    lines.push(Line::from(Span::raw(format!(
+        "峰值: {} ({:.1}%)",
+        buffer.peak_usage,
+        if buffer.max_capacity > 0 { (buffer.peak_usage as f64 / buffer.max_capacity as f64) * 100.0 } else { 0.0 }
+    ))));
+
+    // 平均使用
+    lines.push(Line::from(Span::raw(format!(
+        "平均: {:.1}",
+        buffer.average_usage
+    ))));
+
+    // 使用率条形图
+    let bar_width = 20;
+    let filled_width = ((buffer.usage_percentage / 100.0) * bar_width as f64) as usize;
+    let mut bar = String::new();
+    for _ in 0..filled_width {
+        bar.push('█');
+    }
+    for _ in filled_width..bar_width {
+        bar.push('░');
+    }
+
+    let bar_color = if buffer.usage_percentage > 90.0 {
+        Color::Red
+    } else if buffer.usage_percentage > 70.0 {
+        Color::Yellow
+    } else {
+        Color::Green
+    };
+
+    lines.push(Line::from(Span::styled(bar, Style::default().fg(bar_color))));
+
+    let text = Text::from(lines);
+    let paragraph = Paragraph::new(text)
+        .block(block)
+        .wrap(Wrap { trim: true });
+
+    f.render_widget(paragraph, area);
+}
+
+/// 渲染事件处理监控
+fn render_event_processing_monitoring(f: &mut Frame, app: &ReactiveApp, area: Rect) {
+    let monitor = app.get_internal_monitor();
+    let event_processing = &monitor.event_processing;
+
+    let block = Block::default()
+        .title("事件处理监控")
+        .borders(Borders::ALL);
+
+    let mut lines = Vec::new();
+
+    // 事件处理速率
+    lines.push(Line::from(Span::raw(format!(
+        "速率: {:.1} 事件/秒",
+        event_processing.events_per_second
+    ))));
+
+    // 队列大小
+    lines.push(Line::from(Span::raw(format!(
+        "队列: {}",
+        event_processing.event_queue_size
+    ))));
+
+    // 最大队列大小
+    lines.push(Line::from(Span::raw(format!(
+        "峰值队列: {}",
+        event_processing.max_queue_size_reached
+    ))));
+
+    // 失败事件数
+    if event_processing.failed_events > 0 {
+        lines.push(Line::from(Span::styled(
+            format!("失败: {}", event_processing.failed_events),
+            Style::default().fg(Color::Red)
+        )));
+    }
+
+    // 最后处理时间
+    if let Some(last_processed) = event_processing.last_event_processed {
+        let elapsed = last_processed.elapsed().as_secs();
+        let color = if elapsed > 10 { Color::Red } else if elapsed > 5 { Color::Yellow } else { Color::Green };
+        lines.push(Line::from(Span::styled(
+            format!("最后处理: {}秒前", elapsed),
+            Style::default().fg(color)
+        )));
+    }
+
+    let text = Text::from(lines);
+    let paragraph = Paragraph::new(text)
+        .block(block)
+        .wrap(Wrap { trim: true });
+
+    f.render_widget(paragraph, area);
+}
+
+/// 渲染WebSocket健康监控
+fn render_websocket_health_monitoring(f: &mut Frame, app: &ReactiveApp, area: Rect) {
+    let monitor = app.get_internal_monitor();
+    let websocket = &monitor.websocket_health;
+
+    let block = Block::default()
+        .title("WebSocket监控")
+        .borders(Borders::ALL);
+
+    let mut lines = Vec::new();
+
+    // 连接状态
+    let status_color = if websocket.connection_status == "已连接" {
+        Color::Green
+    } else {
+        Color::Red
+    };
+    lines.push(Line::from(Span::styled(
+        format!("状态: {}", websocket.connection_status),
+        Style::default().fg(status_color)
+    )));
+
+    // 重连次数
+    if websocket.reconnection_count > 0 {
+        lines.push(Line::from(Span::styled(
+            format!("重连: {}次", websocket.reconnection_count),
+            Style::default().fg(Color::Yellow)
+        )));
+    }
+
+    // 连续错误
+    if websocket.consecutive_errors > 0 {
+        let error_color = if websocket.consecutive_errors > 5 { Color::Red } else { Color::Yellow };
+        lines.push(Line::from(Span::styled(
+            format!("连续错误: {}", websocket.consecutive_errors),
+            Style::default().fg(error_color)
+        )));
+    }
+
+    // 最后消息时间
+    if let Some(last_message) = websocket.last_message_received {
+        let elapsed = last_message.elapsed().as_secs();
+        let color = if elapsed > 30 { Color::Red } else if elapsed > 10 { Color::Yellow } else { Color::Green };
+        lines.push(Line::from(Span::styled(
+            format!("最后消息: {}秒前", elapsed),
+            Style::default().fg(color)
+        )));
+    }
+
+    // 消息速率
+    lines.push(Line::from(Span::raw(format!(
+        "消息/秒: {:.1}",
+        websocket.messages_per_second
+    ))));
+
     let text = Text::from(lines);
     let paragraph = Paragraph::new(text)
         .block(block)

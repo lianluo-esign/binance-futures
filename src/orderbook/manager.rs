@@ -31,6 +31,11 @@ pub struct OrderBookManager {
     tick_buffer: Vec<u64>,
     speed_history: Vec<(u64, f64)>,
     volatility_buffer: Vec<(u64, f64)>,
+
+    // 交易高亮显示
+    last_trade_price: Option<f64>,
+    last_trade_side: Option<String>, // "buy" or "sell"
+    last_trade_timestamp: Option<u64>,
 }
 
 impl OrderBookManager {
@@ -56,6 +61,10 @@ impl OrderBookManager {
             tick_buffer: Vec::new(),
             speed_history: Vec::new(),
             volatility_buffer: Vec::new(),
+
+            last_trade_price: None,
+            last_trade_side: None,
+            last_trade_timestamp: None,
         }
     }
 
@@ -118,7 +127,12 @@ impl OrderBookManager {
                 
                 // 更新当前价格
                 self.current_price = Some(price);
-                
+
+                // 更新交易高亮信息
+                self.last_trade_price = Some(price);
+                self.last_trade_side = Some(side.to_string());
+                self.last_trade_timestamp = Some(current_time);
+
                 // 更新订单流
                 let price_ordered = OrderedFloat(price);
                 let order_flow = self.order_flows.entry(price_ordered).or_insert_with(OrderFlow::new);
@@ -317,6 +331,23 @@ impl OrderBookManager {
     pub fn get_volume_ratios(&self) -> (f64, f64) {
         (self.bid_volume_ratio, self.ask_volume_ratio)
     }
+
+    /// 获取最近交易高亮信息
+    pub fn get_last_trade_highlight(&self) -> (Option<f64>, Option<String>, Option<u64>) {
+        (self.last_trade_price, self.last_trade_side.clone(), self.last_trade_timestamp)
+    }
+
+    /// 检查交易高亮是否应该显示（基于时间）
+    pub fn should_show_trade_highlight(&self, max_age_ms: u64) -> bool {
+        if let Some(timestamp) = self.last_trade_timestamp {
+            let current_time = self.get_current_timestamp();
+            current_time.saturating_sub(timestamp) <= max_age_ms
+        } else {
+            false
+        }
+    }
+
+
 
     pub fn clear(&mut self) {
         self.order_flows.clear();

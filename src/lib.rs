@@ -9,6 +9,7 @@ pub mod handlers;
 pub mod orderbook;
 pub mod websocket;
 pub mod app;
+pub mod monitoring;
 
 // 重新导出主要类型
 pub use core::RingBuffer;
@@ -37,7 +38,7 @@ pub fn init_logging() {
 
     env_logger::Builder::from_default_env()
         .target(env_logger::Target::Pipe(Box::new(log_file)))
-        .filter_level(log::LevelFilter::Warn) // 只记录警告和错误
+        .filter_level(log::LevelFilter::Debug) // 记录调试、信息、警告和错误
         .init();
 }
 
@@ -48,6 +49,10 @@ pub struct Config {
     pub event_buffer_size: usize,
     pub max_reconnect_attempts: u32,
     pub log_level: String,
+
+    // 订单簿显示配置
+    pub max_visible_rows: usize,    // 最大可见行数
+    pub price_precision: f64,       // 价格精度聚合参数（USD增量）
 }
 
 impl Default for Config {
@@ -57,6 +62,8 @@ impl Default for Config {
             event_buffer_size: 10000,
             max_reconnect_attempts: 5,
             log_level: "info".to_string(),
+            max_visible_rows: 3000,     // 默认最大可见行数为3000
+            price_precision: 0.01,      // 默认价格精度为0.01 USD (1分)
         }
     }
 }
@@ -81,6 +88,16 @@ impl Config {
 
     pub fn with_log_level(mut self, level: String) -> Self {
         self.log_level = level;
+        self
+    }
+
+    pub fn with_max_visible_rows(mut self, rows: usize) -> Self {
+        self.max_visible_rows = rows;
+        self
+    }
+
+    pub fn with_price_precision(mut self, precision: f64) -> Self {
+        self.price_precision = precision;
         self
     }
 }

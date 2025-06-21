@@ -53,6 +53,21 @@ pub enum ConnectionState {
     Failed,
 }
 
+/// 连接统计信息
+#[derive(Debug, Clone)]
+pub struct ConnectionStats {
+    pub state: ConnectionState,
+    pub total_messages_received: u64,
+    pub total_bytes_received: u64,
+    pub connection_duration: Option<std::time::Duration>,
+    pub reconnect_attempts: u32,
+    pub max_reconnect_attempts: u32,
+    pub last_error: Option<String>,
+    pub last_ping_elapsed: std::time::Duration,
+    pub last_pong_elapsed: std::time::Duration,
+    pub reconnect_scheduled: bool,
+}
+
 /// WebSocket连接包装器
 pub struct WebSocketConnection {
     socket: Option<WebSocket<MaybeTlsStream<TcpStream>>>,
@@ -64,6 +79,9 @@ pub struct WebSocketConnection {
     total_messages_received: u64,
     total_bytes_received: u64,
     last_error: Option<String>,
+    // 非阻塞重连相关字段
+    last_reconnect_attempt: Option<std::time::Instant>,
+    reconnect_scheduled: bool,
 }
 
 impl WebSocketConnection {
@@ -78,31 +96,36 @@ impl WebSocketConnection {
             total_messages_received: 0,
             total_bytes_received: 0,
             last_error: None,
+            last_reconnect_attempt: None,
+            reconnect_scheduled: false,
         }
     }
 
     /// 建立WebSocket连接
     pub fn connect(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         self.state = ConnectionState::Connecting;
-        
+
         let url = self.config.build_url();
         // 连接信息写入日志文件，不输出到控制台
         log::info!("正在连接到: {}", url);
-        
+        log::info!("订阅的流: {:?}", self.config.streams);
+
         let request = url.into_client_request()?;
-        let (socket, _response) = tungstenite::client::connect(request)?;
-        
+        let (socket, response) = tungstenite::client::connect(request)?;
+
+        log::info!("WebSocket连接响应状态: {}", response.status());
+
         // 设置非阻塞模式
         self.set_nonblocking(&socket)?;
-        
+
         self.socket = Some(socket);
         self.state = ConnectionState::Connected;
         self.connection_start = Some(std::time::Instant::now());
         self.config.reconnect_attempts = 0;
         self.last_error = None;
-        
+
         // 连接成功信息写入日志文件，不输出到控制台
-        log::info!("WebSocket连接成功: {}", self.config.symbol);
+        log::info!("WebSocket连接成功: {} - 开始监听消息", self.config.symbol);
         Ok(())
     }
 
@@ -127,25 +150,36 @@ impl WebSocketConnection {
             match socket.read() {
                 Ok(message) => {
                     self.total_messages_received += 1;
-                    
+
                     match &message {
                         Message::Text(text) => {
                             self.total_bytes_received += text.len() as u64;
+                            // 添加调试日志，但限制频率
+                            if self.total_messages_received % 100 == 1 {
+                                log::info!("收到文本消息 #{}: {} 字节", self.total_messages_received, text.len());
+                            }
                         }
                         Message::Binary(data) => {
                             self.total_bytes_received += data.len() as u64;
+                            log::info!("收到二进制消息: {} 字节", data.len());
                         }
                         Message::Pong(_) => {
                             self.last_pong = std::time::Instant::now();
+                            log::debug!("收到Pong消息");
                         }
                         Message::Close(_) => {
                             self.state = ConnectionState::Disconnected;
                             // 连接关闭信息写入日志文件，不输出到控制台
                             log::warn!("WebSocket连接已关闭");
                         }
-                        _ => {}
+                        Message::Ping(_) => {
+                            log::debug!("收到Ping消息");
+                        }
+                        _ => {
+                            log::debug!("收到其他类型消息");
+                        }
                     }
-                    
+
                     Ok(Some(message))
                 }
                 Err(tungstenite::Error::Io(ref e)) if e.kind() == io::ErrorKind::WouldBlock => {
@@ -184,22 +218,55 @@ impl WebSocketConnection {
         Ok(())
     }
 
-    /// 检查连接健康状态
+    /// 检查连接健康状态 - 增强版本
     pub fn check_health(&mut self) -> bool {
         let now = std::time::Instant::now();
-        
-        // 检查Pong响应超时
-        if now.duration_since(self.last_pong).as_millis() > (self.config.ping_interval_ms * 3) as u128 {
-            // Pong超时警告写入日志文件，不输出到控制台
-            log::warn!("Pong响应超时，连接可能已断开");
-            self.state = ConnectionState::Failed;
-            return false;
-        }
-        
+
         // 检查连接状态
         match self.state {
-            ConnectionState::Connected => true,
-            _ => false,
+            ConnectionState::Connected => {
+                // 检查Pong响应超时
+                let pong_timeout_ms = self.config.ping_interval_ms * 3;
+                if now.duration_since(self.last_pong).as_millis() > pong_timeout_ms as u128 {
+                    // Pong超时警告写入日志文件，不输出到控制台
+                    log::warn!("Pong响应超时 ({}ms)，连接可能已断开", pong_timeout_ms);
+                    self.state = ConnectionState::Failed;
+                    self.last_error = Some("Pong响应超时".to_string());
+                    return false;
+                }
+
+                // 检查是否长时间没有收到消息
+                if let Some(connection_start) = self.connection_start {
+                    let connection_duration = now.duration_since(connection_start);
+                    if connection_duration.as_secs() > 10 && self.total_messages_received == 0 {
+                        log::warn!("连接已建立{}秒但未收到任何消息", connection_duration.as_secs());
+                        self.state = ConnectionState::Failed;
+                        self.last_error = Some("长时间未收到消息".to_string());
+                        return false;
+                    }
+                }
+
+                true
+            }
+            ConnectionState::Connecting => {
+                // 检查连接超时
+                if let Some(connection_start) = self.connection_start {
+                    if now.duration_since(connection_start).as_millis() > self.config.connection_timeout_ms as u128 {
+                        log::warn!("连接超时 ({}ms)", self.config.connection_timeout_ms);
+                        self.state = ConnectionState::Failed;
+                        self.last_error = Some("连接超时".to_string());
+                        return false;
+                    }
+                }
+                false // 连接中，暂时不可用
+            }
+            ConnectionState::Reconnecting => {
+                // 重连状态下不可用，但不是错误
+                false
+            }
+            ConnectionState::Failed | ConnectionState::Disconnected => {
+                false
+            }
         }
     }
 
@@ -214,33 +281,58 @@ impl WebSocketConnection {
         log::info!("WebSocket连接已断开");
     }
 
-    /// 尝试重连
+    /// 尝试重连 - 非阻塞版本
     pub fn attempt_reconnect(&mut self) -> bool {
         if self.config.reconnect_attempts >= self.config.max_reconnect_attempts {
             // 重连失败错误写入日志文件，不输出到控制台
             log::error!("重连次数已达上限: {}", self.config.max_reconnect_attempts);
+            self.reconnect_scheduled = false;
             return false;
         }
 
+        let now = std::time::Instant::now();
+
+        // 检查是否需要调度重连
+        if !self.reconnect_scheduled {
+            self.reconnect_scheduled = true;
+            self.last_reconnect_attempt = Some(now);
+            self.state = ConnectionState::Reconnecting;
+
+            // 重连调度信息写入日志文件，不输出到控制台
+            log::info!("调度重连 ({}/{}), 将在{}ms后执行",
+                self.config.reconnect_attempts + 1,
+                self.config.max_reconnect_attempts,
+                self.config.reconnect_delay_ms);
+            return false; // 还未到重连时间
+        }
+
+        // 检查是否到了重连时间
+        if let Some(last_attempt) = self.last_reconnect_attempt {
+            if now.duration_since(last_attempt).as_millis() < self.config.reconnect_delay_ms as u128 {
+                return false; // 还未到重连时间
+            }
+        }
+
+        // 执行重连
         self.config.reconnect_attempts += 1;
-        self.state = ConnectionState::Reconnecting;
-        
+        self.reconnect_scheduled = false;
+
         // 重连尝试信息写入日志文件，不输出到控制台
-        log::info!("尝试重连 ({}/{})", self.config.reconnect_attempts, self.config.max_reconnect_attempts);
-        
-        // 等待重连延迟
-        std::thread::sleep(std::time::Duration::from_millis(self.config.reconnect_delay_ms));
-        
+        log::info!("执行重连 ({}/{})", self.config.reconnect_attempts, self.config.max_reconnect_attempts);
+
         match self.connect() {
             Ok(()) => {
                 // 重连成功信息写入日志文件，不输出到控制台
                 log::info!("重连成功");
+                self.last_reconnect_attempt = None;
                 true
             }
             Err(e) => {
                 // 重连失败错误写入日志文件，不输出到控制台
                 log::error!("重连失败: {}", e);
                 self.last_error = Some(e.to_string());
+                self.last_reconnect_attempt = Some(now); // 重新调度下次重连
+                self.reconnect_scheduled = true;
                 false
             }
         }
@@ -256,7 +348,8 @@ impl WebSocketConnection {
     }
 
     pub fn should_reconnect(&self) -> bool {
-        matches!(self.state, ConnectionState::Failed | ConnectionState::Disconnected) &&
+        (matches!(self.state, ConnectionState::Failed | ConnectionState::Disconnected) ||
+         (self.state == ConnectionState::Reconnecting && self.reconnect_scheduled)) &&
         self.config.reconnect_attempts < self.config.max_reconnect_attempts
     }
 
@@ -264,25 +357,46 @@ impl WebSocketConnection {
         self.connection_start.map(|start| start.elapsed())
     }
 
+    /// 获取详细的连接统计信息
+    pub fn get_connection_stats(&self) -> ConnectionStats {
+        ConnectionStats {
+            state: self.state.clone(),
+            total_messages_received: self.total_messages_received,
+            total_bytes_received: self.total_bytes_received,
+            connection_duration: self.connection_duration(),
+            reconnect_attempts: self.config.reconnect_attempts,
+            max_reconnect_attempts: self.config.max_reconnect_attempts,
+            last_error: self.last_error.clone(),
+            last_ping_elapsed: self.last_ping.elapsed(),
+            last_pong_elapsed: self.last_pong.elapsed(),
+            reconnect_scheduled: self.reconnect_scheduled,
+        }
+    }
+
+    /// 重置连接统计信息
+    pub fn reset_stats(&mut self) {
+        self.total_messages_received = 0;
+        self.total_bytes_received = 0;
+        self.config.reconnect_attempts = 0;
+        self.last_error = None;
+        self.last_reconnect_attempt = None;
+        self.reconnect_scheduled = false;
+    }
+
     pub fn stats(&self) -> ConnectionStats {
         ConnectionStats {
             state: self.state.clone(),
             total_messages_received: self.total_messages_received,
             total_bytes_received: self.total_bytes_received,
-            reconnect_attempts: self.config.reconnect_attempts,
             connection_duration: self.connection_duration(),
+            reconnect_attempts: self.config.reconnect_attempts,
+            max_reconnect_attempts: self.config.max_reconnect_attempts,
             last_error: self.last_error.clone(),
+            last_ping_elapsed: self.last_ping.elapsed(),
+            last_pong_elapsed: self.last_pong.elapsed(),
+            reconnect_scheduled: self.reconnect_scheduled,
         }
     }
 }
 
-/// 连接统计信息
-#[derive(Debug, Clone)]
-pub struct ConnectionStats {
-    pub state: ConnectionState,
-    pub total_messages_received: u64,
-    pub total_bytes_received: u64,
-    pub reconnect_attempts: u32,
-    pub connection_duration: Option<std::time::Duration>,
-    pub last_error: Option<String>,
-}
+
