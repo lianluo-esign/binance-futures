@@ -10,6 +10,7 @@ pub mod orderbook;
 pub mod websocket;
 pub mod app;
 pub mod monitoring;
+pub mod gui;
 
 // 重新导出主要类型
 pub use core::RingBuffer;
@@ -17,6 +18,7 @@ pub use events::{Event, EventType, EventBus, EventDispatcher};
 pub use orderbook::{OrderBookManager, OrderFlow, MarketSnapshot};
 pub use websocket::{WebSocketManager, WebSocketConnection};
 pub use app::ReactiveApp;
+pub use gui::TradingGUI;
 
 /// 库的版本信息
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -38,7 +40,7 @@ pub fn init_logging() {
 
     env_logger::Builder::from_default_env()
         .target(env_logger::Target::Pipe(Box::new(log_file)))
-        .filter_level(log::LevelFilter::Debug) // 记录调试、信息、警告和错误
+        .filter_level(log::LevelFilter::Info) // 记录信息、警告和错误
         .init();
 }
 

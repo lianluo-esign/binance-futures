@@ -72,7 +72,10 @@ impl OrderBookManager {
     pub fn handle_depth_update(&mut self, data: &Value) {
         let current_time = self.get_current_timestamp();
         self.stats.total_depth_updates += 1;
-        
+
+        let mut bid_count = 0;
+        let mut ask_count = 0;
+
         // 处理买单
         if let Some(bids) = data["b"].as_array() {
             for bid in bids {
@@ -81,7 +84,8 @@ impl OrderBookManager {
                         let price_ordered = OrderedFloat(price);
                         let order_flow = self.order_flows.entry(price_ordered).or_insert_with(OrderFlow::new);
                         order_flow.update_price_level(qty, 0.0, current_time);
-                        
+                        bid_count += 1;
+
                         // 更新最优买价
                         if self.best_bid_price.map_or(true, |best| price > best) {
                             self.best_bid_price = Some(price);
@@ -90,7 +94,7 @@ impl OrderBookManager {
                 }
             }
         }
-        
+
         // 处理卖单
         if let Some(asks) = data["a"].as_array() {
             for ask in asks {
@@ -99,7 +103,8 @@ impl OrderBookManager {
                         let price_ordered = OrderedFloat(price);
                         let order_flow = self.order_flows.entry(price_ordered).or_insert_with(OrderFlow::new);
                         order_flow.update_price_level(0.0, qty, current_time);
-                        
+                        ask_count += 1;
+
                         // 更新最优卖价
                         if self.best_ask_price.map_or(true, |best| price < best) {
                             self.best_ask_price = Some(price);
@@ -108,7 +113,9 @@ impl OrderBookManager {
                 }
             }
         }
-        
+
+        // 调试信息已移除
+
         self.update_market_snapshot();
     }
 
@@ -163,7 +170,7 @@ impl OrderBookManager {
                 self.best_bid_price = Some(best_bid_price);
                 self.best_ask_price = Some(best_ask_price);
 
-                // 3. 修正清理逻辑 - 清理不合理的挂单
+                // 清理非法的挂单数据
                 self.clean_invalid_orders(best_bid_price, best_ask_price);
 
                 // 创建快照
@@ -185,26 +192,46 @@ impl OrderBookManager {
 
     /// 清理不合理的挂单数据
     fn clean_invalid_orders(&mut self, best_bid_price: f64, best_ask_price: f64) {
+        // println!("DEBUG: clean_invalid_orders - best_bid: {:.2}, best_ask: {:.2}",
+                // best_bid_price, best_ask_price);
+
+        let mut bid_cleared = 0;
+        let mut ask_cleared = 0;
+        let total_flows = self.order_flows.len();
+
+        // 更保守的清理策略：只清理明显不合理的数据
         for (price, order_flow) in self.order_flows.iter_mut() {
             let price_val = price.0;
 
-            // 清理价格低于或等于最优买价的ask挂单（ask价格应该高于bid价格）
-            if price_val <= best_bid_price {
-                order_flow.bid_ask.ask = 0.0;
+            // 只清理明显违反市场规则的数据，添加缓冲区
+            let spread = best_ask_price - best_bid_price;
+            let buffer = spread * 0.1; // 10%的缓冲区
+
+            // 处理asks时：只清除明显高于best_ask_price的bid挂单
+            if price_val > best_ask_price + buffer && order_flow.bid_ask.bid > 0.0 {
+                // println!("DEBUG: clearing bid at price {:.2} (best_ask: {:.2})", price_val, best_ask_price);
+                order_flow.bid_ask.bid = 0.0;
+                bid_cleared += 1;
             }
 
-            // 清理价格高于或等于最优卖价的bid挂单（bid价格应该低于ask价格）
-            if price_val >= best_ask_price {
-                order_flow.bid_ask.bid = 0.0;
+            // 处理bids时：只清除明显低于best_bid_price的ask挂单
+            if price_val < best_bid_price - buffer && order_flow.bid_ask.ask > 0.0 {
+                // println!("DEBUG: clearing ask at price {:.2} (best_bid: {:.2})", price_val, best_bid_price);
+                order_flow.bid_ask.ask = 0.0;
+                ask_cleared += 1;
             }
         }
 
-        // 清理空的订单流条目（可选优化）
+        // println!("DEBUG: cleaned {} bid orders, {} ask orders from {} total flows",
+                // bid_cleared, ask_cleared, total_flows);
+
+        // 定期清理过期的交易数据，但保留挂单数据
         let current_time = self.get_current_timestamp();
-        self.order_flows.retain(|_, order_flow| {
-            order_flow.bid_ask.bid > 0.0 || order_flow.bid_ask.ask > 0.0 ||
-            order_flow.has_recent_activity(current_time, 60000) // 保留60秒内有活动的
-        });
+        for (_, order_flow) in self.order_flows.iter_mut() {
+            order_flow.clean_expired_trades(current_time, 5000); // 5秒
+            order_flow.clean_expired_cancels(current_time, 5000); // 5秒
+            order_flow.clean_expired_increases(current_time, 5000); // 5秒
+        }
     }
 
     /// 计算价格速度
@@ -348,6 +375,26 @@ impl OrderBookManager {
     }
 
 
+
+    /// 定期清理过期数据
+    pub fn cleanup_expired_data(&mut self) {
+        let current_time = self.get_current_timestamp();
+
+        // 清理5秒内的实时交易数据
+        for (_, order_flow) in self.order_flows.iter_mut() {
+            order_flow.clean_expired_trades(current_time, 5000); // 5秒
+            order_flow.clean_expired_cancels(current_time, 5000); // 5秒
+            order_flow.clean_expired_increases(current_time, 5000); // 5秒
+        }
+
+        // 清理空的或过期的订单流条目
+        self.order_flows.retain(|_, order_flow| {
+            // 保留有挂单数据或最近有活动的条目
+            order_flow.bid_ask.bid > 0.0 ||
+            order_flow.bid_ask.ask > 0.0 ||
+            order_flow.has_recent_activity(current_time, 60000) // 保留60秒内有活动的
+        });
+    }
 
     pub fn clear(&mut self) {
         self.order_flows.clear();

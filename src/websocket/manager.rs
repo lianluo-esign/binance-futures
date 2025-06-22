@@ -75,15 +75,15 @@ impl WebSocketManager {
         }
     }
 
-    /// 读取消息并解析为JSON - 增强错误处理
+    /// 读取消息并解析为JSON - 币安优化版本
     pub fn read_messages(&mut self) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
         self.message_buffer.clear();
 
-        // 发送ping保持连接 - 增强错误处理
-        if let Err(e) = self.connection.send_ping() {
+        // 处理心跳机制（币安模式：等待服务器ping并响应pong）
+        if let Err(e) = self.connection.handle_heartbeat() {
             self.stats.ping_errors += 1;
-            log::warn!("发送ping失败 (总计: {}次): {}", self.stats.ping_errors, e);
-            // ping失败不应该中断消息读取
+            log::warn!("心跳处理失败 (总计: {}次): {}", self.stats.ping_errors, e);
+            // 心跳失败可能意味着连接问题，但不中断消息读取
         }
 
         // 检查连接健康状态
@@ -142,12 +142,10 @@ impl WebSocketManager {
                         .as_millis() as u64
                 );
 
-                // 添加调试日志，限制频率
-                if self.stats.total_json_messages % 50 == 1 {
+                // 添加调试日志，限制频率（每1000条消息记录一次）
+                if self.stats.total_json_messages % 1000 == 1 {
                     log::info!("处理JSON消息 #{}: {} 字符", self.stats.total_json_messages, text.len());
-                    if text.len() < 200 {
-                        log::debug!("消息内容: {}", text);
-                    }
+                    // 移除消息内容输出以减少日志噪音
                 }
 
                 match serde_json::from_str::<Value>(&text) {
@@ -161,8 +159,11 @@ impl WebSocketManager {
                 }
             }
             Message::Ping(payload) => {
-                // 自动响应ping
-                let _ = self.connection.send_message(Message::Pong(payload));
+                // 自动响应服务器的ping（币安要求）
+                if let Err(e) = self.connection.send_message(Message::Pong(payload.clone())) {
+                    log::error!("响应服务器ping失败: {}", e);
+                }
+                // 移除debug输出以减少日志噪音
                 None
             }
             Message::Pong(_) => {
@@ -239,12 +240,14 @@ impl WebSocketManager {
         self.connection.get_connection_stats()
     }
 
-    /// 获取综合健康状态
+    /// 获取综合健康状态 - 币安优化版本
     pub fn get_health_status(&self) -> WebSocketHealthStatus {
         let connection_stats = self.connection.get_connection_stats();
+
+        // 币安特定的健康检查
         let is_healthy = self.is_connected() &&
-                        self.stats.consecutive_errors < 3 &&
-                        connection_stats.last_pong_elapsed.as_secs() < 60;
+                        self.stats.consecutive_errors < 5 && // 允许更多错误
+                        connection_stats.last_ping_elapsed.as_secs() < 900; // 15分钟内收到ping
 
         WebSocketHealthStatus {
             is_healthy,
@@ -255,6 +258,27 @@ impl WebSocketManager {
             last_error: connection_stats.last_error,
             connection_duration: connection_stats.connection_duration,
             messages_per_second: self.calculate_message_rate(),
+        }
+    }
+
+    /// 强制重连（用于24小时连接限制）
+    pub fn force_reconnect(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        log::info!("执行强制重连（24小时连接限制或其他原因）");
+        self.disconnect();
+
+        // 等待一小段时间确保连接完全关闭
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        self.connect()
+    }
+
+    /// 检查是否需要定期重连（币安24小时限制）
+    pub fn should_force_reconnect(&self) -> bool {
+        if let Some(duration) = self.connection.connection_duration() {
+            // 23小时后强制重连
+            duration.as_secs() >= 23 * 3600
+        } else {
+            false
         }
     }
 

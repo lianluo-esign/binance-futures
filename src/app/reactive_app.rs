@@ -54,6 +54,15 @@ pub struct ReactiveApp {
     circuit_breaker_failures: u32,
     circuit_breaker_open: bool,
     circuit_breaker_last_failure: Option<Instant>,
+
+    // 数据清理相关
+    last_cleanup: Instant,
+    cleanup_interval: Duration,
+
+    // 计数器（用于限制日志频率）
+    total_messages_processed: u64,
+    total_events_created: u64,
+    total_events_processed: u64,
 }
 
 impl ReactiveApp {
@@ -96,6 +105,11 @@ impl ReactiveApp {
             circuit_breaker_failures: 0,
             circuit_breaker_open: false,
             circuit_breaker_last_failure: None,
+            last_cleanup: now,
+            cleanup_interval: Duration::from_secs(1), // 每秒清理一次过期数据
+            total_messages_processed: 0,
+            total_events_created: 0,
+            total_events_processed: 0,
         }
     }
 
@@ -121,7 +135,15 @@ impl ReactiveApp {
             return;
         }
 
-        // 1. 读取WebSocket消息并转换为事件
+        // 1. 检查是否需要强制重连（币安24小时限制）
+        if self.websocket_manager.should_force_reconnect() {
+            log::info!("检测到连接接近24小时限制，执行强制重连");
+            if let Err(e) = self.websocket_manager.force_reconnect() {
+                log::error!("强制重连失败: {}", e);
+            }
+        }
+
+        // 2. 读取WebSocket消息并转换为事件
         if self.websocket_manager.is_connected() {
             self.process_websocket_messages();
         } else if self.websocket_manager.should_reconnect() {
@@ -147,10 +169,13 @@ impl ReactiveApp {
         // 7. 处理价格跟踪逻辑
         self.update_price_tracking();
 
-        // 7. 检查并尝试自动恢复
+        // 8. 定期清理过期数据
+        self.cleanup_expired_data_if_needed();
+
+        // 9. 检查并尝试自动恢复
         self.check_and_recover();
 
-        // 8. 更新最后更新时间
+        // 10. 更新最后更新时间
         self.last_update = Instant::now();
     }
 
@@ -180,8 +205,13 @@ impl ReactiveApp {
                     // 重置断路器失败计数
                     self.circuit_breaker_failures = 0;
 
-                    // 添加调试日志
-                    log::info!("收到 {} 条WebSocket消息", messages.len());
+                    // 更新消息计数器
+                    self.total_messages_processed += messages.len() as u64;
+
+                    // 添加调试日志，限制频率（每100次记录一次）
+                    if self.total_messages_processed % 100 == 0 {
+                        log::info!("收到 {} 条WebSocket消息 (总计: {})", messages.len(), self.total_messages_processed);
+                    }
                 }
 
                 // 限制每次处理的消息数量，防止阻塞
@@ -196,8 +226,11 @@ impl ReactiveApp {
                     }
                 }
 
-                if events_created > 0 {
-                    log::info!("创建了 {} 个事件", events_created);
+                // 更新事件创建计数器
+                self.total_events_created += events_created as u64;
+
+                if events_created > 0 && self.total_events_created % 100 == 0 {
+                    log::info!("创建了 {} 个事件 (总计: {})", events_created, self.total_events_created);
                 }
             }
             Err(e) => {
@@ -274,9 +307,12 @@ impl ReactiveApp {
         const MAX_EVENTS_PER_CYCLE: usize = 100;
         let events_processed = self.event_dispatcher.process_events_batch(MAX_EVENTS_PER_CYCLE);
 
-        // 添加调试日志
-        if events_processed > 0 {
-            log::info!("处理了 {} 个事件", events_processed);
+        // 更新事件处理计数器
+        self.total_events_processed += events_processed as u64;
+
+        // 添加调试日志，限制频率（每100次记录一次）
+        if events_processed > 0 && self.total_events_processed % 100 == 0 {
+            log::info!("处理了 {} 个事件 (总计: {})", events_processed, self.total_events_processed);
         }
 
         events_processed
@@ -442,6 +478,17 @@ impl ReactiveApp {
     }
 
 
+
+    /// 定期清理过期数据
+    fn cleanup_expired_data_if_needed(&mut self) {
+        let now = Instant::now();
+
+        // 每秒清理一次过期数据
+        if now.duration_since(self.last_cleanup) >= self.cleanup_interval {
+            self.orderbook_manager.cleanup_expired_data();
+            self.last_cleanup = now;
+        }
+    }
 
     /// 简化的健康检查 - 仅记录心跳，避免复杂逻辑
     fn send_heartbeat_if_needed(&mut self) {

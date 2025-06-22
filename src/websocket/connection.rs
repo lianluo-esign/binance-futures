@@ -16,6 +16,9 @@ pub struct WebSocketConfig {
     pub reconnect_delay_ms: u64,
     pub ping_interval_ms: u64,
     pub connection_timeout_ms: u64,
+    pub pong_timeout_ms: u64,
+    pub connection_lifetime_hours: u64,
+    pub max_reconnect_delay_ms: u64,
 }
 
 impl WebSocketConfig {
@@ -28,10 +31,13 @@ impl WebSocketConfig {
                 format!("{}@bookTicker", symbol.to_lowercase()),
             ],
             reconnect_attempts: 0,
-            max_reconnect_attempts: 5,
+            max_reconnect_attempts: 10,
             reconnect_delay_ms: 1000,
-            ping_interval_ms: 30000,
+            ping_interval_ms: 180000, // 3分钟，但实际上币安服务器会发ping
             connection_timeout_ms: 10000,
+            pong_timeout_ms: 600000, // 10分钟，币安要求的pong超时时间
+            connection_lifetime_hours: 23, // 23小时后主动重连，避免24小时限制
+            max_reconnect_delay_ms: 60000, // 最大重连延迟1分钟
         }
     }
 
@@ -73,8 +79,8 @@ pub struct WebSocketConnection {
     socket: Option<WebSocket<MaybeTlsStream<TcpStream>>>,
     config: WebSocketConfig,
     state: ConnectionState,
-    last_ping: std::time::Instant,
-    last_pong: std::time::Instant,
+    last_ping_received: std::time::Instant,
+    last_pong_sent: std::time::Instant,
     connection_start: Option<std::time::Instant>,
     total_messages_received: u64,
     total_bytes_received: u64,
@@ -82,22 +88,28 @@ pub struct WebSocketConnection {
     // 非阻塞重连相关字段
     last_reconnect_attempt: Option<std::time::Instant>,
     reconnect_scheduled: bool,
+    // 新增字段
+    last_heartbeat_check: std::time::Instant,
+    connection_lifetime_exceeded: bool,
 }
 
 impl WebSocketConnection {
     pub fn new(config: WebSocketConfig) -> Self {
+        let now = std::time::Instant::now();
         Self {
             socket: None,
             config,
             state: ConnectionState::Disconnected,
-            last_ping: std::time::Instant::now(),
-            last_pong: std::time::Instant::now(),
+            last_ping_received: now,
+            last_pong_sent: now,
             connection_start: None,
             total_messages_received: 0,
             total_bytes_received: 0,
             last_error: None,
             last_reconnect_attempt: None,
             reconnect_scheduled: false,
+            last_heartbeat_check: now,
+            connection_lifetime_exceeded: false,
         }
     }
 
@@ -154,8 +166,8 @@ impl WebSocketConnection {
                     match &message {
                         Message::Text(text) => {
                             self.total_bytes_received += text.len() as u64;
-                            // 添加调试日志，但限制频率
-                            if self.total_messages_received % 100 == 1 {
+                            // 添加调试日志，但限制频率（每1000条消息记录一次）
+                            if self.total_messages_received % 1000 == 1 {
                                 log::info!("收到文本消息 #{}: {} 字节", self.total_messages_received, text.len());
                             }
                         }
@@ -164,8 +176,8 @@ impl WebSocketConnection {
                             log::info!("收到二进制消息: {} 字节", data.len());
                         }
                         Message::Pong(_) => {
-                            self.last_pong = std::time::Instant::now();
-                            log::debug!("收到Pong消息");
+                            // 我们发送的pong响应，不需要特殊处理
+                            // 移除debug输出以减少日志噪音
                         }
                         Message::Close(_) => {
                             self.state = ConnectionState::Disconnected;
@@ -173,10 +185,12 @@ impl WebSocketConnection {
                             log::warn!("WebSocket连接已关闭");
                         }
                         Message::Ping(_) => {
-                            log::debug!("收到Ping消息");
+                            // 收到服务器的ping，记录时间并自动响应pong
+                            self.last_ping_received = std::time::Instant::now();
+                            // 移除debug输出以减少日志噪音
                         }
                         _ => {
-                            log::debug!("收到其他类型消息");
+                            // 移除debug输出以减少日志噪音
                         }
                     }
 
@@ -207,38 +221,61 @@ impl WebSocketConnection {
         }
     }
 
-    /// 发送Ping消息
-    pub fn send_ping(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    /// 检查心跳状态并响应ping（币安模式：服务器发ping，客户端响应pong）
+    pub fn handle_heartbeat(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let now = std::time::Instant::now();
-        if now.duration_since(self.last_ping).as_millis() > self.config.ping_interval_ms as u128 {
-            self.send_message(Message::Ping(vec![]))?;
-            self.last_ping = now;
-            // Ping消息不输出到控制台，避免干扰UI
+
+        // 检查是否需要响应ping（币安服务器会发送ping）
+        // 这里我们不主动发送ping，而是等待服务器的ping并响应pong
+
+        // 检查连接生命周期（币安24小时限制）
+        if let Some(connection_start) = self.connection_start {
+            let connection_hours = now.duration_since(connection_start).as_secs() / 3600;
+            if connection_hours >= self.config.connection_lifetime_hours {
+                self.connection_lifetime_exceeded = true;
+                log::info!("连接已运行{}小时，接近24小时限制，将触发重连", connection_hours);
+                self.state = ConnectionState::Failed;
+                self.last_error = Some("连接生命周期已达上限".to_string());
+                return Err("连接生命周期已达上限".into());
+            }
         }
+
         Ok(())
     }
 
-    /// 检查连接健康状态 - 增强版本
+    /// 检查连接健康状态 - 币安优化版本
     pub fn check_health(&mut self) -> bool {
         let now = std::time::Instant::now();
 
         // 检查连接状态
         match self.state {
             ConnectionState::Connected => {
-                // 检查Pong响应超时
-                let pong_timeout_ms = self.config.ping_interval_ms * 3;
-                if now.duration_since(self.last_pong).as_millis() > pong_timeout_ms as u128 {
-                    // Pong超时警告写入日志文件，不输出到控制台
-                    log::warn!("Pong响应超时 ({}ms)，连接可能已断开", pong_timeout_ms);
-                    self.state = ConnectionState::Failed;
-                    self.last_error = Some("Pong响应超时".to_string());
+                // 检查是否超过连接生命周期
+                if self.connection_lifetime_exceeded {
+                    log::info!("连接生命周期已达上限，需要重连");
                     return false;
+                }
+
+                // 检查服务器ping超时（币安服务器每3分钟发送ping）
+                // 如果超过10分钟没收到ping，可能连接有问题
+                let ping_timeout_ms = 600000; // 10分钟
+                if now.duration_since(self.last_ping_received).as_millis() > ping_timeout_ms as u128 {
+                    // 但是在连接初期（前5分钟）不检查ping超时
+                    if let Some(connection_start) = self.connection_start {
+                        if now.duration_since(connection_start).as_secs() > 300 {
+                            log::warn!("长时间未收到服务器ping ({}分钟)，连接可能已断开",
+                                now.duration_since(self.last_ping_received).as_secs() / 60);
+                            self.state = ConnectionState::Failed;
+                            self.last_error = Some("服务器ping超时".to_string());
+                            return false;
+                        }
+                    }
                 }
 
                 // 检查是否长时间没有收到消息
                 if let Some(connection_start) = self.connection_start {
                     let connection_duration = now.duration_since(connection_start);
-                    if connection_duration.as_secs() > 10 && self.total_messages_received == 0 {
+                    if connection_duration.as_secs() > 30 && self.total_messages_received == 0 {
                         log::warn!("连接已建立{}秒但未收到任何消息", connection_duration.as_secs());
                         self.state = ConnectionState::Failed;
                         self.last_error = Some("长时间未收到消息".to_string());
@@ -281,7 +318,7 @@ impl WebSocketConnection {
         log::info!("WebSocket连接已断开");
     }
 
-    /// 尝试重连 - 非阻塞版本
+    /// 尝试重连 - 指数退避版本
     pub fn attempt_reconnect(&mut self) -> bool {
         if self.config.reconnect_attempts >= self.config.max_reconnect_attempts {
             // 重连失败错误写入日志文件，不输出到控制台
@@ -298,11 +335,19 @@ impl WebSocketConnection {
             self.last_reconnect_attempt = Some(now);
             self.state = ConnectionState::Reconnecting;
 
+            // 计算指数退避延迟
+            let base_delay = self.config.reconnect_delay_ms;
+            let exponential_delay = base_delay * (2_u64.pow(self.config.reconnect_attempts.min(6)));
+            let actual_delay = exponential_delay.min(self.config.max_reconnect_delay_ms);
+
             // 重连调度信息写入日志文件，不输出到控制台
-            log::info!("调度重连 ({}/{}), 将在{}ms后执行",
+            log::info!("调度重连 ({}/{}), 将在{}ms后执行 (指数退避)",
                 self.config.reconnect_attempts + 1,
                 self.config.max_reconnect_attempts,
-                self.config.reconnect_delay_ms);
+                actual_delay);
+
+            // 更新配置中的延迟时间
+            self.config.reconnect_delay_ms = actual_delay;
             return false; // 还未到重连时间
         }
 
@@ -320,11 +365,16 @@ impl WebSocketConnection {
         // 重连尝试信息写入日志文件，不输出到控制台
         log::info!("执行重连 ({}/{})", self.config.reconnect_attempts, self.config.max_reconnect_attempts);
 
+        // 重置连接生命周期标志
+        self.connection_lifetime_exceeded = false;
+
         match self.connect() {
             Ok(()) => {
                 // 重连成功信息写入日志文件，不输出到控制台
                 log::info!("重连成功");
                 self.last_reconnect_attempt = None;
+                // 重连成功后重置延迟时间
+                self.config.reconnect_delay_ms = 1000;
                 true
             }
             Err(e) => {
@@ -367,8 +417,8 @@ impl WebSocketConnection {
             reconnect_attempts: self.config.reconnect_attempts,
             max_reconnect_attempts: self.config.max_reconnect_attempts,
             last_error: self.last_error.clone(),
-            last_ping_elapsed: self.last_ping.elapsed(),
-            last_pong_elapsed: self.last_pong.elapsed(),
+            last_ping_elapsed: self.last_ping_received.elapsed(),
+            last_pong_elapsed: self.last_pong_sent.elapsed(),
             reconnect_scheduled: self.reconnect_scheduled,
         }
     }
@@ -392,8 +442,8 @@ impl WebSocketConnection {
             reconnect_attempts: self.config.reconnect_attempts,
             max_reconnect_attempts: self.config.max_reconnect_attempts,
             last_error: self.last_error.clone(),
-            last_ping_elapsed: self.last_ping.elapsed(),
-            last_pong_elapsed: self.last_pong.elapsed(),
+            last_ping_elapsed: self.last_ping_received.elapsed(),
+            last_pong_elapsed: self.last_pong_sent.elapsed(),
             reconnect_scheduled: self.reconnect_scheduled,
         }
     }
