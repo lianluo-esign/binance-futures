@@ -4,6 +4,7 @@ use serde_json::Value;
 
 use super::data_structures::*;
 use super::order_flow::OrderFlow;
+use crate::gui::TimeFootprintData;
 
 /// 订单簿管理器 - 简化版本，专注于核心功能
 pub struct OrderBookManager {
@@ -36,6 +37,9 @@ pub struct OrderBookManager {
     last_trade_price: Option<f64>,
     last_trade_side: Option<String>, // "buy" or "sell"
     last_trade_timestamp: Option<u64>,
+
+    // 时间维度足迹数据
+    time_footprint_data: TimeFootprintData,
 }
 
 impl OrderBookManager {
@@ -65,6 +69,8 @@ impl OrderBookManager {
             last_trade_price: None,
             last_trade_side: None,
             last_trade_timestamp: None,
+
+            time_footprint_data: TimeFootprintData::new(30), // 30分钟滑动窗口
         }
     }
 
@@ -144,11 +150,14 @@ impl OrderBookManager {
                 let price_ordered = OrderedFloat(price);
                 let order_flow = self.order_flows.entry(price_ordered).or_insert_with(OrderFlow::new);
                 order_flow.add_trade(side, qty, current_time);
-                
+
+                // 更新时间维度足迹数据
+                self.time_footprint_data.add_trade(price, side, qty, current_time);
+
                 // 计算价格速度和波动率
                 self.calculate_price_speed(current_time);
                 self.calculate_volatility(current_time, price);
-                
+
                 self.update_market_snapshot();
             }
         }
@@ -372,6 +381,11 @@ impl OrderBookManager {
         } else {
             false
         }
+    }
+
+    /// 获取时间维度足迹数据
+    pub fn get_time_footprint_data(&self) -> &TimeFootprintData {
+        &self.time_footprint_data
     }
 
 

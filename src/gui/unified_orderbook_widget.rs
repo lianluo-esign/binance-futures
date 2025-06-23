@@ -1,6 +1,7 @@
 use eframe::egui;
 use crate::orderbook::OrderFlow;
 use crate::app::ReactiveApp;
+
 use std::collections::BTreeMap;
 use ordered_float::OrderedFloat;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -41,6 +42,10 @@ pub struct UnifiedOrderBookWidget {
     last_data_timestamp: u64,
     /// Logo纹理（可选）
     logo_texture: Option<egui::TextureHandle>,
+    /// 交易信号窗口是否打开
+    trading_signal_window_open: bool,
+    /// 量化回测窗口是否打开
+    quantitative_backtest_window_open: bool,
 }
 
 impl Default for UnifiedOrderBookWidget {
@@ -56,6 +61,8 @@ impl Default for UnifiedOrderBookWidget {
             cached_visible_data: Vec::new(),
             last_data_timestamp: 0,
             logo_texture: None,
+            trading_signal_window_open: false,
+            quantitative_backtest_window_open: false,
         }
     }
 }
@@ -171,7 +178,7 @@ impl UnifiedOrderBookWidget {
         ui.add_space(10.0); // 在Logo后添加间距
     }
 
-    /// 渲染统一订单簿组件 - 固定比例布局（5% 标题 + 95% 表格）
+    /// 渲染统一订单簿组件 - 全屏布局（100%宽度）
     pub fn show(&mut self, ui: &mut egui::Ui, app: &ReactiveApp) {
         // 加载Logo（如果还未加载）
         self.load_logo(ui.ctx());
@@ -181,36 +188,46 @@ impl UnifiedOrderBookWidget {
         let total_height = total_rect.height();
         let total_width = total_rect.width();
 
-        // 计算固定比例尺寸
+        // 计算全屏尺寸
         let header_height = total_height * 0.05; // 5% 用于标题
-        let table_height = total_height * 0.95;  // 95% 用于表格
+        let content_height = total_height * 0.95; // 95% 用于内容
 
         ui.vertical(|ui| {
-            // 1. 顶部固定区域：5% 高度用于标题和当前价格信息
+            // 1. 顶部标题区域：5% 高度
             ui.allocate_ui_with_layout(
                 egui::Vec2::new(total_width, header_height),
-                egui::Layout::top_down(egui::Align::LEFT),
+                egui::Layout::left_to_right(egui::Align::Center),
                 |ui| {
-                    ui.horizontal(|ui| {
-                        // Logo显示
-                        // self.render_logo(ui, header_height);
+                    ui.heading("订单流分析");
 
-                        // ui.heading("订单流分析");
-                        // ui.separator();
+                    // 显示当前价格
+                    let snapshot = app.get_market_snapshot();
+                    if let Some(current_price) = snapshot.current_price {
+                        ui.separator();
+                        ui.label("当前价格:");
+                        ui.colored_label(egui::Color32::YELLOW, format!("{:.2}", current_price));
+                    }
 
-                        // 显示当前价格
-                        // let snapshot = app.get_market_snapshot();
-                        // if let Some(current_price) = snapshot.current_price {
-                        //     ui.label("当前价格:");
-                        //     ui.colored_label(egui::Color32::YELLOW, format!("{:.2}", current_price));
-                        // }
+                    // 在右侧添加按钮
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // 量化回测按钮
+                        if ui.button("量化回测").clicked() {
+                            self.quantitative_backtest_window_open = true;
+                        }
+
+                        ui.add_space(10.0); // 按钮间距
+
+                        // 交易信号按钮
+                        if ui.button("交易信号").clicked() {
+                            self.trading_signal_window_open = true;
+                        }
                     });
                 },
             );
 
-            // 2. 底部表格区域：95% 高度，严格边界控制
+            // 2. 主要内容区域：95% 高度，全屏订单簿
             ui.allocate_ui_with_layout(
-                egui::Vec2::new(total_width, table_height),
+                egui::Vec2::new(total_width, content_height),
                 egui::Layout::top_down(egui::Align::LEFT),
                 |ui| {
                     // 获取当前价格和数据
@@ -229,15 +246,18 @@ impl UnifiedOrderBookWidget {
 
                     if visible_data.is_empty() {
                         ui.centered_and_justified(|ui| {
-                            ui.label("暂无数据");
+                            ui.label("暂无订单簿数据");
                         });
                     } else {
-                        // 渲染表格，严格限制在95%区域内
-                        self.render_bounded_table(ui, &visible_data, current_price, table_height);
+                        // 渲染订单簿表格，占据全部可用空间
+                        self.render_bounded_table(ui, &visible_data, current_price, content_height);
                     }
                 },
             );
         });
+
+        // 渲染弹出窗口
+        self.render_popup_windows(ui.ctx());
     }
 
     /// 数据驱动UI：提取当前价格±40层的可见数据（总共最多81行）
@@ -367,7 +387,6 @@ impl UnifiedOrderBookWidget {
                 history_buy_volume: aggregated_flow.history_buy_volume,
                 history_sell_volume: aggregated_flow.history_sell_volume,
                 delta: aggregated_flow.history_buy_volume - aggregated_flow.history_sell_volume,
-                total_volume: aggregated_flow.history_buy_volume + aggregated_flow.history_sell_volume,
             })
             .collect();
 
@@ -437,11 +456,10 @@ impl UnifiedOrderBookWidget {
         let max_history_buy = data.iter().map(|row| row.history_buy_volume).fold(0.0, f64::max);
         let max_history_sell = data.iter().map(|row| row.history_sell_volume).fold(0.0, f64::max);
         let max_delta = data.iter().map(|row| row.delta.abs()).fold(0.0, f64::max);
-        let max_total = data.iter().map(|row| row.total_volume).fold(0.0, f64::max);
 
-        // 获取可用宽度并平均分配给9列
+        // 获取可用宽度并平均分配给8列
         let available_width = ui.available_width();
-        let column_width = available_width / 9.0;
+        let column_width = available_width / 8.0;
 
         // 使用严格边界控制的表格容器
         ui.allocate_ui_with_layout(
@@ -462,8 +480,7 @@ impl UnifiedOrderBookWidget {
                     .column(Column::exact(column_width)) // 主动买单累计(5s)
                     .column(Column::exact(column_width)) // 历史累计主动买单量
                     .column(Column::exact(column_width)) // 历史累计主动卖单量
-                    .column(Column::exact(column_width)) // 主动订单delta
-                    .column(Column::remainder()) // 主动订单总量 - 使用剩余空间
+                    .column(Column::remainder()) // 主动订单delta - 使用剩余空间
                     .max_scroll_height(table_height - 30.0) // 为表头预留空间
                     .scroll_to_row(self.calculate_center_row_index(data, current_price), None);
 
@@ -477,13 +494,12 @@ impl UnifiedOrderBookWidget {
                         header.col(|ui| { ui.strong("历史累计买单"); });
                         header.col(|ui| { ui.strong("历史累计卖单"); });
                         header.col(|ui| { ui.strong("Delta"); });
-                        header.col(|ui| { ui.strong("总量"); });
                     })
                     .body(|mut body| {
                         // 渲染所有可见数据行（最多81行）
                         for row in data {
                             body.row(25.0, |mut row_ui| {
-                                self.render_table_row(&mut row_ui, row, current_price, max_history_buy, max_history_sell, max_delta, max_total);
+                                self.render_table_row(&mut row_ui, row, current_price, max_history_buy, max_history_sell, max_delta);
                             });
                         }
                     });
@@ -669,14 +685,13 @@ impl UnifiedOrderBookWidget {
         let max_history_buy = data.iter().map(|row| row.history_buy_volume).fold(0.0, f64::max);
         let max_history_sell = data.iter().map(|row| row.history_sell_volume).fold(0.0, f64::max);
         let max_delta = data.iter().map(|row| row.delta.abs()).fold(0.0, f64::max);
-        let max_total = data.iter().map(|row| row.total_volume).fold(0.0, f64::max);
         let max_bid_volume = data.iter().map(|row| row.bid_volume).fold(0.0, f64::max);
         let max_ask_volume = data.iter().map(|row| row.ask_volume).fold(0.0, f64::max);
 
         ui.push_id("unified_orderbook_table", |ui| {
-            // 获取可用宽度并平均分配给9列
+            // 获取可用宽度并平均分配给8列
             let available_width = ui.available_width();
-            let column_width = available_width / 9.0;
+            let column_width = available_width / 8.0;
 
             let table = TableBuilder::new(ui)
                 .striped(false)
@@ -689,8 +704,7 @@ impl UnifiedOrderBookWidget {
                 .column(Column::exact(column_width)) // 主动买单累计(5s)
                 .column(Column::exact(column_width)) // 历史累计主动买单量
                 .column(Column::exact(column_width)) // 历史累计主动卖单量
-                .column(Column::exact(column_width)) // 主动订单delta
-                .column(Column::remainder()) // 主动订单总量 - 使用剩余空间
+                .column(Column::remainder()) // 主动订单delta - 使用剩余空间
                 .sense(egui::Sense::click()); // 不使用内置滚动，由外部ScrollArea控制
 
             table
@@ -719,15 +733,12 @@ impl UnifiedOrderBookWidget {
                     header.col(|ui| {
                         ui.strong("Delta");
                     });
-                    header.col(|ui| {
-                        ui.strong("总量");
-                    });
                 })
                 .body(|mut body| {
                     // 渲染所有数据行
                     for row in data {
                         body.row(25.0, |mut row_ui| {
-                            self.render_table_row(&mut row_ui, row, current_price, max_history_buy, max_history_sell, max_delta, max_total);
+                            self.render_table_row(&mut row_ui, row, current_price, max_history_buy, max_history_sell, max_delta);
                         });
                     }
                 });
@@ -748,7 +759,6 @@ impl UnifiedOrderBookWidget {
         let max_history_buy = data.iter().map(|row| row.history_buy_volume).fold(0.0, f64::max);
         let max_history_sell = data.iter().map(|row| row.history_sell_volume).fold(0.0, f64::max);
         let max_delta = data.iter().map(|row| row.delta.abs()).fold(0.0, f64::max);
-        let max_total = data.iter().map(|row| row.total_volume).fold(0.0, f64::max);
         let max_bid_volume = data.iter().map(|row| row.bid_volume).fold(0.0, f64::max);
         let max_ask_volume = data.iter().map(|row| row.ask_volume).fold(0.0, f64::max);
 
@@ -767,9 +777,9 @@ impl UnifiedOrderBookWidget {
         };
 
         ui.push_id("unified_orderbook_table", |ui| {
-            // 获取可用宽度并平均分配给9列
+            // 获取可用宽度并平均分配给8列
             let available_width = ui.available_width();
-            let column_width = available_width / 9.0;
+            let column_width = available_width / 8.0;
 
             let table = TableBuilder::new(ui)
                 .striped(false)
@@ -782,8 +792,7 @@ impl UnifiedOrderBookWidget {
                 .column(Column::exact(column_width)) // 主动买单累计(5s)
                 .column(Column::exact(column_width)) // 历史累计主动买单量
                 .column(Column::exact(column_width)) // 历史累计主动卖单量
-                .column(Column::exact(column_width)) // 主动订单delta
-                .column(Column::remainder()) // 主动订单总量 - 使用剩余空间
+                .column(Column::remainder()) // 主动订单delta - 使用剩余空间
                 .vscroll(true) // 启用内置滚动
                 .max_scroll_height(table_height); // 设置最大滚动高度
 
@@ -813,15 +822,12 @@ impl UnifiedOrderBookWidget {
                     header.col(|ui| {
                         ui.strong("Delta");
                     });
-                    header.col(|ui| {
-                        ui.strong("总量");
-                    });
                 })
                 .body(|mut body| {
                     // 渲染所有数据行，表格内置滚动会自动处理
                     for row in data {
                         body.row(25.0, |mut row_ui| {
-                            self.render_table_row(&mut row_ui, row, current_price, max_history_buy, max_history_sell, max_delta, max_total);
+                            self.render_table_row(&mut row_ui, row, current_price, max_history_buy, max_history_sell, max_delta);
                         });
                     }
                 });
@@ -842,14 +848,13 @@ impl UnifiedOrderBookWidget {
         let max_history_buy = data.iter().map(|row| row.history_buy_volume).fold(0.0, f64::max);
         let max_history_sell = data.iter().map(|row| row.history_sell_volume).fold(0.0, f64::max);
         let max_delta = data.iter().map(|row| row.delta.abs()).fold(0.0, f64::max);
-        let max_total = data.iter().map(|row| row.total_volume).fold(0.0, f64::max);
         let max_bid_volume = data.iter().map(|row| row.bid_volume).fold(0.0, f64::max);
         let max_ask_volume = data.iter().map(|row| row.ask_volume).fold(0.0, f64::max);
 
         ui.push_id("unified_orderbook_table", |ui| {
-            // 获取可用宽度并平均分配给9列
+            // 获取可用宽度并平均分配给8列
             let available_width = ui.available_width();
-            let column_width = available_width / 9.0;
+            let column_width = available_width / 8.0;
 
             let table = TableBuilder::new(ui)
                 .striped(false)
@@ -862,8 +867,7 @@ impl UnifiedOrderBookWidget {
                 .column(Column::exact(column_width)) // 主动买单累计(5s)
                 .column(Column::exact(column_width)) // 历史累计主动买单量
                 .column(Column::exact(column_width)) // 历史累计主动卖单量
-                .column(Column::exact(column_width)) // 主动订单delta
-                .column(Column::remainder()) // 主动订单总量 - 使用剩余空间
+                .column(Column::remainder()) // 主动订单delta - 使用剩余空间
                 .sense(egui::Sense::click()); // 移除内置滚动，使用外部ScrollArea
 
             table
@@ -891,9 +895,6 @@ impl UnifiedOrderBookWidget {
                     });
                     header.col(|ui| {
                         ui.strong("Delta");
-                    });
-                    header.col(|ui| {
-                        ui.strong("总量");
                     });
                 })
                 .body(|mut body| {
@@ -1061,22 +1062,7 @@ impl UnifiedOrderBookWidget {
                                 });
                             });
 
-                            // 第9列：主动订单总量 + 条形图
-                            row_ui.col(|ui| {
-                                ui.horizontal(|ui| {
-                                    if row.total_volume > 0.0 {
-                                        ui.colored_label(egui::Color32::from_rgb(200, 200, 200), format!("{:.4}", row.total_volume));
 
-                                        // 绘制条形图
-                                        let bar_width = self.calculate_bar_width(row.total_volume, max_total);
-                                        if bar_width > 1.0 {
-                                            self.draw_horizontal_bar(ui, bar_width, egui::Color32::from_rgb(150, 150, 150));
-                                        }
-                                    } else {
-                                        ui.colored_label(egui::Color32::GRAY, "--");
-                                    }
-                                });
-                            });
                         });
                     }
                 });
@@ -1155,7 +1141,6 @@ impl UnifiedOrderBookWidget {
         max_history_buy: f64,
         max_history_sell: f64,
         max_delta: f64,
-        max_total: f64,
     ) {
         // 计算买单和卖单深度的最大值用于条形图缩放
         let max_bid_volume = self.cached_visible_data.iter().map(|r| r.bid_volume).fold(0.0, f64::max);
@@ -1322,22 +1307,7 @@ impl UnifiedOrderBookWidget {
             });
         });
 
-        // 第9列：主动订单总量 + 条形图
-        row_ui.col(|ui| {
-            ui.horizontal(|ui| {
-                if row.total_volume > 0.0 {
-                    ui.colored_label(egui::Color32::from_rgb(200, 200, 200), format!("{:.4}", row.total_volume));
 
-                    // 绘制条形图
-                    let bar_width = self.calculate_bar_width(row.total_volume, max_total);
-                    if bar_width > 1.0 {
-                        self.draw_horizontal_bar(ui, bar_width, egui::Color32::from_rgb(150, 150, 150));
-                    }
-                } else {
-                    ui.colored_label(egui::Color32::GRAY, "--");
-                }
-            });
-        });
     }
 }
 
@@ -1376,5 +1346,59 @@ struct UnifiedOrderBookRow {
     history_buy_volume: f64,   // 历史累计主动买单量
     history_sell_volume: f64,  // 历史累计主动卖单量
     delta: f64,                // 主动订单delta (买单量 - 卖单量)
-    total_volume: f64,         // 主动订单总量 (买单量 + 卖单量)
+}
+
+impl UnifiedOrderBookWidget {
+    /// 渲染弹出窗口
+    fn render_popup_windows(&mut self, ctx: &egui::Context) {
+        // 交易信号窗口
+        if self.trading_signal_window_open {
+            egui::Window::new("交易信号")
+                .open(&mut self.trading_signal_window_open)
+                .default_size(egui::Vec2::new(600.0, 400.0))
+                .resizable(true)
+                .show(ctx, |ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(50.0);
+                        ui.heading("交易信号分析");
+                        ui.add_space(20.0);
+                        ui.label("此功能正在开发中...");
+                        ui.add_space(20.0);
+                        ui.separator();
+                        ui.add_space(10.0);
+                        ui.label("未来将包含:");
+                        ui.label("• 技术指标信号");
+                        ui.label("• 订单流信号");
+                        ui.label("• 价格行为信号");
+                        ui.label("• 自定义信号策略");
+                    });
+                });
+        }
+
+        // 量化回测窗口
+        if self.quantitative_backtest_window_open {
+            egui::Window::new("量化回测")
+                .open(&mut self.quantitative_backtest_window_open)
+                .default_size(egui::Vec2::new(800.0, 600.0))
+                .resizable(true)
+                .show(ctx, |ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(50.0);
+                        ui.heading("量化回测系统");
+                        ui.add_space(20.0);
+                        ui.label("此功能正在开发中...");
+                        ui.add_space(20.0);
+                        ui.separator();
+                        ui.add_space(10.0);
+                        ui.label("未来将包含:");
+                        ui.label("• 策略回测引擎");
+                        ui.label("• 历史数据分析");
+                        ui.label("• 风险评估");
+                        ui.label("• 收益率分析");
+                        ui.label("• 参数优化");
+                        ui.label("• 回测报告生成");
+                    });
+                });
+        }
+    }
 }
