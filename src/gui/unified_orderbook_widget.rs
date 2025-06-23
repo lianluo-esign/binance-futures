@@ -260,28 +260,51 @@ impl UnifiedOrderBookWidget {
         self.last_price = current_price;
 
         // 首先获取所有有效的价格层级并转换为1美元聚合级别
-        let mut all_price_levels: Vec<i64> = order_flows
+        let mut existing_price_levels: Vec<i64> = order_flows
             .keys()
             .map(|k| k.0.floor() as i64) // 使用向下取整聚合到1美元级别，转换为整数
             .collect::<std::collections::HashSet<_>>() // 去重
             .into_iter()
             .collect();
 
-        // 转换回f64用于后续处理
+        // 当前价格对应的聚合级别
+        let current_price_level = current_price.floor() as i64;
+
+        // 生成完整的价格级别范围：当前价格上下各40个美元级别
+        let mut all_price_levels: Vec<i64> = Vec::new();
+
+        // 添加当前价格上方的价格级别（从高到低）
+        for i in 0..=self.visible_price_levels {
+            all_price_levels.push(current_price_level + i as i64);
+        }
+
+        // 添加当前价格下方的价格级别（从高到低）
+        for i in 1..=self.visible_price_levels {
+            all_price_levels.push(current_price_level - i as i64);
+        }
+
+        // 添加现有数据中的其他价格级别（确保不遗漏任何现有数据）
+        for &existing_level in &existing_price_levels {
+            if !all_price_levels.contains(&existing_level) {
+                all_price_levels.push(existing_level);
+            }
+        }
+
+        // 转换回f64并排序（从高到低）
         let mut all_price_levels: Vec<f64> = all_price_levels
             .into_iter()
             .map(|level| level as f64)
             .collect();
-        all_price_levels.sort_by(|a, b| b.partial_cmp(a).unwrap()); // 从高到低排序
+        all_price_levels.sort_by(|a, b| b.partial_cmp(a).unwrap());
 
-        // 找到当前价格对应的聚合级别在排序列表中的位置
-        let current_price_level = current_price.floor();
+        // 找到当前价格在排序列表中的位置
+        let current_price_level_f64 = current_price.floor();
         let current_price_index = all_price_levels
             .iter()
-            .position(|&price_level| price_level <= current_price_level)
+            .position(|&price_level| price_level <= current_price_level_f64)
             .unwrap_or(all_price_levels.len() / 2);
 
-        // 计算可见范围：当前价格上下各40个美元级别
+        // 计算可见范围：确保当前价格上下各有40个级别
         let start_index = current_price_index.saturating_sub(self.visible_price_levels);
         let end_index = std::cmp::min(
             current_price_index + self.visible_price_levels + 1,
@@ -292,14 +315,22 @@ impl UnifiedOrderBookWidget {
         let visible_price_levels = &all_price_levels[start_index..end_index];
 
         // 为每个聚合价格级别收集所有相关的原始价格
+        // 如果某个价格级别没有实际数据，我们仍然需要包含它以显示空数据
         let mut visible_prices = Vec::new();
         for &price_level in visible_price_levels {
+            let mut found_data = false;
             // 找到属于这个聚合级别的所有原始价格
             for price_key in order_flows.keys() {
                 let original_price = price_key.0;
                 if original_price.floor() == price_level {
                     visible_prices.push(original_price);
+                    found_data = true;
                 }
+            }
+
+            // 如果这个价格级别没有实际数据，添加一个虚拟价格以确保显示空行
+            if !found_data {
+                visible_prices.push(price_level);
             }
         }
 
@@ -363,10 +394,11 @@ impl UnifiedOrderBookWidget {
             let price_level_int = price_val.floor() as i64;
             let price_key = OrderedFloat(price_val);
 
-            // 获取该价格的订单流数据
-            if let Some(order_flow) = order_flows.get(&price_key) {
-                let entry = aggregated_map.entry(price_level_int).or_insert_with(|| AggregatedOrderFlow::new());
+            // 确保每个价格级别都有一个条目（即使没有数据也显示空行）
+            let entry = aggregated_map.entry(price_level_int).or_insert_with(|| AggregatedOrderFlow::new());
 
+            // 获取该价格的订单流数据（如果存在）
+            if let Some(order_flow) = order_flows.get(&price_key) {
                 // 聚合订单簿深度数据
                 entry.bid_volume += order_flow.bid_ask.bid;
                 entry.ask_volume += order_flow.bid_ask.ask;
@@ -381,6 +413,7 @@ impl UnifiedOrderBookWidget {
                 entry.history_buy_volume += order_flow.history_trade_record.buy_volume;
                 entry.history_sell_volume += order_flow.history_trade_record.sell_volume;
             }
+            // 如果没有订单流数据，entry 保持为默认的零值，这样会显示空行
         }
 
         // 转换为BTreeMap以保持排序，并将整数价格转换回浮点数
@@ -419,7 +452,7 @@ impl UnifiedOrderBookWidget {
                 ui.set_clip_rect(ui.available_rect_before_wrap());
 
                 let table = TableBuilder::new(ui)
-                    .striped(true)
+                    .striped(false)
                     .resizable(false) // 禁用调整大小以保持均匀分布
                     .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
                     .column(Column::exact(column_width)) // 主动卖单累计(5s)
@@ -646,7 +679,7 @@ impl UnifiedOrderBookWidget {
             let column_width = available_width / 9.0;
 
             let table = TableBuilder::new(ui)
-                .striped(true)
+                .striped(false)
                 .resizable(false) // 禁用调整大小以保持均匀分布
                 .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
                 .column(Column::exact(column_width)) // 主动卖单累计(5s)
@@ -739,7 +772,7 @@ impl UnifiedOrderBookWidget {
             let column_width = available_width / 9.0;
 
             let table = TableBuilder::new(ui)
-                .striped(true)
+                .striped(false)
                 .resizable(false) // 禁用调整大小以保持均匀分布
                 .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
                 .column(Column::exact(column_width)) // 主动卖单累计(5s)
@@ -819,7 +852,7 @@ impl UnifiedOrderBookWidget {
             let column_width = available_width / 9.0;
 
             let table = TableBuilder::new(ui)
-                .striped(true)
+                .striped(false)
                 .resizable(false) // 禁用调整大小以保持均匀分布
                 .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
                 .column(Column::exact(column_width)) // 主动卖单累计(5s)

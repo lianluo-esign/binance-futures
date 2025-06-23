@@ -153,7 +153,7 @@ impl OrderBookWidget {
                 |ui| {
                     // 创建表格 - 新布局：主动买单(5s) | Bid挂单 | 价格 | Ask挂单 | 主动卖单(5s)
                     let table = TableBuilder::new(ui)
-                        .striped(true)
+                        .striped(false)
                         .resizable(true)
                         .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
                         .column(Column::exact(column_width)) // 主动买单累计(5s)
