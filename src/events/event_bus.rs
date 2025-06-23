@@ -1,7 +1,6 @@
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
 use crate::core::RingBuffer;
-use super::event_types::{Event, EventType, EventPriority};
+use super::event_types::Event;
 
 /// 事件处理器类型定义
 pub type EventHandler = Box<dyn Fn(&Event) + Send + Sync>;

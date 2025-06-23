@@ -1,6 +1,5 @@
 use eframe::egui;
 use crate::app::ReactiveApp;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 pub struct DebugWindow {
     pub show: bool,

@@ -1,5 +1,4 @@
 // 外部依赖
-#[macro_use]
 extern crate lazy_static;
 
 // 核心模块
@@ -27,7 +26,6 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub fn init_logging() {
     // 对于字符界面应用，我们需要将日志重定向到文件而不是控制台
     use std::fs::OpenOptions;
-    use std::io::Write;
 
     let log_file = OpenOptions::new()
         .create(true)

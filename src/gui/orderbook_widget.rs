@@ -1,9 +1,9 @@
 use eframe::egui;
-use crate::orderbook::{OrderBookManager, OrderFlow};
+use crate::orderbook::OrderFlow;
 use crate::app::ReactiveApp;
 use std::collections::BTreeMap;
 use ordered_float::OrderedFloat;
-use std::time::{SystemTime, UNIX_EPOCH, Duration};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// OrderBook深度数据展示组件
 pub struct OrderBookWidget {

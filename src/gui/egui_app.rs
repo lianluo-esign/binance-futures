@@ -1,11 +1,8 @@
 use eframe::egui;
 use crate::app::ReactiveApp;
 use crate::Config;
-use crate::orderbook::MarketSnapshot;
 use crate::gui::{UnifiedOrderBookWidget, DebugWindow};
 use std::time::{Duration, Instant};
-use std::collections::BTreeMap;
-use ordered_float::OrderedFloat;
 
 pub struct TradingGUI {
     app: ReactiveApp,
@@ -80,60 +77,6 @@ impl eframe::App for TradingGUI {
             });
         });
         
-        // 顶部信息面板
-        egui::TopBottomPanel::top("info_panel").show(ctx, |ui| {
-            let snapshot = self.app.get_market_snapshot();
-
-            ui.horizontal(|ui| {
-                ui.group(|ui| {
-                    ui.label("交易对:");
-                    ui.strong(self.app.get_symbol());
-                });
-
-                ui.separator();
-
-                ui.group(|ui| {
-                    ui.label("当前价格:");
-                    if let Some(current_price) = snapshot.current_price {
-                        ui.colored_label(egui::Color32::WHITE, format!("{:.2}", current_price));
-                    } else {
-                        ui.label("--");
-                    }
-                });
-
-                ui.separator();
-
-                ui.group(|ui| {
-                    ui.label("最优买价:");
-                    if let Some(bid_price) = snapshot.best_bid_price {
-                        ui.colored_label(egui::Color32::GREEN, format!("{:.2}", bid_price));
-                    } else {
-                        ui.label("--");
-                    }
-                });
-
-                ui.separator();
-
-                ui.group(|ui| {
-                    ui.label("最优卖价:");
-                    if let Some(ask_price) = snapshot.best_ask_price {
-                        ui.colored_label(egui::Color32::RED, format!("{:.2}", ask_price));
-                    } else {
-                        ui.label("--");
-                    }
-                });
-
-                ui.separator();
-
-                // 价差信息
-                if let Some(spread) = snapshot.spread() {
-                    ui.group(|ui| {
-                        ui.label("价差:");
-                        ui.label(format!("{:.2}", spread));
-                    });
-                }
-            });
-        });
 
         // 主要内容区域 - 统一的订单流分析表格
         egui::CentralPanel::default().show(ctx, |ui| {

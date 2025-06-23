@@ -142,7 +142,6 @@ fn check_event_expiration(event: &Event) -> bool {
 /// 监控事件处理性能
 fn monitor_event_processing_performance(event: &Event) {
     use std::sync::{Arc, Mutex};
-    use std::time::Instant;
     
     lazy_static::lazy_static! {
         static ref PERFORMANCE_MONITOR: Arc<Mutex<PerformanceMonitor>> = 
