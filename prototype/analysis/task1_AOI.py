@@ -149,7 +149,7 @@ class AOIAnalyzer:
         self.mongo = mongo_connector
         self.indicators = {}  # 存储不同配置的指标计算器
 
-    def load_trade_data(self, symbol: str, start_time: datetime, end_time: datetime) -> pd.DataFrame:
+    def load_trade_data(self, symbol: str, start_time: datetime, end_time: datetime, use_objectid: bool = True) -> pd.DataFrame:
         """
         从MongoDB加载交易数据
 
@@ -157,35 +157,123 @@ class AOIAnalyzer:
             symbol: 交易对符号
             start_time: 开始时间
             end_time: 结束时间
+            use_objectid: 是否使用ObjectId进行时间查询（默认True，性能更好）
 
         返回:
             pd.DataFrame: 交易数据
         """
         logger.info(f"加载 {symbol} 交易数据: {start_time} 到 {end_time}")
 
-        # 查询交易数据
-        trades = self.mongo.query_trades(symbol, start_time, end_time)
+        # 直接查询MongoDB集合
+        collection_name = f"{symbol}_trades"
+        collection = self.mongo.get_collection(collection_name)
+
+        # 构建查询条件
+        if use_objectid:
+            # 使用ObjectId进行时间查询（利用ObjectId内置的时间戳，性能更好）
+            from bson import ObjectId
+
+            # ObjectId包含时间戳，直接用于时间范围查询
+            start_objectid = ObjectId.from_datetime(start_time)
+            end_objectid = ObjectId.from_datetime(end_time)
+
+            query = {
+                "_id": {
+                    "$gte": start_objectid,
+                    "$lte": end_objectid
+                }
+            }
+
+            logger.info(f"使用ObjectId查询，时间范围: {start_time} 到 {end_time}")
+            logger.info(f"ObjectId范围: {start_objectid} 到 {end_objectid}")
+
+        else:
+            # 使用T字段进行时间查询
+            # 为T字段创建索引以提高查询性能
+            try:
+                logger.info("检查并创建T字段索引...")
+                collection.create_index("T", background=True)
+                logger.info("T字段索引创建完成")
+            except Exception as e:
+                logger.warning(f"索引创建失败或已存在: {e}")
+
+            start_timestamp = int(start_time.timestamp() * 1000)
+            end_timestamp = int(end_time.timestamp() * 1000)
+
+            query = {
+                "T": {
+                    "$gte": start_timestamp,
+                    "$lte": end_timestamp
+                }
+            }
+
+            logger.info(f"使用T字段查询，时间范围: {start_time} 到 {end_time}")
+            logger.info(f"时间戳范围: {start_timestamp} 到 {end_timestamp}")
+
+        # 先统计符合条件的记录数
+        total_count = collection.count_documents(query)
+        logger.info(f"符合条件的记录总数: {total_count:,}")
+
+        if total_count == 0:
+            logger.warning("未找到符合条件的交易数据")
+            return pd.DataFrame()
+
+        # 查询数据
+        logger.info("开始查询数据...")
+        if use_objectid:
+            cursor = collection.find(query).sort("_id", 1)  # 按ObjectId排序（天然时间顺序）
+        else:
+            cursor = collection.find(query).sort("T", 1)   # 按T字段排序
+
+        trades = list(cursor)
+        logger.info("数据查询完成")
 
         if not trades:
             logger.warning("未找到交易数据")
             return pd.DataFrame()
 
+        logger.info(f"从MongoDB获取到 {len(trades)} 条原始交易记录")
+
         # 转换为DataFrame
         df = pd.DataFrame(trades)
 
         # 数据清洗和格式化
-        if 'ts' in df.columns:
-            df['timestamp'] = pd.to_datetime(df['ts'], unit='ms')
+        if 'T' in df.columns:
+            df['ts'] = df['T']  # 保持兼容性
+            df['timestamp'] = pd.to_datetime(df['T'], unit='ms')
             df = df.sort_values('timestamp')
 
+        # 映射字段名称以适配现有代码
+        if 'p' in df.columns:
+            df['price'] = df['p'].astype(float)
+        if 'q' in df.columns:
+            df['qty'] = df['q'].astype(float)
+
+        # 根据'm'字段确定交易方向
+        # m=true表示买方成交(taker买入)，m=false表示卖方成交(taker卖出)
+        if 'm' in df.columns:
+            df['side'] = df['m'].apply(lambda x: 'buy' if x else 'sell')
+
         # 确保必要的列存在
-        required_columns = ['price', 'qty', 'side']
+        required_columns = ['price', 'qty', 'side', 'ts']
         missing_columns = [col for col in required_columns if col not in df.columns]
         if missing_columns:
             logger.error(f"缺少必要的列: {missing_columns}")
+            logger.info(f"可用的列: {list(df.columns)}")
             return pd.DataFrame()
 
-        logger.info(f"成功加载 {len(df)} 条交易记录")
+        # 数据类型转换
+        df['price'] = pd.to_numeric(df['price'], errors='coerce')
+        df['qty'] = pd.to_numeric(df['qty'], errors='coerce')
+
+        # 移除无效数据
+        df = df.dropna(subset=['price', 'qty'])
+
+        logger.info(f"成功加载 {len(df)} 条有效交易记录")
+        logger.info(f"价格范围: {df['price'].min():.2f} - {df['price'].max():.2f}")
+        logger.info(f"数量范围: {df['qty'].min():.6f} - {df['qty'].max():.6f}")
+        logger.info(f"买单比例: {(df['side'] == 'buy').mean():.2%}")
+
         return df
 
     def calculate_aoi_series(self, trades_df: pd.DataFrame,
@@ -214,8 +302,11 @@ class AOIAnalyzer:
             indicator = AOIIndicator(config['type'], config['size'])
             self.indicators[config_name] = indicator
 
-            # 逐行处理交易数据
-            for _, trade in trades_df.iterrows():
+            # 逐行处理交易数据，添加进度显示
+            total_trades = len(trades_df)
+            progress_interval = max(1, total_trades // 100)  # 每1%显示进度
+
+            for i, (_, trade) in enumerate(trades_df.iterrows()):
                 indicator.add_trade(
                     timestamp=int(trade['ts']),
                     price=float(trade['price']),
@@ -223,15 +314,21 @@ class AOIAnalyzer:
                     side=trade['side']
                 )
 
-                # 记录结果
-                results.append({
-                    'timestamp': trade['ts'],
-                    'datetime': trade['timestamp'] if 'timestamp' in trade else pd.to_datetime(trade['ts'], unit='ms'),
-                    'price': trade['price'],
-                    f'aoi_{config_name}': indicator.get_current_aoi(),
-                    f'delta_volume_{config_name}': indicator.get_current_delta_volume(),
-                    'config': config_name
-                })
+                # 每隔一定间隔记录结果（减少内存使用）
+                if i % 1000 == 0 or i == total_trades - 1:  # 每1000条或最后一条记录
+                    results.append({
+                        'timestamp': trade['ts'],
+                        'datetime': trade['timestamp'] if 'timestamp' in trade else pd.to_datetime(trade['ts'], unit='ms'),
+                        'price': trade['price'],
+                        f'aoi_{config_name}': indicator.get_current_aoi(),
+                        f'delta_volume_{config_name}': indicator.get_current_delta_volume(),
+                        'config': config_name
+                    })
+
+                # 显示进度
+                if i % progress_interval == 0:
+                    progress = (i + 1) / total_trades * 100
+                    logger.info(f"  处理进度: {progress:.1f}% ({i+1}/{total_trades})")
 
         return pd.DataFrame(results)
 
@@ -540,13 +637,13 @@ def main():
             db_name='crypto_data'
         )
 
-        # 创建分析器
+        # 创建分析器 
         analyzer = AOIAnalyzer(mongo)
 
         # 设置分析参数
-        symbol = 'btcusdt'
+        symbol = 'btcusdt'  # 对应集合名称 btcusdt_trades
         end_time = datetime.now()
-        start_time = end_time - timedelta(hours=2)  # 分析最近2小时数据
+        start_time = end_time - timedelta(days=3)  # 分析最近3天数据
 
         # 定义多种窗口配置
         window_configs = [
