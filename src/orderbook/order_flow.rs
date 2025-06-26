@@ -120,6 +120,17 @@ impl OrderFlow {
         }
     }
 
+    /// 清理超过指定时间没有更新的挂单数据（价格层级数据）
+    pub fn clean_expired_price_levels(&mut self, current_time: u64, max_age: u64) {
+        // 检查挂单数据的时间戳，如果超过max_age（5秒）没有更新，则清除
+        if current_time.saturating_sub(self.bid_ask.timestamp) > max_age {
+            // 清除过期的挂单数据
+            self.bid_ask.bid = 0.0;
+            self.bid_ask.ask = 0.0;
+            // 注意：不重置timestamp，保持原有时间戳用于后续判断
+        }
+    }
+
     /// 检查是否为空的订单流（没有任何活跃数据）
     pub fn is_empty(&self) -> bool {
         self.bid_ask.bid == 0.0 && 

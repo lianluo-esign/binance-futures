@@ -399,6 +399,9 @@ impl OrderBookManager {
             order_flow.clean_expired_trades(current_time, 5000); // 5秒
             order_flow.clean_expired_cancels(current_time, 5000); // 5秒
             order_flow.clean_expired_increases(current_time, 5000); // 5秒
+
+            // 新增：清理超过5秒没有更新的挂单数据（1美元精度聚合的深度订单薄数据）
+            order_flow.clean_expired_price_levels(current_time, 1000); // 5秒
         }
 
         // 清理空的或过期的订单流条目
