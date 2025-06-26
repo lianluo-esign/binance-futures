@@ -37,6 +37,7 @@ pub struct OrderBookManager {
     last_trade_price: Option<f64>,
     last_trade_side: Option<String>, // "buy" or "sell"
     last_trade_timestamp: Option<u64>,
+    last_trade_volume: Option<f64>, // 最新交易量
 
     // 时间维度足迹数据
     time_footprint_data: TimeFootprintData,
@@ -69,6 +70,7 @@ impl OrderBookManager {
             last_trade_price: None,
             last_trade_side: None,
             last_trade_timestamp: None,
+            last_trade_volume: None,
 
             time_footprint_data: TimeFootprintData::new(30), // 30分钟滑动窗口
         }
@@ -145,6 +147,7 @@ impl OrderBookManager {
                 self.last_trade_price = Some(price);
                 self.last_trade_side = Some(side.to_string());
                 self.last_trade_timestamp = Some(current_time);
+                self.last_trade_volume = Some(qty);
 
                 // 更新订单流
                 let price_ordered = OrderedFloat(price);
@@ -369,8 +372,8 @@ impl OrderBookManager {
     }
 
     /// 获取最近交易高亮信息
-    pub fn get_last_trade_highlight(&self) -> (Option<f64>, Option<String>, Option<u64>) {
-        (self.last_trade_price, self.last_trade_side.clone(), self.last_trade_timestamp)
+    pub fn get_last_trade_highlight(&self) -> (Option<f64>, Option<String>, Option<u64>, Option<f64>) {
+        (self.last_trade_price, self.last_trade_side.clone(), self.last_trade_timestamp, self.last_trade_volume)
     }
 
     /// 检查交易高亮是否应该显示（基于时间）

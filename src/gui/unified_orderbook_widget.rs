@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use ordered_float::OrderedFloat;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::path::Path;
+use egui_plot::{Line, Plot, PlotPoints};
 
 /// 智能滚动信息
 #[derive(Debug, Clone)]
@@ -46,6 +47,12 @@ pub struct UnifiedOrderBookWidget {
     trading_signal_window_open: bool,
     /// 量化回测窗口是否打开
     quantitative_backtest_window_open: bool,
+    /// 价格图表模态窗口是否打开
+    price_chart_modal_open: bool,
+    /// 价格历史数据（用于图表显示）
+    price_history: std::collections::VecDeque<(f64, f64, f64, String)>, // (timestamp, price, volume, side)
+    /// 最大价格历史数据点数
+    max_price_history: usize,
 }
 
 impl Default for UnifiedOrderBookWidget {
@@ -63,6 +70,9 @@ impl Default for UnifiedOrderBookWidget {
             logo_texture: None,
             trading_signal_window_open: false,
             quantitative_backtest_window_open: false,
+            price_chart_modal_open: false,
+            price_history: std::collections::VecDeque::with_capacity(10000),
+            max_price_history: 10000,
         }
     }
 }
@@ -200,12 +210,18 @@ impl UnifiedOrderBookWidget {
                 |ui| {
                     ui.heading("订单流分析");
 
-                    // 显示当前价格
+                    // 显示当前价格并更新价格历史
                     let snapshot = app.get_market_snapshot();
                     if let Some(current_price) = snapshot.current_price {
                         ui.separator();
                         ui.label("当前价格:");
                         ui.colored_label(egui::Color32::YELLOW, format!("{:.2}", current_price));
+
+                        // 获取最新交易信息并更新价格历史数据
+                        let (_, last_side, _, last_volume) = app.get_orderbook_manager().get_last_trade_highlight();
+                        let volume = last_volume.unwrap_or(0.0);
+                        let side = last_side.unwrap_or_else(|| "unknown".to_string());
+                        self.update_price_history(current_price, volume, side);
                     }
 
                     // 在右侧添加按钮
@@ -220,6 +236,14 @@ impl UnifiedOrderBookWidget {
                         // 交易信号按钮
                         if ui.button("交易信号").clicked() {
                             self.trading_signal_window_open = true;
+                        }
+
+                        ui.add_space(10.0); // 按钮间距
+
+                        // 价格图表按钮
+                        if ui.button("📈 价格图表").clicked() {
+                            log::info!("价格图表按钮被点击，打开模态窗口");
+                            self.price_chart_modal_open = true;
                         }
                     });
                 },
@@ -1400,5 +1424,168 @@ impl UnifiedOrderBookWidget {
                     });
                 });
         }
+
+        // 价格图表模态窗口
+        if self.price_chart_modal_open {
+            // 克隆价格历史数据以避免借用冲突
+            let price_history = self.price_history.clone();
+            let max_price_history = self.max_price_history;
+
+            egui::Window::new("📈 BTCUSDT 实时价格图表")
+                .open(&mut self.price_chart_modal_open)
+                .default_size(egui::Vec2::new(1000.0, 600.0))
+                .resizable(true)
+                .show(ctx, |ui| {
+                    Self::render_price_chart_static(ui, &price_history, max_price_history);
+                });
+        }
+    }
+
+    /// 更新价格历史数据
+    fn update_price_history(&mut self, current_price: f64, volume: f64, side: String) {
+        let current_time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
+
+        // 添加新的价格数据点（包含成交量和交易方向）
+        self.price_history.push_back((current_time, current_price, volume, side));
+
+        // 保持最大数据点数量
+        if self.price_history.len() > self.max_price_history {
+            self.price_history.pop_front();
+        }
+    }
+
+    /// 渲染价格图表（静态方法）
+    fn render_price_chart_static(
+        ui: &mut egui::Ui,
+        price_history: &std::collections::VecDeque<(f64, f64, f64, String)>,
+        max_price_history: usize
+    ) {
+        ui.vertical(|ui| {
+            // 顶部状态栏
+            ui.horizontal(|ui| {
+                ui.heading("BTCUSDT 实时价格图表");
+                ui.separator();
+
+                // 显示数据点数量
+                ui.label(format!("数据点: {}/{}", price_history.len(), max_price_history));
+
+                if let Some((_, latest_price, latest_volume, latest_side)) = price_history.back() {
+                    ui.separator();
+                    ui.label("当前价格:");
+                    ui.colored_label(egui::Color32::YELLOW, format!("{:.2}", latest_price));
+                    ui.separator();
+                    ui.label("最新成交量:");
+                    ui.colored_label(egui::Color32::LIGHT_BLUE, format!("{:.4}", latest_volume));
+                    ui.separator();
+                    ui.label("交易方向:");
+                    let side_color = if latest_side == "buy" {
+                        egui::Color32::GREEN
+                    } else {
+                        egui::Color32::RED
+                    };
+                    ui.colored_label(side_color, latest_side);
+                }
+            });
+
+            ui.separator();
+
+            // 主图表区域
+            if price_history.is_empty() {
+                ui.centered_and_justified(|ui| {
+                    ui.label("等待价格数据...");
+                });
+            } else {
+                // 准备图表数据
+                let points: PlotPoints = price_history
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (_, price, _, _))| [i as f64, *price])
+                    .collect();
+
+                // 计算Y轴范围
+                let prices: Vec<f64> = price_history.iter().map(|(_, price, _, _)| *price).collect();
+
+                // 计算成交量范围用于圆点大小缩放
+                let volumes: Vec<f64> = price_history.iter().map(|(_, _, volume, _)| *volume).collect();
+                let max_volume = volumes.iter().fold(0.0f64, |a, &b| a.max(b));
+                let min_volume = volumes.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+                let volume_range = max_volume - min_volume;
+                let min_price = prices.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+                let max_price = prices.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+                let price_range = max_price - min_price;
+                let y_margin = price_range * 0.05; // 5% 边距
+                let y_min = min_price - y_margin;
+                let y_max = max_price + y_margin;
+
+                // 创建图表
+                let plot = Plot::new("price_chart_modal")
+                    .view_aspect(2.0)
+                    .show_axes([true, true])
+                    .show_grid([false, false])
+                    .allow_zoom(true)
+                    .allow_drag(true)
+                    .allow_scroll(true)
+                    .include_x(0.0)
+                    .include_x(price_history.len() as f64)
+                    .include_y(y_min)
+                    .include_y(y_max)
+                    .y_axis_formatter(|y, _range, _ctx| {
+                        format!("{:.0}", y.value) // 格式化Y轴为整数
+                    });
+
+                plot.show(ui, |plot_ui| {
+                    // 绘制价格线
+                    let line = Line::new(points)
+                        .color(egui::Color32::from_rgb(0, 150, 255))
+                        .width(2.0)
+                        .name("BTCUSDT价格");
+
+                    plot_ui.line(line);
+
+                    // 绘制基于成交量的圆点
+                    for (i, (_, price, volume, side)) in price_history.iter().enumerate() {
+                        // 计算圆点半径（基于成交量）
+                        let radius = if volume_range > 0.0 {
+                            let normalized_volume = (volume - min_volume) / volume_range;
+                            (2.0 + normalized_volume * 8.0) as f32 // 半径范围：2.0 到 10.0，转换为f32
+                        } else {
+                            3.0f32 // 默认半径
+                        };
+
+                        // 根据买单/卖单选择颜色
+                        let color = if side == "buy" {
+                            egui::Color32::GREEN // 买单：绿色
+                        } else if side == "sell" {
+                            egui::Color32::RED // 卖单：红色
+                        } else {
+                            egui::Color32::GRAY // 未知：灰色
+                        };
+
+                        plot_ui.points(
+                            egui_plot::Points::new(vec![[i as f64, *price]])
+                                .color(color)
+                                .radius(radius)
+                                .name(&format!("{}: {:.4}", if side == "buy" { "买单" } else { "卖单" }, volume))
+                        );
+                    }
+
+                    // 添加当前价格的高亮标记
+                    if let Some((_, current_price, _, _)) = price_history.back() {
+                        let current_x = (price_history.len() - 1) as f64;
+
+                        // 绘制当前价格点
+                        plot_ui.points(
+                            egui_plot::Points::new(vec![[current_x, *current_price]])
+                                .color(egui::Color32::YELLOW)
+                                .radius(8.0)
+                                .name("当前价格")
+                        );
+                    }
+                });
+            }
+        });
     }
 }
