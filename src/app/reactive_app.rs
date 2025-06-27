@@ -141,6 +141,18 @@ impl ReactiveApp {
             }
         }
 
+        // 1.5. 新增：检查连接健康状态，如果长时间无数据则强制重连
+        if let Some(last_data) = self.last_data_received {
+            if last_data.elapsed() > Duration::from_secs(300) { // 5分钟无数据
+                log::warn!("长时间未收到数据 ({}秒)，执行强制重连", last_data.elapsed().as_secs());
+                if let Err(e) = self.websocket_manager.force_reconnect() {
+                    log::error!("数据超时强制重连失败: {}", e);
+                } else {
+                    self.last_data_received = Some(Instant::now()); // 重置时间
+                }
+            }
+        }
+
         // 2. 读取WebSocket消息并转换为事件
         if self.websocket_manager.is_connected() {
             self.process_websocket_messages();

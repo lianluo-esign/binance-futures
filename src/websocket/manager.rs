@@ -160,10 +160,13 @@ impl WebSocketManager {
             }
             Message::Ping(payload) => {
                 // 自动响应服务器的ping（币安要求）
+                log::debug!("收到服务器ping，发送pong响应");
                 if let Err(e) = self.connection.send_message(Message::Pong(payload.clone())) {
                     log::error!("响应服务器ping失败: {}", e);
+                    self.stats.ping_errors += 1;
+                } else {
+                    log::debug!("Pong响应发送成功");
                 }
-                // 移除debug输出以减少日志噪音
                 None
             }
             Message::Pong(_) => {

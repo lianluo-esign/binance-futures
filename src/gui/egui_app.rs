@@ -24,13 +24,17 @@ impl TradingGUI {
             log::error!("应用程序初始化失败: {}", e);
         }
 
+        // 创建并配置统一订单簿组件
+        let mut unified_orderbook_widget = UnifiedOrderBookWidget::new();
+        unified_orderbook_widget.set_price_chart_height(300.0); // 设置价格图表高度为300像素
+
         Self {
             app,
             last_update: Instant::now(),
             update_interval: Duration::from_millis(1), // 1ms 刷新间隔
             show_settings: false,
             show_stats: false,
-            unified_orderbook_widget: UnifiedOrderBookWidget::new(),
+            unified_orderbook_widget,
             debug_window: DebugWindow::new(),
         }
     }

@@ -131,13 +131,24 @@ impl OrderFlow {
         }
     }
 
+    /// 重置历史累计交易数据（每日UTC 0点重置）
+    pub fn reset_history_trade_record(&mut self, timestamp: u64) {
+        log::info!("重置历史累计交易数据 - 买单: {:.4}, 卖单: {:.4}",
+                  self.history_trade_record.buy_volume,
+                  self.history_trade_record.sell_volume);
+
+        self.history_trade_record.buy_volume = 0.0;
+        self.history_trade_record.sell_volume = 0.0;
+        self.history_trade_record.timestamp = timestamp;
+    }
+
     /// 检查是否为空的订单流（没有任何活跃数据）
     pub fn is_empty(&self) -> bool {
-        self.bid_ask.bid == 0.0 && 
-        self.bid_ask.ask == 0.0 && 
-        self.realtime_trade_record.buy_volume == 0.0 && 
-        self.realtime_trade_record.sell_volume == 0.0 && 
-        self.realtime_cancel_records.bid_cancel == 0.0 && 
+        self.bid_ask.bid == 0.0 &&
+        self.bid_ask.ask == 0.0 &&
+        self.realtime_trade_record.buy_volume == 0.0 &&
+        self.realtime_trade_record.sell_volume == 0.0 &&
+        self.realtime_cancel_records.bid_cancel == 0.0 &&
         self.realtime_cancel_records.ask_cancel == 0.0 &&
         self.realtime_increase_order.bid == 0.0 &&
         self.realtime_increase_order.ask == 0.0

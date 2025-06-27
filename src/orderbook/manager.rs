@@ -41,6 +41,14 @@ pub struct OrderBookManager {
 
     // 时间维度足迹数据
     time_footprint_data: TimeFootprintData,
+
+    // Trade Imbalance 500ms滑动窗口数据 (timestamp, is_buy)
+    trade_imbalance_window: std::collections::VecDeque<(u64, bool)>,
+    // 当前Trade Imbalance值
+    current_trade_imbalance: f64,
+
+    // 历史数据重置跟踪
+    last_history_reset_date: u32, // 存储上次重置的UTC日期（YYYYMMDD格式）
 }
 
 impl OrderBookManager {
@@ -73,6 +81,9 @@ impl OrderBookManager {
             last_trade_volume: None,
 
             time_footprint_data: TimeFootprintData::new(30), // 30分钟滑动窗口
+            trade_imbalance_window: std::collections::VecDeque::new(),
+            current_trade_imbalance: 0.0,
+            last_history_reset_date: 0, // 初始化为0，表示还未重置过
         }
     }
 
@@ -156,6 +167,9 @@ impl OrderBookManager {
 
                 // 更新时间维度足迹数据
                 self.time_footprint_data.add_trade(price, side, qty, current_time);
+
+                // 更新Trade Imbalance滑动窗口
+                self.update_trade_imbalance(current_time, side == "buy");
 
                 // 计算价格速度和波动率
                 self.calculate_price_speed(current_time);
@@ -397,6 +411,9 @@ impl OrderBookManager {
     pub fn cleanup_expired_data(&mut self) {
         let current_time = self.get_current_timestamp();
 
+        // 检查并在UTC 0点重置历史累计交易数据
+        self.check_and_reset_history_data();
+
         // 清理5秒内的实时交易数据
         for (_, order_flow) in self.order_flows.iter_mut() {
             order_flow.clean_expired_trades(current_time, 5000); // 5秒
@@ -416,6 +433,131 @@ impl OrderBookManager {
         });
     }
 
+    /// 检查并在UTC 0点重置历史累计交易数据
+    pub fn check_and_reset_history_data(&mut self) {
+        let current_time = self.get_current_timestamp();
+        let current_date = self.get_utc_date_from_timestamp(current_time);
+
+        // 如果日期发生变化（跨越UTC 0点），重置历史数据
+        if self.last_history_reset_date != current_date {
+            log::info!("检测到UTC日期变化: {} -> {}, 开始重置历史累计交易数据",
+                      self.last_history_reset_date, current_date);
+
+            let mut reset_count = 0;
+            let mut total_buy_volume = 0.0;
+            let mut total_sell_volume = 0.0;
+
+            // 重置所有价格层级的历史累计数据
+            for (price, order_flow) in self.order_flows.iter_mut() {
+                if order_flow.history_trade_record.buy_volume > 0.0 ||
+                   order_flow.history_trade_record.sell_volume > 0.0 {
+                    total_buy_volume += order_flow.history_trade_record.buy_volume;
+                    total_sell_volume += order_flow.history_trade_record.sell_volume;
+                    order_flow.reset_history_trade_record(current_time);
+                    reset_count += 1;
+                }
+            }
+
+            // 更新重置日期
+            self.last_history_reset_date = current_date;
+
+            log::info!("历史累计交易数据重置完成: 重置了{}个价格层级, 总买单量: {:.4}, 总卖单量: {:.4}",
+                      reset_count, total_buy_volume, total_sell_volume);
+        }
+    }
+
+    /// 从时间戳获取UTC日期（YYYYMMDD格式）
+    fn get_utc_date_from_timestamp(&self, timestamp: u64) -> u32 {
+        // 将毫秒时间戳转换为秒
+        let timestamp_secs = timestamp / 1000;
+
+        // 计算自1970年1月1日以来的天数
+        let days_since_epoch = timestamp_secs / (24 * 60 * 60);
+
+        // 1970年1月1日是星期四，从这里开始计算
+        // 简化的日期计算（不考虑闰年的复杂情况，但对于日期变化检测足够准确）
+        let mut year = 1970;
+        let mut remaining_days = days_since_epoch;
+
+        // 粗略计算年份
+        while remaining_days >= 365 {
+            let days_in_year = if self.is_leap_year(year) { 366 } else { 365 };
+            if remaining_days >= days_in_year {
+                remaining_days -= days_in_year;
+                year += 1;
+            } else {
+                break;
+            }
+        }
+
+        // 计算月份和日期
+        let days_in_months = if self.is_leap_year(year) {
+            [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+        } else {
+            [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+        };
+
+        let mut month = 1;
+        for &days_in_month in &days_in_months {
+            if remaining_days >= days_in_month {
+                remaining_days -= days_in_month;
+                month += 1;
+            } else {
+                break;
+            }
+        }
+
+        let day = remaining_days + 1;
+
+        // 返回YYYYMMDD格式
+        (year * 10000 + month * 100 + day) as u32
+    }
+
+    /// 判断是否为闰年
+    fn is_leap_year(&self, year: u64) -> bool {
+        (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
+    }
+
+    /// 更新Trade Imbalance滑动窗口（500ms）
+    fn update_trade_imbalance(&mut self, current_time: u64, is_buy: bool) {
+        // 添加新的交易记录
+        self.trade_imbalance_window.push_back((current_time, is_buy));
+
+        // 移除500ms之前的数据
+        let window_start = current_time.saturating_sub(500); // 500ms窗口
+        while let Some(&(timestamp, _)) = self.trade_imbalance_window.front() {
+            if timestamp < window_start {
+                self.trade_imbalance_window.pop_front();
+            } else {
+                break;
+            }
+        }
+
+        // 计算Trade Imbalance: TI = (#BuyTrades - #SellTrades) / TotalTrades
+        let mut buy_count = 0;
+        let mut sell_count = 0;
+
+        for &(_, is_buy_trade) in &self.trade_imbalance_window {
+            if is_buy_trade {
+                buy_count += 1;
+            } else {
+                sell_count += 1;
+            }
+        }
+
+        let total_trades = buy_count + sell_count;
+        if total_trades > 0 {
+            self.current_trade_imbalance = (buy_count as f64 - sell_count as f64) / total_trades as f64;
+        } else {
+            self.current_trade_imbalance = 0.0;
+        }
+    }
+
+    /// 获取当前Trade Imbalance值
+    pub fn get_trade_imbalance(&self) -> f64 {
+        self.current_trade_imbalance
+    }
+
     pub fn clear(&mut self) {
         self.order_flows.clear();
         self.best_bid_price = None;
@@ -423,6 +565,8 @@ impl OrderBookManager {
         self.current_price = None;
         self.bookticker_snapshot = None;
         self.market_snapshot = MarketSnapshot::new();
+        self.trade_imbalance_window.clear();
+        self.current_trade_imbalance = 0.0;
     }
 }
 

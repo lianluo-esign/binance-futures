@@ -53,6 +53,12 @@ pub struct UnifiedOrderBookWidget {
     price_history: std::collections::VecDeque<(f64, f64, f64, String)>, // (timestamp, price, volume, side)
     /// 最大价格历史数据点数
     max_price_history: usize,
+    /// 价格图表固定高度（像素值）
+    price_chart_height: f32,
+    /// Trade Imbalance 500ms滑动窗口数据 (timestamp, buy_count, sell_count)
+    trade_imbalance_window: std::collections::VecDeque<(u64, u32, u32)>,
+    /// 当前Trade Imbalance值
+    current_trade_imbalance: f64,
 }
 
 impl Default for UnifiedOrderBookWidget {
@@ -73,6 +79,9 @@ impl Default for UnifiedOrderBookWidget {
             price_chart_modal_open: false,
             price_history: std::collections::VecDeque::with_capacity(10000),
             max_price_history: 10000,
+            price_chart_height: 200.0, // 默认高度300像素
+            trade_imbalance_window: std::collections::VecDeque::new(),
+            current_trade_imbalance: 0.0,
         }
     }
 }
@@ -80,6 +89,22 @@ impl Default for UnifiedOrderBookWidget {
 impl UnifiedOrderBookWidget {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// 设置价格图表固定高度
+    ///
+    /// # 参数
+    /// * `height` - 固定高度（像素值）
+    ///   - 0.0: 不显示价格图表
+    ///   - 300.0: 默认高度
+    ///   - 最小值: 100.0，最大值: 800.0
+    pub fn set_price_chart_height(&mut self, height: f32) {
+        self.price_chart_height = height.clamp(0.0, 800.0);
+    }
+
+    /// 获取当前价格图表固定高度
+    pub fn get_price_chart_height(&self) -> f32 {
+        self.price_chart_height
     }
 
     /// 加载Logo纹理
@@ -200,7 +225,7 @@ impl UnifiedOrderBookWidget {
 
         // 计算全屏尺寸
         let header_height = total_height * 0.05; // 5% 用于标题
-        let content_height = total_height * 0.95; // 95% 用于内容
+        let content_height = total_height; // 95% 用于内容
 
         ui.vertical(|ui| {
             // 1. 顶部标题区域：5% 高度
@@ -249,33 +274,79 @@ impl UnifiedOrderBookWidget {
                 },
             );
 
-            // 2. 主要内容区域：95% 高度，全屏订单簿
+            // 2. 主要内容区域：95% 高度，水平布局 - orderbook占一半宽度
             ui.allocate_ui_with_layout(
                 egui::Vec2::new(total_width, content_height),
-                egui::Layout::top_down(egui::Align::LEFT),
+                egui::Layout::left_to_right(egui::Align::TOP),
                 |ui| {
-                    // 获取当前价格和数据
-                    let snapshot = app.get_market_snapshot();
-                    let current_price = snapshot.current_price.unwrap_or(50000.0);
+                    // 左侧：订单簿表格 - 占窗体宽度的一半
+                    ui.allocate_ui_with_layout(
+                        egui::Vec2::new(total_width * 0.5, content_height),
+                        egui::Layout::top_down(egui::Align::LEFT),
+                        |ui| {
+                            // 获取当前价格和数据
+                            let snapshot = app.get_market_snapshot();
+                            let current_price = snapshot.current_price.unwrap_or(50000.0);
 
-                    // 获取订单流数据
-                    let order_flows = app.get_orderbook_manager().get_order_flows();
-                    let current_time = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap()
-                        .as_millis() as u64;
+                            // 获取订单流数据
+                            let order_flows = app.get_orderbook_manager().get_order_flows();
+                            let current_time = SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .unwrap()
+                                .as_millis() as u64;
 
-                    // 使用数据驱动的UI渲染：提取可见范围数据
-                    let visible_data = self.extract_visible_data(&order_flows, current_time, current_price);
+                            // 使用数据驱动的UI渲染：提取可见范围数据
+                            let visible_data = self.extract_visible_data(&order_flows, current_time, current_price);
 
-                    if visible_data.is_empty() {
-                        ui.centered_and_justified(|ui| {
-                            ui.label("暂无订单簿数据");
-                        });
-                    } else {
-                        // 渲染订单簿表格，占据全部可用空间
-                        self.render_bounded_table(ui, &visible_data, current_price, content_height);
-                    }
+                            if visible_data.is_empty() {
+                                ui.centered_and_justified(|ui| {
+                                    ui.label("暂无订单簿数据");
+                                });
+                            } else {
+                                // 渲染订单簿表格，占据左侧一半空间
+                                self.render_bounded_table(ui, &visible_data, current_price, content_height);
+                            }
+                        },
+                    );
+
+                    // 右侧：预留空间 - 占窗体宽度的另一半
+                    ui.allocate_ui_with_layout(
+                        egui::Vec2::new(total_width * 0.5, content_height),
+                        egui::Layout::top_down(egui::Align::LEFT),
+                        |ui| {
+                            // 上半部分：实时价格图表 - 使用固定高度
+                            let chart_height = self.price_chart_height.min(content_height - 200.0); // 确保至少留200像素给两个指标区域
+                            if chart_height > 0.0 {
+                                ui.allocate_ui_with_layout(
+                                    egui::Vec2::new(total_width * 0.5, chart_height),
+                                    egui::Layout::top_down(egui::Align::LEFT),
+                                    |ui| {
+                                        self.render_embedded_price_chart(ui, app);
+                                    },
+                                );
+                            }
+
+                            // 中间部分：Orderbook Imbalance指标 - 固定高度100像素
+                            let imbalance_height = 100.0;
+                            ui.allocate_ui_with_layout(
+                                egui::Vec2::new(total_width * 0.5, imbalance_height),
+                                egui::Layout::top_down(egui::Align::LEFT),
+                                |ui| {
+                                    self.render_orderbook_imbalance(ui, app);
+                                },
+                            );
+
+                            // 下半部分：Trade Imbalance指标 - 固定高度100像素
+                            let trade_imbalance_height = 100.0;
+                            ui.allocate_ui_with_layout(
+                                egui::Vec2::new(total_width * 0.5, trade_imbalance_height),
+                                egui::Layout::top_down(egui::Align::LEFT),
+                                |ui| {
+                                    self.render_trade_imbalance(ui, app);
+                                },
+                            );
+                        },
+                    );
                 },
             );
         });
@@ -481,9 +552,13 @@ impl UnifiedOrderBookWidget {
         let max_history_sell = data.iter().map(|row| row.history_sell_volume).fold(0.0, f64::max);
         let max_delta = data.iter().map(|row| row.delta.abs()).fold(0.0, f64::max);
 
-        // 获取可用宽度并平均分配给8列
+        // 设置自定义列宽 - 前5列使用固定较小宽度
         let available_width = ui.available_width();
-        let column_width = available_width / 8.0;
+        let fixed_buyselltrade_width = 50.0;  // 主动买单和卖单的宽度
+        let price_width = 47.0;
+        let fixed_column_width = 80.0; // 前5列的固定宽度（比之前更小）
+        let remaining_width = available_width - (fixed_column_width * 5.0);
+        let flexible_column_width = remaining_width / 3.0; // 后3列平均分配剩余宽度
 
         // 使用严格边界控制的表格容器
         ui.allocate_ui_with_layout(
@@ -495,26 +570,26 @@ impl UnifiedOrderBookWidget {
 
                 let table = TableBuilder::new(ui)
                     .striped(false)
-                    .resizable(false) // 禁用调整大小以保持均匀分布
+                    .resizable(false) // 禁用调整大小以保持固定宽度
                     .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-                    .column(Column::exact(column_width)) // 主动卖单累计(5s)
-                    .column(Column::exact(column_width)) // 买单深度
-                    .column(Column::exact(column_width)) // 价格
-                    .column(Column::exact(column_width)) // 卖单深度
-                    .column(Column::exact(column_width)) // 主动买单累计(5s)
-                    .column(Column::exact(column_width)) // 历史累计主动买单量
-                    .column(Column::exact(column_width)) // 历史累计主动卖单量
+                    .column(Column::exact(fixed_buyselltrade_width)) // 主动卖单累计(5s) - 固定80px
+                    .column(Column::exact(fixed_column_width)) // 买单深度 - 固定80px
+                    .column(Column::exact(price_width)) // 价格 - 固定50px
+                    .column(Column::exact(fixed_column_width)) // 卖单深度 - 固定80px
+                    .column(Column::exact(fixed_buyselltrade_width)) // 主动买单累计(5s) - 固定80px
+                    .column(Column::exact(flexible_column_width)) // 历史累计主动买单量 - 灵活宽度
+                    .column(Column::exact(flexible_column_width)) // 历史累计主动卖单量 - 灵活宽度
                     .column(Column::remainder()) // 主动订单delta - 使用剩余空间
                     .max_scroll_height(table_height - 30.0) // 为表头预留空间
                     .scroll_to_row(self.calculate_center_row_index(data, current_price), None);
 
                 table
                     .header(25.0, |mut header| {
-                        header.col(|ui| { ui.strong("主动卖单累计(5s)"); });
+                        header.col(|ui| { ui.strong("主动卖单"); });
                         header.col(|ui| { ui.strong("买单深度"); });
                         header.col(|ui| { ui.strong("价格"); });
                         header.col(|ui| { ui.strong("卖单深度"); });
-                        header.col(|ui| { ui.strong("主动买单累计(5s)"); });
+                        header.col(|ui| { ui.strong("主动买单"); });
                         header.col(|ui| { ui.strong("历史累计买单"); });
                         header.col(|ui| { ui.strong("历史累计卖单"); });
                         header.col(|ui| { ui.strong("Delta"); });
@@ -1443,6 +1518,18 @@ impl UnifiedOrderBookWidget {
 
     /// 更新价格历史数据
     fn update_price_history(&mut self, current_price: f64, volume: f64, side: String) {
+        // 过滤异常价格值
+        if !Self::is_valid_price(current_price) {
+            log::warn!("过滤异常价格值: {}", current_price);
+            return;
+        }
+
+        // 过滤异常成交量值
+        if !Self::is_valid_volume(volume) {
+            log::warn!("过滤异常成交量值: {}", volume);
+            return;
+        }
+
         let current_time = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -1498,18 +1585,34 @@ impl UnifiedOrderBookWidget {
                     ui.label("等待价格数据...");
                 });
             } else {
-                // 准备图表数据
-                let points: PlotPoints = price_history
+                // 过滤有效的价格历史数据
+                let valid_data: Vec<(usize, (f64, f64, f64, String))> = price_history
                     .iter()
                     .enumerate()
-                    .map(|(i, (_, price, _, _))| [i as f64, *price])
+                    .filter(|(_, (_, price, volume, _))| {
+                        Self::is_valid_price(*price) && Self::is_valid_volume(*volume)
+                    })
+                    .map(|(i, data)| (i, data.clone()))
                     .collect();
 
-                // 计算Y轴范围
-                let prices: Vec<f64> = price_history.iter().map(|(_, price, _, _)| *price).collect();
+                if valid_data.is_empty() {
+                    ui.centered_and_justified(|ui| {
+                        ui.label("暂无有效价格数据...");
+                    });
+                    return;
+                }
 
-                // 计算成交量范围用于圆点大小缩放
-                let volumes: Vec<f64> = price_history.iter().map(|(_, _, volume, _)| *volume).collect();
+                // 准备图表数据 - 使用过滤后的有效数据
+                let points: PlotPoints = valid_data
+                    .iter()
+                    .map(|(i, (_, price, _, _))| [*i as f64, *price])
+                    .collect();
+
+                // 计算Y轴范围 - 使用过滤后的有效价格
+                let prices: Vec<f64> = valid_data.iter().map(|(_, (_, price, _, _))| *price).collect();
+
+                // 计算成交量范围用于圆点大小缩放 - 使用过滤后的有效成交量
+                let volumes: Vec<f64> = valid_data.iter().map(|(_, (_, _, volume, _))| *volume).collect();
                 let max_volume = volumes.iter().fold(0.0f64, |a, &b| a.max(b));
                 let min_volume = volumes.iter().fold(f64::INFINITY, |a, &b| a.min(b));
                 let volume_range = max_volume - min_volume;
@@ -1520,11 +1623,11 @@ impl UnifiedOrderBookWidget {
                 let y_min = min_price - y_margin;
                 let y_max = max_price + y_margin;
 
-                // 创建图表
+                // 创建图表 - 添加固定1美元Y轴刻度
                 let plot = Plot::new("price_chart_modal")
                     .view_aspect(2.0)
                     .show_axes([true, true])
-                    .show_grid([false, false])
+                    .show_grid([true, true]) // 启用网格显示
                     .allow_zoom(true)
                     .allow_drag(true)
                     .allow_scroll(true)
@@ -1532,6 +1635,7 @@ impl UnifiedOrderBookWidget {
                     .include_x(price_history.len() as f64)
                     .include_y(y_min)
                     .include_y(y_max)
+                    .y_grid_spacer(Self::price_grid_spacer_1_dollar) // 设置1美元固定间距
                     .y_axis_formatter(|y, _range, _ctx| {
                         format!("{:.0}", y.value) // 格式化Y轴为整数
                     });
@@ -1545,40 +1649,41 @@ impl UnifiedOrderBookWidget {
 
                     plot_ui.line(line);
 
-                    // 绘制基于成交量的圆点
-                    for (i, (_, price, volume, side)) in price_history.iter().enumerate() {
-                        // 计算圆点半径（基于成交量）
-                        let radius = if volume_range > 0.0 {
-                            let normalized_volume = (volume - min_volume) / volume_range;
-                            (2.0 + normalized_volume * 8.0) as f32 // 半径范围：2.0 到 10.0，转换为f32
-                        } else {
-                            3.0f32 // 默认半径
-                        };
+                    // 绘制基于成交量的圆点 - 使用过滤后的有效数据，只有成交量>=1时才绘制
+                    for (i, (_, price, volume, side)) in valid_data.iter() {
+                        // 只有成交量大于等于1时才绘制圆点
+                        if *volume >= 0.1 {
+                            // 计算圆点半径（基于成交量）
+                            let radius = if volume_range > 0.0 {
+                                let normalized_volume = (volume - min_volume) / volume_range;
+                                (2.0 + normalized_volume * 8.0) as f32 // 半径范围：2.0 到 10.0，转换为f32
+                            } else {
+                                3.0f32 // 默认半径
+                            };
 
-                        // 根据买单/卖单选择颜色
-                        let color = if side == "buy" {
-                            egui::Color32::GREEN // 买单：绿色
-                        } else if side == "sell" {
-                            egui::Color32::RED // 卖单：红色
-                        } else {
-                            egui::Color32::GRAY // 未知：灰色
-                        };
+                            // 根据买单/卖单选择颜色
+                            let color = if side == "buy" {
+                                egui::Color32::GREEN // 买单：绿色
+                            } else if side == "sell" {
+                                egui::Color32::RED // 卖单：红色
+                            } else {
+                                egui::Color32::GRAY // 未知：灰色
+                            };
 
-                        plot_ui.points(
-                            egui_plot::Points::new(vec![[i as f64, *price]])
-                                .color(color)
-                                .radius(radius)
-                                .name(&format!("{}: {:.4}", if side == "buy" { "买单" } else { "卖单" }, volume))
-                        );
+                            plot_ui.points(
+                                egui_plot::Points::new(vec![[*i as f64, *price]])
+                                    .color(color)
+                                    .radius(radius)
+                                    .name(&format!("{}: {:.4}", if side == "buy" { "买单" } else { "卖单" }, volume))
+                            );
+                        }
                     }
 
-                    // 添加当前价格的高亮标记
-                    if let Some((_, current_price, _, _)) = price_history.back() {
-                        let current_x = (price_history.len() - 1) as f64;
-
+                    // 添加当前价格的高亮标记 - 使用过滤后的有效数据
+                    if let Some((i, (_, current_price, _, _))) = valid_data.last() {
                         // 绘制当前价格点
                         plot_ui.points(
-                            egui_plot::Points::new(vec![[current_x, *current_price]])
+                            egui_plot::Points::new(vec![[*i as f64, *current_price]])
                                 .color(egui::Color32::YELLOW)
                                 .radius(8.0)
                                 .name("当前价格")
@@ -1587,5 +1692,416 @@ impl UnifiedOrderBookWidget {
                 });
             }
         });
+    }
+
+    /// Y轴价格网格间距器 - 固定1美元间距
+    fn price_grid_spacer_1_dollar(input: egui_plot::GridInput) -> Vec<egui_plot::GridMark> {
+        let mut marks = Vec::new();
+
+        // 强制固定1美元间距，不管数据点多少
+        let step_size = 1.0;
+
+        // 计算起始和结束的价格标记，向下和向上取整到1美元的倍数
+        let start_price = input.bounds.0.floor() as i64;
+        let end_price = input.bounds.1.ceil() as i64;
+
+        // 生成每1美元的网格标记，不限制数量
+        let mut price = start_price;
+        while price <= end_price {
+            let value = price as f64;
+            if value >= input.bounds.0 && value <= input.bounds.1 {
+                marks.push(egui_plot::GridMark {
+                    value,
+                    step_size,
+                });
+            }
+            price += 1; // 每次增加1美元
+        }
+
+        marks
+    }
+
+    /// 验证价格是否有效
+    fn is_valid_price(price: f64) -> bool {
+        // 过滤异常价格值
+        price > 0.0 &&                    // 价格必须大于0
+        price.is_finite() &&              // 价格必须是有限数
+        !price.is_nan() &&                // 价格不能是NaN
+        price < 1_000_000.0 &&            // 价格不能过大（100万美元以下）
+        price > 0.01                      // 价格不能过小（1分以上）
+    }
+
+    /// 验证成交量是否有效
+    fn is_valid_volume(volume: f64) -> bool {
+        // 过滤异常成交量值
+        volume >= 0.0 &&                  // 成交量必须非负
+        volume.is_finite() &&             // 成交量必须是有限数
+        !volume.is_nan() &&               // 成交量不能是NaN
+        volume < 1_000_000.0              // 成交量不能过大（100万以下）
+    }
+
+    /// 渲染嵌入式实时价格图表（在预留区域上半部分）
+    fn render_embedded_price_chart(&mut self, ui: &mut egui::Ui, app: &crate::app::reactive_app::ReactiveApp) {
+        // 添加标题
+        // ui.horizontal(|ui| {
+        //     ui.label(egui::RichText::new("📈 实时价格图表").size(14.0).strong());
+        // });
+        // ui.separator();
+
+        // 更新价格历史数据
+        if let Some(current_price) = app.get_market_snapshot().current_price {
+            // 从最新的交易数据中获取成交量和交易方向
+            let order_flows = app.get_orderbook_manager().get_order_flows();
+            if let Some((_, order_flow)) = order_flows.iter().find(|(price, _)| {
+                (price.into_inner() - current_price).abs() < 0.5 // 找到最接近当前价格的订单流
+            }) {
+                let recent_trades = &order_flow.realtime_trade_record;
+                if recent_trades.buy_volume > 0.0 || recent_trades.sell_volume > 0.0 {
+                    let (volume, side) = if recent_trades.buy_volume >= recent_trades.sell_volume {
+                        (recent_trades.buy_volume, "buy".to_string())
+                    } else {
+                        (recent_trades.sell_volume, "sell".to_string())
+                    };
+                    self.update_price_history(current_price, volume, side);
+                }
+            }
+        }
+
+        let price_history = &self.price_history;
+
+        if price_history.is_empty() {
+            ui.centered_and_justified(|ui| {
+                ui.label("等待价格数据...");
+            });
+        } else {
+            // 过滤有效的价格历史数据
+            let valid_data: Vec<(usize, (f64, f64, f64, String))> = price_history
+                .iter()
+                .enumerate()
+                .filter(|(_, (_, price, volume, _))| {
+                    Self::is_valid_price(*price) && Self::is_valid_volume(*volume)
+                })
+                .map(|(i, data)| (i, data.clone()))
+                .collect();
+
+            if valid_data.is_empty() {
+                ui.centered_and_justified(|ui| {
+                    ui.label("暂无有效价格数据...");
+                });
+                return;
+            }
+
+            // 准备图表数据 - 使用过滤后的有效数据
+            let points: PlotPoints = valid_data
+                .iter()
+                .map(|(i, (_, price, _, _))| [*i as f64, *price])
+                .collect();
+
+            // 计算Y轴范围 - 使用过滤后的有效价格
+            let prices: Vec<f64> = valid_data.iter().map(|(_, (_, price, _, _))| *price).collect();
+
+            // 计算成交量范围用于圆点大小缩放 - 使用过滤后的有效成交量
+            let volumes: Vec<f64> = valid_data.iter().map(|(_, (_, _, volume, _))| *volume).collect();
+            let max_volume = volumes.iter().fold(0.0f64, |a, &b| a.max(b));
+            let min_volume = volumes.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+            let volume_range = max_volume - min_volume;
+
+            let y_min = prices.iter().fold(f64::INFINITY, |a, &b| a.min(b)) - 5.0;
+            let y_max = prices.iter().fold(0.0f64, |a, &b| a.max(b)) + 5.0;
+
+            // 获取可用的UI区域高度，确保图表严格遵守高度限制
+            let available_height = ui.available_height();
+            let chart_height = self.price_chart_height.min(available_height);
+
+            // 使用固定高度的容器来限制图表大小
+            ui.allocate_ui_with_layout(
+                egui::Vec2::new(ui.available_width(), chart_height),
+                egui::Layout::top_down(egui::Align::LEFT),
+                |ui| {
+                    // 创建嵌入式图表 - 移除view_aspect以避免高度冲突，添加固定1美元Y轴刻度，移除margin
+                    let plot = Plot::new("embedded_price_chart")
+                        .height(chart_height) // 明确设置图表高度
+                        .show_axes([true, true])
+                        .show_grid([true, true]) // 启用网格显示
+                        .allow_zoom(true)
+                        .allow_drag(true)
+                        .allow_scroll(true)
+                        .include_x(0.0)
+                        .include_x(valid_data.len() as f64)
+                        .include_y(y_min)
+                        .include_y(y_max)
+                        .y_grid_spacer(Self::price_grid_spacer_1_dollar) // 设置1美元固定间距
+                        .y_axis_formatter(|y, _range, _ctx| {
+                            format!("{:.0}", y.value) // 格式化Y轴为整数
+                        });
+
+                    plot.show(ui, |plot_ui| {
+                        // 绘制价格线
+                        plot_ui.line(
+                            egui_plot::Line::new(points)
+                                .color(egui::Color32::WHITE)
+                                .width(1.5)
+                                .name("价格")
+                        );
+
+                        // 绘制基于成交量的圆点 - 使用过滤后的有效数据，只有成交量>=1时才绘制
+                        for (i, (_, price, volume, side)) in valid_data.iter() {
+                            // 只有成交量大于等于1时才绘制圆点
+                            if *volume >= 1.0 {
+                                // 计算圆点半径（基于成交量）
+                                let radius = if volume_range > 0.0 {
+                                    let normalized_volume = (volume - min_volume) / volume_range;
+                                    (2.0 + normalized_volume * 8.0) as f32 // 半径范围：2.0 到 10.0，转换为f32
+                                } else {
+                                    3.0f32 // 默认半径
+                                };
+
+                                // 根据买单/卖单选择颜色
+                                let color = if side == "buy" {
+                                    egui::Color32::GREEN // 买单：绿色
+                                } else if side == "sell" {
+                                    egui::Color32::RED // 卖单：红色
+                                } else {
+                                    egui::Color32::GRAY // 未知：灰色
+                                };
+
+                                plot_ui.points(
+                                    egui_plot::Points::new(vec![[*i as f64, *price]])
+                                        .color(color)
+                                        .radius(radius)
+                                        .name(&format!("{}: {:.4}", if side == "buy" { "买单" } else { "卖单" }, volume))
+                                );
+                            }
+                        }
+
+                        // 添加当前价格的高亮标记 - 使用过滤后的有效数据
+                        if let Some((i, (_, current_price, _, _))) = valid_data.last() {
+                            // 绘制当前价格点
+                            plot_ui.points(
+                                egui_plot::Points::new(vec![[*i as f64, *current_price]])
+                                    .color(egui::Color32::YELLOW)
+                                    .radius(8.0)
+                                    .name("当前价格")
+                            );
+                        }
+                    });
+                },
+            );
+        }
+    }
+
+    /// 渲染Orderbook Imbalance指标
+    fn render_orderbook_imbalance(&mut self, ui: &mut egui::Ui, app: &crate::app::reactive_app::ReactiveApp) {
+        // 获取市场快照数据
+        let snapshot = app.get_market_snapshot();
+        let bid_ratio = snapshot.bid_volume_ratio;
+        let ask_ratio = snapshot.ask_volume_ratio;
+
+        // 创建带边框的面板 - 移除左边距以与价格图表左对齐
+        egui::Frame::none()
+            .fill(egui::Color32::from_rgb(25, 25, 35))
+            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(60, 60, 80)))
+            .inner_margin(egui::Margin {
+                left: 0.0,    // 移除左边距
+                right: 8.0,   // 保持右边距
+                top: 8.0,     // 保持上边距
+                bottom: 8.0,  // 保持下边距
+            })
+            .show(ui, |ui| {
+                ui.vertical(|ui| {
+                    // 标题
+                    ui.horizontal(|ui| {
+                        ui.colored_label(egui::Color32::WHITE, "📊 Orderbook Imbalance");
+                    });
+
+                    ui.add_space(5.0);
+
+                    // 显示比率数值
+                    ui.horizontal(|ui| {
+                        ui.colored_label(egui::Color32::from_rgb(120, 180, 255),
+                            format!("买单: {:.1}%", bid_ratio * 100.0));
+                        ui.separator();
+                        ui.colored_label(egui::Color32::from_rgb(255, 120, 120),
+                            format!("卖单: {:.1}%", ask_ratio * 100.0));
+                    });
+
+                    ui.add_space(8.0);
+
+                    // 绘制横向条形图
+                    let available_width = ui.available_width() - 20.0; // 留出边距
+                    let bar_height = 20.0;
+
+                    ui.allocate_ui_with_layout(
+                        egui::Vec2::new(available_width, bar_height),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| {
+                            let rect = ui.available_rect_before_wrap();
+
+                            // 计算买单和卖单条形图的宽度
+                            let bid_width = available_width * bid_ratio as f32;
+                            let ask_width = available_width * ask_ratio as f32;
+
+                            // 绘制买单条形图（蓝色，从左边开始）
+                            if bid_width > 1.0 {
+                                let bid_rect = egui::Rect::from_min_size(
+                                    rect.min,
+                                    egui::Vec2::new(bid_width, bar_height)
+                                );
+                                ui.painter().rect_filled(bid_rect, 2.0, egui::Color32::from_rgb(120, 180, 255));
+                            }
+
+                            // 绘制卖单条形图（红色，从右边开始）
+                            if ask_width > 1.0 {
+                                let ask_rect = egui::Rect::from_min_size(
+                                    egui::Pos2::new(rect.max.x - ask_width, rect.min.y),
+                                    egui::Vec2::new(ask_width, bar_height)
+                                );
+                                ui.painter().rect_filled(ask_rect, 2.0, egui::Color32::from_rgb(255, 120, 120));
+                            }
+
+                            // 绘制中心分割线
+                            let center_x = rect.min.x + available_width * 0.5;
+                            ui.painter().line_segment(
+                                [egui::Pos2::new(center_x, rect.min.y), egui::Pos2::new(center_x, rect.max.y)],
+                                egui::Stroke::new(1.0, egui::Color32::WHITE)
+                            );
+
+                            // 占用整个区域以防止其他元素覆盖
+                            ui.allocate_rect(rect, egui::Sense::hover());
+                        }
+                    );
+
+                    ui.add_space(5.0);
+
+                    // 显示多空压力指示
+                    let imbalance = bid_ratio - ask_ratio;
+                    let pressure_text = if imbalance > 0.1 {
+                        ("🟢 多头压力", egui::Color32::from_rgb(120, 255, 120))
+                    } else if imbalance < -0.1 {
+                        ("🔴 空头压力", egui::Color32::from_rgb(255, 120, 120))
+                    } else {
+                        ("⚪ 均衡状态", egui::Color32::GRAY)
+                    };
+
+                    ui.horizontal(|ui| {
+                        ui.colored_label(pressure_text.1, pressure_text.0);
+                        ui.colored_label(egui::Color32::GRAY,
+                            format!("(差值: {:.1}%)", imbalance * 100.0));
+                    });
+                });
+            });
+    }
+
+    /// 渲染Trade Imbalance指标
+    fn render_trade_imbalance(&mut self, ui: &mut egui::Ui, app: &crate::app::reactive_app::ReactiveApp) {
+        // 获取Trade Imbalance数据
+        let trade_imbalance = app.get_orderbook_manager().get_trade_imbalance();
+
+        // 创建带边框的面板 - 移除左边距以与上方组件左对齐
+        egui::Frame::none()
+            .fill(egui::Color32::from_rgb(25, 25, 35))
+            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(60, 60, 80)))
+            .inner_margin(egui::Margin {
+                left: 0.0,    // 移除左边距
+                right: 8.0,   // 保持右边距
+                top: 8.0,     // 保持上边距
+                bottom: 8.0,  // 保持下边距
+            })
+            .show(ui, |ui| {
+                ui.vertical(|ui| {
+                    // 标题
+                    ui.horizontal(|ui| {
+                        ui.colored_label(egui::Color32::WHITE, "⚖️ Trade Imbalance (500ms)");
+                    });
+
+                    ui.add_space(5.0);
+
+                    // 显示TI数值和百分比
+                    ui.horizontal(|ui| {
+                        ui.colored_label(egui::Color32::LIGHT_BLUE,
+                            format!("TI: {:.3}", trade_imbalance));
+                        ui.separator();
+                        ui.colored_label(egui::Color32::GRAY,
+                            format!("({:.1}%)", trade_imbalance * 100.0));
+                    });
+
+                    ui.add_space(8.0);
+
+                    // 绘制横向条形图
+                    let available_width = ui.available_width() - 20.0; // 留出边距
+                    let bar_height = 20.0;
+
+                    ui.allocate_ui_with_layout(
+                        egui::Vec2::new(available_width, bar_height),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| {
+                            let rect = ui.available_rect_before_wrap();
+
+                            // 计算条形图的位置和宽度
+                            let center_x = rect.min.x + available_width * 0.5;
+                            let bar_width = (trade_imbalance.abs() as f32 * available_width * 0.5);
+
+                            // 绘制背景（中性区域）
+                            ui.painter().rect_filled(rect, 2.0, egui::Color32::from_rgb(40, 40, 50));
+
+                            // 绘制Trade Imbalance条形图
+                            if trade_imbalance > 0.0 {
+                                // 正值：买单多于卖单，绿色条形图向右
+                                let buy_rect = egui::Rect::from_min_size(
+                                    egui::Pos2::new(center_x, rect.min.y),
+                                    egui::Vec2::new(bar_width, bar_height)
+                                );
+                                ui.painter().rect_filled(buy_rect, 2.0, egui::Color32::from_rgb(120, 255, 120));
+                            } else if trade_imbalance < 0.0 {
+                                // 负值：卖单多于买单，红色条形图向左
+                                let sell_rect = egui::Rect::from_min_size(
+                                    egui::Pos2::new(center_x - bar_width, rect.min.y),
+                                    egui::Vec2::new(bar_width, bar_height)
+                                );
+                                ui.painter().rect_filled(sell_rect, 2.0, egui::Color32::from_rgb(255, 120, 120));
+                            }
+
+                            // 绘制中心分割线
+                            ui.painter().line_segment(
+                                [egui::Pos2::new(center_x, rect.min.y), egui::Pos2::new(center_x, rect.max.y)],
+                                egui::Stroke::new(2.0, egui::Color32::WHITE)
+                            );
+
+                            // 绘制刻度线（-1, -0.5, 0, 0.5, 1）
+                            for &scale in &[-1.0, -0.5, 0.5, 1.0] {
+                                let x = center_x + scale * available_width * 0.5;
+                                ui.painter().line_segment(
+                                    [egui::Pos2::new(x, rect.min.y), egui::Pos2::new(x, rect.min.y + 5.0)],
+                                    egui::Stroke::new(1.0, egui::Color32::GRAY)
+                                );
+                            }
+
+                            // 占用整个区域以防止其他元素覆盖
+                            ui.allocate_rect(rect, egui::Sense::hover());
+                        }
+                    );
+
+                    ui.add_space(5.0);
+
+                    // 显示交易压力指示
+                    let (pressure_text, pressure_color) = if trade_imbalance > 0.3 {
+                        ("🟢 强买压", egui::Color32::from_rgb(120, 255, 120))
+                    } else if trade_imbalance > 0.1 {
+                        ("🟡 轻买压", egui::Color32::from_rgb(255, 255, 120))
+                    } else if trade_imbalance < -0.3 {
+                        ("🔴 强卖压", egui::Color32::from_rgb(255, 120, 120))
+                    } else if trade_imbalance < -0.1 {
+                        ("🟠 轻卖压", egui::Color32::from_rgb(255, 180, 120))
+                    } else {
+                        ("⚪ 均衡", egui::Color32::GRAY)
+                    };
+
+                    ui.horizontal(|ui| {
+                        ui.colored_label(pressure_color, pressure_text);
+                        ui.colored_label(egui::Color32::GRAY,
+                            format!("(500ms窗口)"));
+                    });
+                });
+            });
     }
 }
