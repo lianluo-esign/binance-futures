@@ -197,7 +197,7 @@ impl OrderFlow {
         trade_score + cancel_score + increase_score + price_score
     }
 
-    /// 检查是否有最近的活动
+    /// 检查是否有最近的活动或重要的历史数据
     pub fn has_recent_activity(&self, current_time: u64, max_age: u64) -> bool {
         let cutoff_time = current_time.saturating_sub(max_age);
 
@@ -206,8 +206,11 @@ impl OrderFlow {
         self.realtime_trade_record.timestamp >= cutoff_time ||
         self.realtime_cancel_records.timestamp >= cutoff_time ||
         self.realtime_increase_order.timestamp >= cutoff_time ||
+        self.history_trade_record.timestamp >= cutoff_time ||
         // 或者有非零的挂单量
-        self.bid_ask.bid > 0.0 || self.bid_ask.ask > 0.0
+        self.bid_ask.bid > 0.0 || self.bid_ask.ask > 0.0 ||
+        // 或者有历史累计交易数据（重要：防止历史数据丢失）
+        self.history_trade_record.buy_volume > 0.0 || self.history_trade_record.sell_volume > 0.0
     }
 }
 

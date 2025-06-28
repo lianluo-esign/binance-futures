@@ -31,13 +31,13 @@ impl WebSocketConfig {
                 format!("{}@bookTicker", symbol.to_lowercase()),
             ],
             reconnect_attempts: 0,
-            max_reconnect_attempts: 10,
-            reconnect_delay_ms: 500,
+            max_reconnect_attempts: 5, // 参照backup实现，减少到5次
+            reconnect_delay_ms: 1000, // 1秒重连间隔，更快恢复
             ping_interval_ms: 180000, // 3分钟，但实际上币安服务器会发ping
-            connection_timeout_ms: 10000,
-            pong_timeout_ms: 300000, // 5分钟，缩短pong超时时间
+            connection_timeout_ms: 10000, // 10秒连接超时
+            pong_timeout_ms: 60000, // 1分钟pong超时
             connection_lifetime_hours: 23, // 23小时后主动重连，避免24小时限制
-            max_reconnect_delay_ms: 60000, // 最大重连延迟1分钟
+            max_reconnect_delay_ms: 30000, // 最大重连延迟30秒
         }
     }
 
@@ -156,7 +156,7 @@ impl WebSocketConnection {
         Ok(())
     }
 
-    /// 读取消息
+    /// 读取消息 - 简化版本，参照backup实现
     pub fn read_message(&mut self) -> Result<Option<Message>, Box<dyn std::error::Error>> {
         if let Some(ref mut socket) = self.socket {
             match socket.read() {
@@ -166,44 +166,31 @@ impl WebSocketConnection {
                     match &message {
                         Message::Text(text) => {
                             self.total_bytes_received += text.len() as u64;
-                            // 添加调试日志，但限制频率（每1000条消息记录一次）
+                            // 减少日志频率
                             if self.total_messages_received % 1000 == 1 {
-                                log::info!("收到文本消息 #{}: {} 字节", self.total_messages_received, text.len());
+                                log::debug!("收到文本消息 #{}: {} 字节", self.total_messages_received, text.len());
                             }
                         }
                         Message::Binary(data) => {
                             self.total_bytes_received += data.len() as u64;
-                            log::info!("收到二进制消息: {} 字节", data.len());
-                        }
-                        Message::Pong(_) => {
-                            // 我们发送的pong响应，不需要特殊处理
-                            // 移除debug输出以减少日志噪音
                         }
                         Message::Close(_) => {
+                            // 参照backup实现，直接设置连接状态
                             self.state = ConnectionState::Disconnected;
-                            // 连接关闭信息写入日志文件，不输出到控制台
-                            log::warn!("WebSocket连接已关闭");
+                            log::info!("WebSocket连接已关闭");
                         }
                         Message::Ping(payload) => {
-                            // 收到服务器的ping，记录时间并立即响应pong
+                            // 简化ping处理，直接响应pong
                             self.last_ping_received = std::time::Instant::now();
-                            log::debug!("收到服务器ping，发送pong响应");
-
-                            // 立即发送pong响应（关键修复）
-                            if let Some(ref mut socket) = self.socket {
-                                if let Err(e) = socket.send(Message::Pong(payload.clone())) {
-                                    log::error!("发送pong响应失败: {}", e);
-                                    self.state = ConnectionState::Failed;
-                                    self.last_error = Some(format!("Pong响应失败: {}", e));
-                                } else {
-                                    self.last_pong_sent = std::time::Instant::now();
-                                    log::debug!("Pong响应发送成功");
-                                }
+                            if let Err(e) = socket.send(Message::Pong(payload.clone())) {
+                                log::error!("发送pong响应失败: {}", e);
+                                self.state = ConnectionState::Failed;
+                                self.last_error = Some(format!("Pong响应失败: {}", e));
+                            } else {
+                                self.last_pong_sent = std::time::Instant::now();
                             }
                         }
-                        _ => {
-                            // 移除debug输出以减少日志噪音
-                        }
+                        _ => {}
                     }
 
                     Ok(Some(message))
@@ -213,6 +200,7 @@ impl WebSocketConnection {
                     Ok(None)
                 }
                 Err(e) => {
+                    // 参照backup实现，设置连接状态为断开
                     self.state = ConnectionState::Failed;
                     self.last_error = Some(e.to_string());
                     Err(Box::new(e))
@@ -234,15 +222,11 @@ impl WebSocketConnection {
     }
 
     /// 检查心跳状态并响应ping（币安模式：服务器发ping，客户端响应pong）
+    /// 简化版本，参照backup实现
     pub fn handle_heartbeat(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let now = std::time::Instant::now();
-
-        // 检查是否需要响应ping（币安服务器会发送ping）
-        // 这里我们不主动发送ping，而是等待服务器的ping并响应pong
-
-        // 检查连接生命周期（币安24小时限制）
+        // 简化心跳处理，只检查连接生命周期
         if let Some(connection_start) = self.connection_start {
-            let connection_hours = now.duration_since(connection_start).as_secs() / 3600;
+            let connection_hours = connection_start.elapsed().as_secs() / 3600;
             if connection_hours >= self.config.connection_lifetime_hours {
                 self.connection_lifetime_exceeded = true;
                 log::info!("连接已运行{}小时，接近24小时限制，将触发重连", connection_hours);
@@ -255,11 +239,11 @@ impl WebSocketConnection {
         Ok(())
     }
 
-    /// 检查连接健康状态 - 币安优化版本
-    pub fn check_health(&mut self) -> bool {
-        let now = std::time::Instant::now();
 
-        // 检查连接状态
+
+    /// 检查连接健康状态 - 简化版本，参照backup实现
+    pub fn check_health(&mut self) -> bool {
+        // 简化健康检查，只检查基本连接状态
         match self.state {
             ConnectionState::Connected => {
                 // 检查是否超过连接生命周期
@@ -268,58 +252,8 @@ impl WebSocketConnection {
                     return false;
                 }
 
-                // 检查服务器ping超时（币安服务器每3分钟发送ping）
-                // 如果超过6分钟没收到ping，认为连接有问题（修复：缩短超时时间）
-                let ping_timeout_ms = 360000; // 6分钟（从10分钟缩短）
-                if now.duration_since(self.last_ping_received).as_millis() > ping_timeout_ms as u128 {
-                    // 但是在连接初期（前5分钟）不检查ping超时
-                    if let Some(connection_start) = self.connection_start {
-                        if now.duration_since(connection_start).as_secs() > 300 {
-                            log::warn!("长时间未收到服务器ping ({}分钟)，连接可能已断开",
-                                now.duration_since(self.last_ping_received).as_secs() / 60);
-                            self.state = ConnectionState::Failed;
-                            self.last_error = Some("服务器ping超时".to_string());
-                            return false;
-                        }
-                    }
-                }
-
-                // 检查是否长时间没有收到消息
-                if let Some(connection_start) = self.connection_start {
-                    let connection_duration = now.duration_since(connection_start);
-                    if connection_duration.as_secs() > 30 && self.total_messages_received == 0 {
-                        log::warn!("连接已建立{}秒但未收到任何消息", connection_duration.as_secs());
-                        self.state = ConnectionState::Failed;
-                        self.last_error = Some("长时间未收到消息".to_string());
-                        return false;
-                    }
-                }
-
-                // 新增：检查socket是否仍然有效
-                if let Some(ref socket) = self.socket {
-                    // 尝试获取socket状态，如果失败说明连接已断开
-                    match socket.get_ref() {
-                        tungstenite::stream::MaybeTlsStream::Plain(tcp_stream) => {
-                            // 检查TCP连接状态
-                            if let Err(_) = tcp_stream.peer_addr() {
-                                log::warn!("TCP连接已断开");
-                                self.state = ConnectionState::Failed;
-                                self.last_error = Some("TCP连接断开".to_string());
-                                return false;
-                            }
-                        }
-                        tungstenite::stream::MaybeTlsStream::NativeTls(tls_stream) => {
-                            if let Err(_) = tls_stream.get_ref().peer_addr() {
-                                log::warn!("TLS连接已断开");
-                                self.state = ConnectionState::Failed;
-                                self.last_error = Some("TLS连接断开".to_string());
-                                return false;
-                            }
-                        }
-                        _ => {}
-                    }
-                } else {
-                    // socket为None，连接已断开
+                // 检查socket是否存在
+                if self.socket.is_none() {
                     log::warn!("Socket为空，连接已断开");
                     self.state = ConnectionState::Failed;
                     self.last_error = Some("Socket为空".to_string());
@@ -329,16 +263,8 @@ impl WebSocketConnection {
                 true
             }
             ConnectionState::Connecting => {
-                // 检查连接超时
-                if let Some(connection_start) = self.connection_start {
-                    if now.duration_since(connection_start).as_millis() > self.config.connection_timeout_ms as u128 {
-                        log::warn!("连接超时 ({}ms)", self.config.connection_timeout_ms);
-                        self.state = ConnectionState::Failed;
-                        self.last_error = Some("连接超时".to_string());
-                        return false;
-                    }
-                }
-                false // 连接中，暂时不可用
+                // 连接中，暂时不可用
+                false
             }
             ConnectionState::Reconnecting => {
                 // 重连状态下不可用，但不是错误
@@ -361,72 +287,27 @@ impl WebSocketConnection {
         log::info!("WebSocket连接已断开");
     }
 
-    /// 尝试重连 - 改进的指数退避版本，防止永久失败
+    /// 尝试重连 - 简化版本，参照backup实现
     pub fn attempt_reconnect(&mut self) -> bool {
-        // 修复：如果重连次数达到上限，重置计数器继续尝试（防止永久失败）
+        // 简化重连逻辑，参照backup实现
         if self.config.reconnect_attempts >= self.config.max_reconnect_attempts {
-            log::warn!("重连次数已达上限: {}，重置计数器继续尝试", self.config.max_reconnect_attempts);
-            self.config.reconnect_attempts = 0; // 重置重连计数器
-            self.config.reconnect_delay_ms = 500; // 重置延迟时间
-            // 不要直接返回false，而是继续尝试重连
+            return false; // 达到最大重连次数，停止重连
         }
 
-        let now = std::time::Instant::now();
-
-        // 检查是否需要调度重连
-        if !self.reconnect_scheduled {
-            self.reconnect_scheduled = true;
-            self.last_reconnect_attempt = Some(now);
-            self.state = ConnectionState::Reconnecting;
-
-            // 计算指数退避延迟（修复：限制最大延迟，防止延迟过长）
-            let base_delay = self.config.reconnect_delay_ms;
-            let exponential_delay = base_delay * (2_u64.pow(self.config.reconnect_attempts.min(4))); // 限制指数为4
-            let actual_delay = exponential_delay.min(30000); // 最大延迟30秒（而不是60秒）
-
-            // 重连调度信息写入日志文件，不输出到控制台
-            log::info!("调度重连 ({}/{}), 将在{}ms后执行 (指数退避)",
-                self.config.reconnect_attempts + 1,
-                self.config.max_reconnect_attempts,
-                actual_delay);
-
-            // 更新配置中的延迟时间
-            self.config.reconnect_delay_ms = actual_delay;
-            return false; // 还未到重连时间
-        }
-
-        // 检查是否到了重连时间
-        if let Some(last_attempt) = self.last_reconnect_attempt {
-            if now.duration_since(last_attempt).as_millis() < self.config.reconnect_delay_ms as u128 {
-                return false; // 还未到重连时间
-            }
-        }
-
-        // 执行重连
         self.config.reconnect_attempts += 1;
-        self.reconnect_scheduled = false;
-
-        // 重连尝试信息写入日志文件，不输出到控制台
-        log::info!("执行重连 ({}/{})", self.config.reconnect_attempts, self.config.max_reconnect_attempts);
+        log::info!("尝试重连 ({}/{})", self.config.reconnect_attempts, self.config.max_reconnect_attempts);
 
         // 重置连接生命周期标志
         self.connection_lifetime_exceeded = false;
 
         match self.connect() {
             Ok(()) => {
-                // 重连成功信息写入日志文件，不输出到控制台
                 log::info!("重连成功");
-                self.last_reconnect_attempt = None;
-                // 重连成功后重置延迟时间
-                self.config.reconnect_delay_ms = 500;
                 true
             }
             Err(e) => {
-                // 重连失败错误写入日志文件，不输出到控制台
                 log::error!("重连失败: {}", e);
                 self.last_error = Some(e.to_string());
-                self.last_reconnect_attempt = Some(now); // 重新调度下次重连
-                self.reconnect_scheduled = true;
                 false
             }
         }
@@ -441,10 +322,21 @@ impl WebSocketConnection {
         self.state == ConnectionState::Connected
     }
 
+    pub fn get_reconnect_attempts(&self) -> u32 {
+        self.config.reconnect_attempts
+    }
+
+    pub fn get_max_reconnect_attempts(&self) -> u32 {
+        self.config.max_reconnect_attempts
+    }
+
+    pub fn get_last_error(&self) -> Option<String> {
+        self.last_error.clone()
+    }
+
     pub fn should_reconnect(&self) -> bool {
-        (matches!(self.state, ConnectionState::Failed | ConnectionState::Disconnected) ||
-         (self.state == ConnectionState::Reconnecting && self.reconnect_scheduled)) &&
-        self.config.reconnect_attempts < self.config.max_reconnect_attempts
+        // 简化重连判断，参照backup实现
+        !self.is_connected() && self.config.reconnect_attempts < self.config.max_reconnect_attempts
     }
 
     pub fn connection_duration(&self) -> Option<std::time::Duration> {

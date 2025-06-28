@@ -2,6 +2,17 @@ use super::connection::{WebSocketConnection, WebSocketConfig, ConnectionStats};
 use serde_json::Value;
 use tungstenite::Message;
 
+/// 连接状态信息
+#[derive(Debug, Clone)]
+pub struct ConnectionStatusInfo {
+    pub is_connected: bool,
+    pub is_reconnecting: bool,
+    pub reconnect_attempts: u32,
+    pub max_attempts: u32,
+    pub total_reconnects: u32,
+    pub last_error: Option<String>,
+}
+
 /// WebSocket管理器 - 高级接口
 pub struct WebSocketManager {
     connection: WebSocketConnection,
@@ -17,8 +28,8 @@ pub struct ManagerStats {
     pub last_message_time: Option<u64>,
     pub connection_errors: u64,
     pub consecutive_errors: u32,
+    pub total_reconnects: u32,
     pub ping_errors: u64,
-    pub total_reconnects: u64,
 }
 
 /// WebSocket健康状态
@@ -75,32 +86,25 @@ impl WebSocketManager {
         }
     }
 
-    /// 读取消息并解析为JSON - 币安优化版本
+    /// 读取消息并解析为JSON - 简化版本，参照backup实现
     pub fn read_messages(&mut self) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
         self.message_buffer.clear();
 
-        // 处理心跳机制（币安模式：等待服务器ping并响应pong）
-        if let Err(e) = self.connection.handle_heartbeat() {
-            self.stats.ping_errors += 1;
-            log::warn!("心跳处理失败 (总计: {}次): {}", self.stats.ping_errors, e);
-            // 心跳失败可能意味着连接问题，但不中断消息读取
-        }
-
-        // 检查连接健康状态
-        if !self.connection.check_health() {
-            // 连接不健康时返回空消息列表，让上层处理重连
+        // 简化连接检查，只检查基本状态
+        if !self.connection.is_connected() {
             return Ok(vec![]);
         }
 
-        // 读取所有可用消息 - 增强错误处理和恢复机制
-        let mut consecutive_errors = 0;
-        const MAX_CONSECUTIVE_ERRORS: u32 = 5;
+        // 简化心跳处理
+        if let Err(_) = self.connection.handle_heartbeat() {
+            // 心跳失败时直接返回空消息，让上层处理重连
+            return Ok(vec![]);
+        }
 
+        // 简化消息读取，参照backup实现
         loop {
             match self.connection.read_message() {
                 Ok(Some(message)) => {
-                    consecutive_errors = 0; // 重置错误计数
-                    self.stats.consecutive_errors = 0;
                     if let Some(json_value) = self.process_message(message) {
                         self.message_buffer.push(json_value);
                         self.stats.messages_buffered += 1;
@@ -108,21 +112,10 @@ impl WebSocketManager {
                 }
                 Ok(None) => break, // 没有更多消息
                 Err(e) => {
-                    consecutive_errors += 1;
                     self.stats.connection_errors += 1;
-                    self.stats.consecutive_errors = consecutive_errors;
-                    log::warn!("读取WebSocket消息时出错 (连续: {}, 总计: {}): {}",
-                        consecutive_errors, self.stats.connection_errors, e);
-
-                    // 如果连续错误过多，停止读取以避免无限循环
-                    if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
-                        log::error!("连续错误过多 ({}次)，停止读取消息", consecutive_errors);
-                        // 标记连接为失败状态，触发重连
-                        self.connection.disconnect();
-                        break;
-                    }
-
-                    // 不使用阻塞延迟，直接跳出循环让主循环处理
+                    log::warn!("读取WebSocket消息时出错: {}", e);
+                    // 出错时直接跳出循环，让上层处理重连
+                    break;
                 }
             }
         }
@@ -257,7 +250,7 @@ impl WebSocketManager {
             is_connected: self.is_connected(),
             consecutive_errors: self.stats.consecutive_errors,
             total_errors: self.stats.connection_errors,
-            total_reconnects: self.stats.total_reconnects,
+            total_reconnects: self.stats.total_reconnects as u64,
             last_error: connection_stats.last_error,
             connection_duration: connection_stats.connection_duration,
             messages_per_second: self.calculate_message_rate(),
@@ -282,6 +275,21 @@ impl WebSocketManager {
             duration.as_secs() >= 23 * 3600
         } else {
             false
+        }
+    }
+
+    /// 获取连接状态信息（包括重连状态）
+    pub fn get_connection_status(&self) -> ConnectionStatusInfo {
+        let state = self.connection.state();
+        let is_reconnecting = matches!(state, super::connection::ConnectionState::Reconnecting);
+
+        ConnectionStatusInfo {
+            is_connected: self.is_connected(),
+            is_reconnecting,
+            reconnect_attempts: self.connection.get_reconnect_attempts(),
+            max_attempts: self.connection.get_max_reconnect_attempts(),
+            total_reconnects: self.stats.total_reconnects,
+            last_error: self.connection.get_last_error(),
         }
     }
 

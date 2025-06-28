@@ -42,7 +42,7 @@ pub struct OrderBookManager {
     // 时间维度足迹数据
     time_footprint_data: TimeFootprintData,
 
-    // Trade Imbalance 500ms滑动窗口数据 (timestamp, is_buy)
+    // Trade Imbalance 200ms滑动窗口数据 (timestamp, is_buy)
     trade_imbalance_window: std::collections::VecDeque<(u64, bool)>,
     // 当前Trade Imbalance值
     current_trade_imbalance: f64,

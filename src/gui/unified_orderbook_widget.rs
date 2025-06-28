@@ -265,11 +265,6 @@ impl UnifiedOrderBookWidget {
 
                         ui.add_space(10.0); // 按钮间距
 
-                        // 价格图表按钮
-                        if ui.button("📈 价格图表").clicked() {
-                            log::info!("价格图表按钮被点击，打开模态窗口");
-                            self.price_chart_modal_open = true;
-                        }
                     });
                 },
             );
@@ -1652,7 +1647,7 @@ impl UnifiedOrderBookWidget {
                     // 绘制基于成交量的圆点 - 使用过滤后的有效数据，只有成交量>=1时才绘制
                     for (i, (_, price, volume, side)) in valid_data.iter() {
                         // 只有成交量大于等于1时才绘制圆点
-                        if *volume >= 0.1 {
+                        if *volume >= 0.01 {
                             // 计算圆点半径（基于成交量）
                             let radius = if volume_range > 0.0 {
                                 let normalized_volume = (volume - min_volume) / volume_range;
@@ -1694,7 +1689,7 @@ impl UnifiedOrderBookWidget {
         });
     }
 
-    /// Y轴价格网格间距器 - 固定1美元间距
+    /// Y轴价格网格间距器 - 固定1美元间距，强制显示刻度
     fn price_grid_spacer_1_dollar(input: egui_plot::GridInput) -> Vec<egui_plot::GridMark> {
         let mut marks = Vec::new();
 
@@ -1705,19 +1700,33 @@ impl UnifiedOrderBookWidget {
         let start_price = input.bounds.0.floor() as i64;
         let end_price = input.bounds.1.ceil() as i64;
 
-        // 生成每1美元的网格标记，不限制数量
+        // 调试信息：打印Y轴边界和刻度范围
+        log::info!("Y轴刻度生成: bounds=({:.2}, {:.2}), start_price={}, end_price={}",
+            input.bounds.0, input.bounds.1, start_price, end_price);
+
+        // 限制刻度数量以避免过多刻度导致显示问题
+        let max_marks = 50usize; // 最多50个刻度
+        let price_range = end_price - start_price;
+        let step = if price_range > max_marks as i64 {
+            (price_range / max_marks as i64).max(1) // 如果范围太大，增加步长
+        } else {
+            1 // 否则保持1美元间距
+        };
+
+        // 生成网格标记
         let mut price = start_price;
-        while price <= end_price {
+        while price <= end_price && marks.len() < max_marks {
             let value = price as f64;
             if value >= input.bounds.0 && value <= input.bounds.1 {
                 marks.push(egui_plot::GridMark {
                     value,
-                    step_size,
+                    step_size: step as f64,
                 });
             }
-            price += 1; // 每次增加1美元
+            price += step; // 按计算的步长增加
         }
 
+        log::info!("Y轴刻度生成完成: 生成了{}个刻度标记，步长={}", marks.len(), step);
         marks
     }
 
@@ -1806,8 +1815,14 @@ impl UnifiedOrderBookWidget {
             let min_volume = volumes.iter().fold(f64::INFINITY, |a, &b| a.min(b));
             let volume_range = max_volume - min_volume;
 
-            let y_min = prices.iter().fold(f64::INFINITY, |a, &b| a.min(b)) - 5.0;
-            let y_max = prices.iter().fold(0.0f64, |a, &b| a.max(b)) + 5.0;
+            let min_price = prices.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+            let max_price = prices.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+            let y_min = min_price - 5.0;
+            let y_max = max_price + 5.0;
+
+            // 调试信息：打印Y轴范围
+            log::info!("嵌入式图表 Y轴范围: min_price={:.2}, max_price={:.2}, y_min={:.2}, y_max={:.2}, 数据点数={}",
+                min_price, max_price, y_min, y_max, prices.len());
 
             // 获取可用的UI区域高度，确保图表严格遵守高度限制
             let available_height = ui.available_height();
@@ -1819,18 +1834,28 @@ impl UnifiedOrderBookWidget {
                 egui::Layout::top_down(egui::Align::LEFT),
                 |ui| {
                     // 创建嵌入式图表 - 移除view_aspect以避免高度冲突，添加固定1美元Y轴刻度，移除margin
+                    // 设置固定的X轴显示窗口，只显示最近的1000个数据点，防止数据增多时图表缩小
+                    let display_window_size = 1000.0; // 固定显示窗口大小
+                    let data_len = valid_data.len() as f64;
+                    let x_min = if data_len > display_window_size {
+                        data_len - display_window_size // 显示最近的1000个点
+                    } else {
+                        0.0 // 如果数据不足1000个，从0开始显示
+                    };
+                    let x_max = data_len.max(display_window_size); // 确保X轴范围至少为1000
+
                     let plot = Plot::new("embedded_price_chart")
+                        .width(ui.available_width()) // 明确设置图表宽度占满可用宽度
                         .height(chart_height) // 明确设置图表高度
                         .show_axes([true, true])
                         .show_grid([true, true]) // 启用网格显示
-                        .allow_zoom(true)
-                        .allow_drag(true)
-                        .allow_scroll(true)
-                        .include_x(0.0)
-                        .include_x(valid_data.len() as f64)
+                        .allow_zoom(true) // 重新启用缩放
+                        .allow_drag(true) // 重新启用拖拽
+                        .allow_scroll(true) // 重新启用滚动
+                        .include_x(x_min) // 使用固定窗口的起始位置
+                        .include_x(x_max) // 使用固定窗口的结束位置
                         .include_y(y_min)
                         .include_y(y_max)
-                        .y_grid_spacer(Self::price_grid_spacer_1_dollar) // 设置1美元固定间距
                         .y_axis_formatter(|y, _range, _ctx| {
                             format!("{:.0}", y.value) // 格式化Y轴为整数
                         });
@@ -1847,7 +1872,7 @@ impl UnifiedOrderBookWidget {
                         // 绘制基于成交量的圆点 - 使用过滤后的有效数据，只有成交量>=1时才绘制
                         for (i, (_, price, volume, side)) in valid_data.iter() {
                             // 只有成交量大于等于1时才绘制圆点
-                            if *volume >= 1.0 {
+                            if *volume >= 0.01 {
                                 // 计算圆点半径（基于成交量）
                                 let radius = if volume_range > 0.0 {
                                     let normalized_volume = (volume - min_volume) / volume_range;
@@ -1992,10 +2017,18 @@ impl UnifiedOrderBookWidget {
             });
     }
 
-    /// 渲染Trade Imbalance指标
+    /// 渲染Trade Imbalance指标 - 基于500ms滑动窗口的tick trade数据
     fn render_trade_imbalance(&mut self, ui: &mut egui::Ui, app: &crate::app::reactive_app::ReactiveApp) {
-        // 获取Trade Imbalance数据
+        // 获取Trade Imbalance数据 - 从orderbook manager获取实时计算的TI值
         let trade_imbalance = app.get_orderbook_manager().get_trade_imbalance();
+
+        // 计算买单和卖单的比例（用于可视化显示）
+        let buy_ratio = if trade_imbalance >= 0.0 {
+            (trade_imbalance + 1.0) / 2.0 // 将[-1,1]映射到[0,1]，正值时买单比例更高
+        } else {
+            0.5 + trade_imbalance / 2.0 // 负值时买单比例较低
+        };
+        let sell_ratio = 1.0 - buy_ratio;
 
         // 创建带边框的面板 - 移除左边距以与上方组件左对齐
         egui::Frame::none()
@@ -2011,18 +2044,21 @@ impl UnifiedOrderBookWidget {
                 ui.vertical(|ui| {
                     // 标题
                     ui.horizontal(|ui| {
-                        ui.colored_label(egui::Color32::WHITE, "⚖️ Trade Imbalance (500ms)");
+                        ui.colored_label(egui::Color32::WHITE, "⚖️ Trade Imbalance (500ms滑动窗口)");
                     });
 
                     ui.add_space(5.0);
 
-                    // 显示TI数值和百分比
+                    // 显示TI数值和买卖比例
                     ui.horizontal(|ui| {
                         ui.colored_label(egui::Color32::LIGHT_BLUE,
                             format!("TI: {:.3}", trade_imbalance));
                         ui.separator();
-                        ui.colored_label(egui::Color32::GRAY,
-                            format!("({:.1}%)", trade_imbalance * 100.0));
+                        ui.colored_label(egui::Color32::from_rgb(120, 255, 120),
+                            format!("买单: {:.1}%", buy_ratio * 100.0));
+                        ui.separator();
+                        ui.colored_label(egui::Color32::from_rgb(255, 120, 120),
+                            format!("卖单: {:.1}%", sell_ratio * 100.0));
                     });
 
                     ui.add_space(8.0);
@@ -2037,44 +2073,34 @@ impl UnifiedOrderBookWidget {
                         |ui| {
                             let rect = ui.available_rect_before_wrap();
 
-                            // 计算条形图的位置和宽度
-                            let center_x = rect.min.x + available_width * 0.5;
-                            let bar_width = (trade_imbalance.abs() as f32 * available_width * 0.5);
+                            // 计算买单和卖单条形图的宽度 - 与Orderbook Imbalance显示效果一致
+                            let buy_width = available_width * buy_ratio as f32;
+                            let sell_width = available_width * sell_ratio as f32;
 
-                            // 绘制背景（中性区域）
-                            ui.painter().rect_filled(rect, 2.0, egui::Color32::from_rgb(40, 40, 50));
-
-                            // 绘制Trade Imbalance条形图
-                            if trade_imbalance > 0.0 {
-                                // 正值：买单多于卖单，绿色条形图向右
+                            // 绘制买单条形图（绿色，从左边开始）
+                            if buy_width > 1.0 {
                                 let buy_rect = egui::Rect::from_min_size(
-                                    egui::Pos2::new(center_x, rect.min.y),
-                                    egui::Vec2::new(bar_width, bar_height)
+                                    rect.min,
+                                    egui::Vec2::new(buy_width, bar_height)
                                 );
                                 ui.painter().rect_filled(buy_rect, 2.0, egui::Color32::from_rgb(120, 255, 120));
-                            } else if trade_imbalance < 0.0 {
-                                // 负值：卖单多于买单，红色条形图向左
+                            }
+
+                            // 绘制卖单条形图（红色，从右边开始）
+                            if sell_width > 1.0 {
                                 let sell_rect = egui::Rect::from_min_size(
-                                    egui::Pos2::new(center_x - bar_width, rect.min.y),
-                                    egui::Vec2::new(bar_width, bar_height)
+                                    egui::Pos2::new(rect.max.x - sell_width, rect.min.y),
+                                    egui::Vec2::new(sell_width, bar_height)
                                 );
                                 ui.painter().rect_filled(sell_rect, 2.0, egui::Color32::from_rgb(255, 120, 120));
                             }
 
                             // 绘制中心分割线
+                            let center_x = rect.min.x + available_width * 0.5;
                             ui.painter().line_segment(
                                 [egui::Pos2::new(center_x, rect.min.y), egui::Pos2::new(center_x, rect.max.y)],
-                                egui::Stroke::new(2.0, egui::Color32::WHITE)
+                                egui::Stroke::new(1.0, egui::Color32::WHITE)
                             );
-
-                            // 绘制刻度线（-1, -0.5, 0, 0.5, 1）
-                            for &scale in &[-1.0, -0.5, 0.5, 1.0] {
-                                let x = center_x + scale * available_width * 0.5;
-                                ui.painter().line_segment(
-                                    [egui::Pos2::new(x, rect.min.y), egui::Pos2::new(x, rect.min.y + 5.0)],
-                                    egui::Stroke::new(1.0, egui::Color32::GRAY)
-                                );
-                            }
 
                             // 占用整个区域以防止其他元素覆盖
                             ui.allocate_rect(rect, egui::Sense::hover());
@@ -2083,14 +2109,15 @@ impl UnifiedOrderBookWidget {
 
                     ui.add_space(5.0);
 
-                    // 显示交易压力指示
-                    let (pressure_text, pressure_color) = if trade_imbalance > 0.3 {
+                    // 显示交易压力指示 - 基于买卖比例差值
+                    let imbalance = buy_ratio - sell_ratio; // 计算不平衡程度
+                    let (pressure_text, pressure_color) = if imbalance > 0.3 {
                         ("🟢 强买压", egui::Color32::from_rgb(120, 255, 120))
-                    } else if trade_imbalance > 0.1 {
+                    } else if imbalance > 0.1 {
                         ("🟡 轻买压", egui::Color32::from_rgb(255, 255, 120))
-                    } else if trade_imbalance < -0.3 {
+                    } else if imbalance < -0.3 {
                         ("🔴 强卖压", egui::Color32::from_rgb(255, 120, 120))
-                    } else if trade_imbalance < -0.1 {
+                    } else if imbalance < -0.1 {
                         ("🟠 轻卖压", egui::Color32::from_rgb(255, 180, 120))
                     } else {
                         ("⚪ 均衡", egui::Color32::GRAY)
@@ -2099,7 +2126,7 @@ impl UnifiedOrderBookWidget {
                     ui.horizontal(|ui| {
                         ui.colored_label(pressure_color, pressure_text);
                         ui.colored_label(egui::Color32::GRAY,
-                            format!("(500ms窗口)"));
+                            format!("(差值: {:.1}%)", imbalance * 100.0));
                     });
                 });
             });

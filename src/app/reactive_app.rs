@@ -153,12 +153,16 @@ impl ReactiveApp {
             }
         }
 
-        // 2. 读取WebSocket消息并转换为事件
+        // 2. 读取WebSocket消息并转换为事件 - 简化版本，参照backup实现
         if self.websocket_manager.is_connected() {
             self.process_websocket_messages();
         } else if self.websocket_manager.should_reconnect() {
-            // 简化重连逻辑，避免复杂的健康检查
-            let _ = self.websocket_manager.attempt_reconnect();
+            // 简化重连逻辑，参照backup实现
+            if let Err(e) = self.websocket_manager.attempt_reconnect() {
+                log::warn!("重连失败: {}", e);
+            } else {
+                log::info!("重连成功");
+            }
         }
 
         // 2. 处理事件队列
@@ -189,38 +193,18 @@ impl ReactiveApp {
         self.last_update = Instant::now();
     }
 
-    /// 处理WebSocket消息 - 带断路器保护的版本
+    /// 处理WebSocket消息 - 简化版本，参照backup实现
     fn process_websocket_messages(&mut self) {
-        // 检查断路器状态
-        if self.circuit_breaker_open {
-            // 检查是否可以尝试恢复
-            if let Some(last_failure) = self.circuit_breaker_last_failure {
-                if last_failure.elapsed() > Duration::from_secs(30) {
-                    // 30秒后尝试恢复
-                    self.circuit_breaker_open = false;
-                    self.circuit_breaker_failures = 0;
-                    log::info!("断路器恢复，尝试重新处理WebSocket消息");
-                } else {
-                    // 断路器仍然开启，跳过处理
-                    return;
-                }
-            }
-        }
-
-        // 尝试读取消息，带错误处理
+        // 简化消息处理，移除复杂的断路器逻辑
         match self.websocket_manager.read_messages() {
             Ok(messages) => {
                 if !messages.is_empty() {
                     self.last_data_received = Some(Instant::now());
-                    // 重置断路器失败计数
-                    self.circuit_breaker_failures = 0;
-
-                    // 更新消息计数器
                     self.total_messages_processed += messages.len() as u64;
 
-                    // 添加调试日志，限制频率（每100次记录一次）
-                    if self.total_messages_processed % 100 == 0 {
-                        log::info!("收到 {} 条WebSocket消息 (总计: {})", messages.len(), self.total_messages_processed);
+                    // 减少日志频率
+                    if self.total_messages_processed % 1000 == 0 {
+                        log::debug!("收到 {} 条WebSocket消息 (总计: {})", messages.len(), self.total_messages_processed);
                     }
                 }
 
@@ -244,17 +228,8 @@ impl ReactiveApp {
                 }
             }
             Err(e) => {
-                // 记录错误并更新断路器状态
-                self.circuit_breaker_failures += 1;
-                self.circuit_breaker_last_failure = Some(Instant::now());
-
-                log::warn!("WebSocket消息处理失败 (失败次数: {}): {}", self.circuit_breaker_failures, e);
-
-                // 如果失败次数过多，打开断路器
-                if self.circuit_breaker_failures >= 5 {
-                    self.circuit_breaker_open = true;
-                    log::error!("WebSocket断路器打开，暂停消息处理30秒");
-                }
+                // 简化错误处理，参照backup实现
+                log::warn!("WebSocket消息处理失败: {}", e);
             }
         }
     }
@@ -581,6 +556,11 @@ impl ReactiveApp {
             manager_stats.connection_errors,
             manager_stats.consecutive_errors
         )
+    }
+
+    /// 获取WebSocket连接状态信息
+    pub fn get_connection_status(&self) -> crate::websocket::manager::ConnectionStatusInfo {
+        self.websocket_manager.get_connection_status()
     }
 
     // Getter方法
