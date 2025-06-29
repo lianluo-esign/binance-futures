@@ -5,6 +5,7 @@ use serde_json::Value;
 use super::data_structures::*;
 use super::order_flow::OrderFlow;
 use crate::gui::TimeFootprintData;
+use crate::audio::play_tick_pressure_sound;
 
 /// 订单簿管理器 - 简化版本，专注于核心功能
 pub struct OrderBookManager {
@@ -42,10 +43,14 @@ pub struct OrderBookManager {
     // 时间维度足迹数据
     time_footprint_data: TimeFootprintData,
 
-    // Trade Imbalance 200ms滑动窗口数据 (timestamp, is_buy)
-    trade_imbalance_window: std::collections::VecDeque<(u64, bool)>,
-    // 当前Trade Imbalance值
+    // 当前Trade Imbalance值（基于最近10笔交易）
     current_trade_imbalance: f64,
+
+    // ΔTick Pressure检测相关（同时用于Trade Imbalance计算）
+    tick_pressure_window: std::collections::VecDeque<TickData>, // Tick数据滑动窗口
+    tick_pressure_signals: std::collections::VecDeque<String>, // 信号文本滑动窗口，容量512
+    tick_pressure_k_value: usize, // 连续K笔设置，默认7
+    tick_pressure_signal_capacity: usize, // 信号窗口容量，默认512
 
     // 历史数据重置跟踪
     last_history_reset_date: u32, // 存储上次重置的UTC日期（YYYYMMDD格式）
@@ -81,8 +86,14 @@ impl OrderBookManager {
             last_trade_volume: None,
 
             time_footprint_data: TimeFootprintData::new(30), // 30分钟滑动窗口
-            trade_imbalance_window: std::collections::VecDeque::new(),
             current_trade_imbalance: 0.0,
+
+            // 初始化ΔTick Pressure相关字段（同时用于Trade Imbalance计算）
+            tick_pressure_window: std::collections::VecDeque::new(),
+            tick_pressure_signals: std::collections::VecDeque::new(),
+            tick_pressure_k_value: 3, // 默认3笔
+            tick_pressure_signal_capacity: 512, // 默认512容量
+
             last_history_reset_date: 0, // 初始化为0，表示还未重置过
         }
     }
@@ -149,8 +160,13 @@ impl OrderBookManager {
             data["m"].as_bool(),
         ) {
             if let (Ok(price), Ok(qty)) = (price_str.parse::<f64>(), qty_str.parse::<f64>()) {
+                // 跳过无效的交易数据
+                if price <= 0.0 || qty <= 0.0 {
+                    return;
+                }
+
                 let side = if is_buyer_maker { "sell" } else { "buy" };
-                
+
                 // 更新当前价格
                 self.current_price = Some(price);
 
@@ -168,8 +184,8 @@ impl OrderBookManager {
                 // 更新时间维度足迹数据
                 self.time_footprint_data.add_trade(price, side, qty, current_time);
 
-                // 更新Trade Imbalance滑动窗口
-                self.update_trade_imbalance(current_time, side == "buy");
+                // 更新ΔTick Pressure检测（同时更新Trade Imbalance）
+                self.update_tick_pressure_detection(current_time, price, qty, side == "buy");
 
                 // 计算价格速度和波动率
                 self.calculate_price_speed(current_time);
@@ -518,27 +534,26 @@ impl OrderBookManager {
         (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
     }
 
-    /// 更新Trade Imbalance滑动窗口（500ms）
-    fn update_trade_imbalance(&mut self, current_time: u64, is_buy: bool) {
-        // 添加新的交易记录
-        self.trade_imbalance_window.push_back((current_time, is_buy));
+    /// 基于最近10笔交易更新Trade Imbalance
+    fn update_trade_imbalance_from_ticks(&mut self) {
+        // 取最近10笔交易
+        let recent_trades: Vec<&TickData> = self.tick_pressure_window
+            .iter()
+            .rev()
+            .take(10)
+            .collect();
 
-        // 移除500ms之前的数据
-        let window_start = current_time.saturating_sub(500); // 500ms窗口
-        while let Some(&(timestamp, _)) = self.trade_imbalance_window.front() {
-            if timestamp < window_start {
-                self.trade_imbalance_window.pop_front();
-            } else {
-                break;
-            }
+        if recent_trades.is_empty() {
+            self.current_trade_imbalance = 0.0;
+            return;
         }
 
         // 计算Trade Imbalance: TI = (#BuyTrades - #SellTrades) / TotalTrades
         let mut buy_count = 0;
         let mut sell_count = 0;
 
-        for &(_, is_buy_trade) in &self.trade_imbalance_window {
-            if is_buy_trade {
+        for trade in &recent_trades {
+            if trade.is_buy {
                 buy_count += 1;
             } else {
                 sell_count += 1;
@@ -565,8 +580,162 @@ impl OrderBookManager {
         self.current_price = None;
         self.bookticker_snapshot = None;
         self.market_snapshot = MarketSnapshot::new();
-        self.trade_imbalance_window.clear();
         self.current_trade_imbalance = 0.0;
+        self.tick_pressure_window.clear();
+        self.tick_pressure_signals.clear();
+    }
+
+    /// 更新ΔTick Pressure检测
+    fn update_tick_pressure_detection(&mut self, timestamp: u64, price: f64, volume: f64, is_buy: bool) {
+        // 过滤掉无效的volume数据
+        if volume <= 0.0 {
+            return;
+        }
+
+        // 添加新的Tick数据
+        let tick_data = TickData {
+            timestamp,
+            price,
+            volume,
+            is_buy,
+        };
+        self.tick_pressure_window.push_back(tick_data);
+
+        // 保持窗口大小，保留足够的数据用于两个模块的检测
+        // 需要保留更多数据：ΔTick Pressure需要K*2，Trade Imbalance需要10笔
+        let max_needed = (self.tick_pressure_k_value * 2).max(10);
+        while self.tick_pressure_window.len() > max_needed {
+            self.tick_pressure_window.pop_front();
+        }
+
+        // 更新Trade Imbalance（基于最近10笔交易）
+        self.update_trade_imbalance_from_ticks();
+
+        // 检测连续K笔成交量方向一致且价位递增/递减
+        if self.tick_pressure_window.len() >= self.tick_pressure_k_value {
+            self.detect_tick_pressure_signal(timestamp);
+        }
+    }
+
+    /// 检测ΔTick Pressure信号
+    fn detect_tick_pressure_signal(&mut self, timestamp: u64) {
+        let window_len = self.tick_pressure_window.len();
+        if window_len < self.tick_pressure_k_value {
+            return;
+        }
+
+        // 检查最近K笔交易
+        let recent_ticks: Vec<&TickData> = self.tick_pressure_window
+            .iter()
+            .rev()
+            .take(self.tick_pressure_k_value)
+            .collect();
+
+        // 检查方向一致性
+        let first_is_buy = recent_ticks[0].is_buy;
+        let direction_consistent = recent_ticks.iter().all(|tick| tick.is_buy == first_is_buy);
+
+        if !direction_consistent {
+            return;
+        }
+
+        // 检查价格递增/递减
+        let mut price_trend_consistent = true;
+        let mut is_ascending = true;
+
+        if recent_ticks.len() >= 2 {
+            // 确定趋势方向（基于前两笔交易）
+            is_ascending = recent_ticks[1].price < recent_ticks[0].price;
+
+            // 检查所有交易是否符合趋势
+            for i in 1..recent_ticks.len() {
+                let current_price = recent_ticks[i - 1].price;
+                let prev_price = recent_ticks[i].price;
+
+                if is_ascending && current_price <= prev_price {
+                    price_trend_consistent = false;
+                    break;
+                } else if !is_ascending && current_price >= prev_price {
+                    price_trend_consistent = false;
+                    break;
+                }
+            }
+        }
+
+        if !price_trend_consistent {
+            return;
+        }
+
+        // 生成信号
+        let direction_str = if is_ascending { "上涨" } else { "下跌" };
+        let side_str = if first_is_buy { "买单" } else { "卖单" };
+        let total_volume: f64 = recent_ticks.iter().map(|tick| tick.volume).sum();
+
+        // 如果总量为0，跳过信号生成
+        if total_volume <= 0.0 {
+            return;
+        }
+
+        let price_start = recent_ticks.last().unwrap().price;
+        let price_end = recent_ticks.first().unwrap().price;
+        let price_change = ((price_end - price_start) / price_start * 100.0).abs();
+
+        // 判断信号类型
+        let signal_type = if total_volume >= 10.0 && price_change >= 0.05 {
+            "点火检测"
+        } else {
+            "动量跟随"
+        };
+
+        // 格式化时间
+        let time_str = self.format_timestamp(timestamp);
+
+        let signal_text = format!(
+            "[{}] {} - {} {} 连续{}笔 价格{:.2}->{:.2} 总量{:.4}",
+            time_str,
+            signal_type,
+            side_str,
+            direction_str,
+            self.tick_pressure_k_value, // 使用K值设置
+            price_start,
+            price_end,
+            total_volume
+        );
+
+        // 播放音效
+        play_tick_pressure_sound(first_is_buy);
+
+        // 添加到信号窗口
+        self.tick_pressure_signals.push_front(signal_text);
+
+        // 维护信号窗口容量
+        while self.tick_pressure_signals.len() > self.tick_pressure_signal_capacity {
+            self.tick_pressure_signals.pop_back();
+        }
+    }
+
+    /// 格式化时间戳为可读格式
+    fn format_timestamp(&self, timestamp: u64) -> String {
+        use std::time::{SystemTime, UNIX_EPOCH, Duration};
+
+        let system_time = UNIX_EPOCH + Duration::from_millis(timestamp);
+        let datetime = chrono::DateTime::<chrono::Utc>::from(system_time);
+        datetime.format("%H:%M:%S%.3f").to_string()
+    }
+
+    /// 获取ΔTick Pressure信号列表
+    pub fn get_tick_pressure_signals(&self) -> &std::collections::VecDeque<String> {
+        &self.tick_pressure_signals
+    }
+
+    /// 设置ΔTick Pressure的K值
+    pub fn set_tick_pressure_k_value(&mut self, k: usize) {
+        self.tick_pressure_k_value = k.max(3).min(20); // 限制在3-20之间
+    }
+
+    /// 获取当前K值设置
+    pub fn get_tick_pressure_k_value(&self) -> usize {
+        self.tick_pressure_k_value
     }
 }
 

@@ -47,6 +47,27 @@ pub struct BigOrder {
     pub timestamp: u64,
 }
 
+/// Tick Pressure信号数据结构
+#[derive(Debug, Clone)]
+pub struct TickPressureSignal {
+    pub timestamp: u64,
+    pub signal_type: String, // "点火检测" 或 "短冲量跟随"
+    pub direction: String,   // "上涨" 或 "下跌"
+    pub tick_count: usize,   // 连续tick数量
+    pub price_start: f64,    // 起始价格
+    pub price_end: f64,      // 结束价格
+    pub volume_total: f64,   // 总成交量
+}
+
+/// 单个Tick数据
+#[derive(Debug, Clone)]
+pub struct TickData {
+    pub timestamp: u64,
+    pub price: f64,
+    pub volume: f64,
+    pub is_buy: bool, // true为买单，false为卖单
+}
+
 /// 订单冲击信号数据结构
 #[derive(Debug, Clone)]
 pub struct OrderImpactSignal {

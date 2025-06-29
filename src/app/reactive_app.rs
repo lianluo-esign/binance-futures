@@ -1044,6 +1044,16 @@ impl ReactiveApp {
 
         aggregated
     }
+
+    /// 设置ΔTick Pressure的K值
+    pub fn set_tick_pressure_k_value(&mut self, k: usize) {
+        self.orderbook_manager.set_tick_pressure_k_value(k);
+    }
+
+    /// 获取ΔTick Pressure的K值
+    pub fn get_tick_pressure_k_value(&self) -> usize {
+        self.orderbook_manager.get_tick_pressure_k_value()
+    }
 }
 
 /// 应用程序统计信息

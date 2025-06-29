@@ -133,7 +133,7 @@ impl TimeFootprintChart {
         let plot = Plot::new("time_footprint_chart")
             .legend(egui_plot::Legend::default().position(egui_plot::Corner::LeftTop))
             .show_axes([true, true])
-            .show_grid([true, true])
+            .show_grid([false, false])
             .allow_zoom(true)
             .allow_drag(true)
             .allow_scroll(true)

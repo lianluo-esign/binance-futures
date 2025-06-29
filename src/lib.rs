@@ -10,6 +10,7 @@ pub mod websocket;
 pub mod app;
 pub mod monitoring;
 pub mod gui;
+pub mod audio;
 
 // 重新导出主要类型
 pub use core::RingBuffer;

@@ -105,6 +105,27 @@ impl eframe::App for TradingGUI {
                 // 性能指标
                 let stats = self.app.get_stats();
                 ui.label(format!("事件/秒: {:.1}", stats.events_processed_per_second));
+
+                // RingBuffer容量使用情况
+                ui.separator();
+                let (current_usage, max_capacity) = self.app.get_buffer_usage();
+                let usage_percentage = if max_capacity > 0 {
+                    (current_usage as f64 / max_capacity as f64 * 100.0)
+                } else {
+                    0.0
+                };
+
+                // 根据使用率选择颜色
+                let usage_color = if usage_percentage >= 90.0 {
+                    egui::Color32::from_rgb(255, 100, 100) // 红色 - 高使用率
+                } else if usage_percentage >= 70.0 {
+                    egui::Color32::from_rgb(255, 200, 100) // 橙色 - 中等使用率
+                } else {
+                    egui::Color32::from_rgb(120, 255, 120) // 绿色 - 低使用率
+                };
+
+                ui.colored_label(usage_color,
+                    format!("缓冲区: {}/{} ({:.1}%)", current_usage, max_capacity, usage_percentage));
             });
         });
         

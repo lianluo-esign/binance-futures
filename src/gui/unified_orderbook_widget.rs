@@ -55,10 +55,8 @@ pub struct UnifiedOrderBookWidget {
     max_price_history: usize,
     /// 价格图表固定高度（像素值）
     price_chart_height: f32,
-    /// Trade Imbalance 500ms滑动窗口数据 (timestamp, buy_count, sell_count)
-    trade_imbalance_window: std::collections::VecDeque<(u64, u32, u32)>,
-    /// 当前Trade Imbalance值
-    current_trade_imbalance: f64,
+    /// ΔTick Pressure K值设置
+    tick_pressure_k_value: usize,
 }
 
 impl Default for UnifiedOrderBookWidget {
@@ -80,8 +78,7 @@ impl Default for UnifiedOrderBookWidget {
             price_history: std::collections::VecDeque::with_capacity(10000),
             max_price_history: 10000,
             price_chart_height: 200.0, // 默认高度300像素
-            trade_imbalance_window: std::collections::VecDeque::new(),
-            current_trade_imbalance: 0.0,
+            tick_pressure_k_value: 5, // 默认5笔
         }
     }
 }
@@ -310,7 +307,7 @@ impl UnifiedOrderBookWidget {
                         egui::Layout::top_down(egui::Align::LEFT),
                         |ui| {
                             // 上半部分：实时价格图表 - 使用固定高度
-                            let chart_height = self.price_chart_height.min(content_height - 200.0); // 确保至少留200像素给两个指标区域
+                            let chart_height = self.price_chart_height.min(content_height - 200.0); // 确保至少留200像素给前两个指标区域
                             if chart_height > 0.0 {
                                 ui.allocate_ui_with_layout(
                                     egui::Vec2::new(total_width * 0.5, chart_height),
@@ -331,13 +328,23 @@ impl UnifiedOrderBookWidget {
                                 },
                             );
 
-                            // 下半部分：Trade Imbalance指标 - 固定高度100像素
+                            // 中间部分：Trade Imbalance指标 - 固定高度100像素
                             let trade_imbalance_height = 100.0;
                             ui.allocate_ui_with_layout(
                                 egui::Vec2::new(total_width * 0.5, trade_imbalance_height),
                                 egui::Layout::top_down(egui::Align::LEFT),
                                 |ui| {
                                     self.render_trade_imbalance(ui, app);
+                                },
+                            );
+
+                            // 下半部分：ΔTick Pressure指标 - 占满剩余高度
+                            let remaining_height = ui.available_height();
+                            ui.allocate_ui_with_layout(
+                                egui::Vec2::new(total_width * 0.5, remaining_height),
+                                egui::Layout::top_down(egui::Align::LEFT),
+                                |ui| {
+                                    self.render_tick_pressure(ui, app);
                                 },
                             );
                         },
@@ -1622,7 +1629,7 @@ impl UnifiedOrderBookWidget {
                 let plot = Plot::new("price_chart_modal")
                     .view_aspect(2.0)
                     .show_axes([true, true])
-                    .show_grid([true, true]) // 启用网格显示
+                    .show_grid([false, false]) // 禁用网格显示
                     .allow_zoom(true)
                     .allow_drag(true)
                     .allow_scroll(true)
@@ -1848,7 +1855,7 @@ impl UnifiedOrderBookWidget {
                         .width(ui.available_width()) // 明确设置图表宽度占满可用宽度
                         .height(chart_height) // 明确设置图表高度
                         .show_axes([true, true])
-                        .show_grid([true, true]) // 启用网格显示
+                        .show_grid([false, false]) // 禁用网格显示
                         .allow_zoom(true) // 重新启用缩放
                         .allow_drag(true) // 重新启用拖拽
                         .allow_scroll(true) // 重新启用滚动
@@ -2017,7 +2024,7 @@ impl UnifiedOrderBookWidget {
             });
     }
 
-    /// 渲染Trade Imbalance指标 - 基于500ms滑动窗口的tick trade数据
+    /// 渲染Trade Imbalance指标 - 基于最近10笔交易的tick数据
     fn render_trade_imbalance(&mut self, ui: &mut egui::Ui, app: &crate::app::reactive_app::ReactiveApp) {
         // 获取Trade Imbalance数据 - 从orderbook manager获取实时计算的TI值
         let trade_imbalance = app.get_orderbook_manager().get_trade_imbalance();
@@ -2044,7 +2051,7 @@ impl UnifiedOrderBookWidget {
                 ui.vertical(|ui| {
                     // 标题
                     ui.horizontal(|ui| {
-                        ui.colored_label(egui::Color32::WHITE, "⚖️ Trade Imbalance (500ms滑动窗口)");
+                        ui.colored_label(egui::Color32::WHITE, "⚖️ Trade Imbalance (最近10笔)");
                     });
 
                     ui.add_space(5.0);
@@ -2128,6 +2135,75 @@ impl UnifiedOrderBookWidget {
                         ui.colored_label(egui::Color32::GRAY,
                             format!("(差值: {:.1}%)", imbalance * 100.0));
                     });
+                });
+            });
+    }
+
+    /// 渲染ΔTick Pressure指标 - 显示连续K笔成交量方向一致且价位递增/递减的信号
+    fn render_tick_pressure(&mut self, ui: &mut egui::Ui, app: &crate::app::reactive_app::ReactiveApp) {
+        // 获取ΔTick Pressure信号数据
+        let signals = app.get_orderbook_manager().get_tick_pressure_signals();
+        let current_k_value = app.get_orderbook_manager().get_tick_pressure_k_value();
+
+        // 创建带边框的面板
+        egui::Frame::none()
+            .fill(egui::Color32::from_rgb(25, 25, 35))
+            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(60, 60, 80)))
+            .inner_margin(egui::Margin {
+                left: 0.0,    // 移除左边距以与上方组件对齐
+                right: 8.0,   // 保持右边距
+                top: 8.0,     // 保持上边距
+                bottom: 8.0,  // 保持下边距
+            })
+            .show(ui, |ui| {
+                ui.vertical(|ui| {
+                    // 标题和设置
+                    ui.horizontal(|ui| {
+                        ui.colored_label(egui::Color32::WHITE, "⚡ ΔTick Pressure");
+                        ui.separator();
+
+                        // K值设置滑块
+                        ui.label("K值:");
+                        let mut k_value = self.tick_pressure_k_value;
+                        if ui.add(egui::Slider::new(&mut k_value, 3..=15)
+                            .suffix("笔")
+                            .step_by(1.0)).changed() {
+                            self.tick_pressure_k_value = k_value;
+                            // 注意：这里无法直接更新ReactiveApp中的K值
+                            // 在实际应用中，可能需要通过事件系统或回调来实现
+                        }
+                    });
+
+                    ui.add_space(5.0);
+
+                    // 信号显示区域 - 使用滚动区域
+                    egui::ScrollArea::vertical()
+                        .max_height(ui.available_height() - 10.0)
+                        .show(ui, |ui| {
+                            if signals.is_empty() {
+                                ui.centered_and_justified(|ui| {
+                                    ui.colored_label(egui::Color32::GRAY, "等待Tick Pressure信号...");
+                                });
+                            } else {
+                                // 显示信号列表，最新的在最上面
+                                for signal in signals.iter() {
+                                    ui.horizontal_wrapped(|ui| {
+                                        // 根据买单/卖单选择颜色
+                                        let signal_color = if signal.contains("买单") {
+                                            egui::Color32::from_rgb(100, 255, 100) // 绿色 - 买单冲击
+                                        } else if signal.contains("卖单") {
+                                            egui::Color32::from_rgb(255, 100, 100) // 红色 - 卖单冲击
+                                        } else {
+                                            egui::Color32::WHITE // 默认白色
+                                        };
+
+                                        // 显示信号文本
+                                        ui.colored_label(signal_color, signal);
+                                    });
+                                    ui.separator();
+                                }
+                            }
+                        });
                 });
             });
     }
