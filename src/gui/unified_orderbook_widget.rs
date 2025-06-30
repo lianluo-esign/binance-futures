@@ -2187,24 +2187,110 @@ impl UnifiedOrderBookWidget {
                             } else {
                                 // 显示信号列表，最新的在最上面
                                 for signal in signals.iter() {
-                                    ui.horizontal_wrapped(|ui| {
-                                        // 根据买单/卖单选择颜色
-                                        let signal_color = if signal.contains("买单") {
-                                            egui::Color32::from_rgb(100, 255, 100) // 绿色 - 买单冲击
-                                        } else if signal.contains("卖单") {
-                                            egui::Color32::from_rgb(255, 100, 100) // 红色 - 卖单冲击
+                                    // 解析信号文本中的总量值
+                                    let total_volume = self.extract_total_volume_from_signal(signal);
+                                    let has_significant_volume = total_volume >= 1.0;
+                                    let is_buy_signal = signal.contains("买单");
+                                    let is_sell_signal = signal.contains("卖单");
+
+                                    if has_significant_volume && (is_buy_signal || is_sell_signal) {
+                                        // 总量>=1时根据买单/卖单类型设置背景颜色
+                                        let background_color = if is_buy_signal {
+                                            egui::Color32::from_rgb(0, 128, 0) // 买单：绿色背景
                                         } else {
-                                            egui::Color32::WHITE // 默认白色
+                                            egui::Color32::from_rgb(128, 0, 0) // 卖单：红色背景
                                         };
 
-                                        // 显示信号文本
-                                        ui.colored_label(signal_color, signal);
-                                    });
+                                        egui::Frame::none()
+                                            .fill(background_color)
+                                            .inner_margin(egui::Margin::same(4.0))
+                                            .rounding(egui::Rounding::same(3.0))
+                                            .show(ui, |ui| {
+                                                ui.horizontal_wrapped(|ui| {
+                                                    // 使用白色字体
+                                                    ui.colored_label(egui::Color32::WHITE, signal);
+                                                });
+                                            });
+                                    } else {
+                                        // 总量<1时使用原来的颜色方案
+                                        ui.horizontal_wrapped(|ui| {
+                                            // 根据买单/卖单选择颜色
+                                            let signal_color = if signal.contains("买单") {
+                                                egui::Color32::from_rgb(100, 255, 100) // 绿色 - 买单冲击
+                                            } else if signal.contains("卖单") {
+                                                egui::Color32::from_rgb(255, 100, 100) // 红色 - 卖单冲击
+                                            } else {
+                                                egui::Color32::WHITE // 默认白色
+                                            };
+
+                                            // 显示信号文本
+                                            ui.colored_label(signal_color, signal);
+                                        });
+                                    }
                                     ui.separator();
                                 }
                             }
                         });
                 });
             });
+    }
+
+    /// 从信号文本中提取总量值
+    /// 信号格式: "[时间] 信号类型 - 买单/卖单 方向 连续X笔 价格A->B 总量C"
+    fn extract_total_volume_from_signal(&self, signal: &str) -> f64 {
+        // 查找"总量"关键字
+        if let Some(volume_start) = signal.find("总量") {
+            // 从"总量"后开始提取数字
+            let volume_part = &signal[volume_start + "总量".len()..];
+
+            // 提取数字部分（直到遇到非数字字符）
+            let mut volume_str = String::new();
+            for ch in volume_part.chars() {
+                if ch.is_ascii_digit() || ch == '.' {
+                    volume_str.push(ch);
+                } else {
+                    break;
+                }
+            }
+
+            // 解析为f64
+            volume_str.parse::<f64>().unwrap_or(0.0)
+        } else {
+            0.0
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_total_volume_from_signal() {
+        let widget = UnifiedOrderBookWidget::new();
+
+        // 测试买单总量>=1的情况（应显示绿色背景）
+        let signal1 = "[12:34:56] 点火检测 - 买单 上涨 连续5笔 价格107000.00->107005.00 总量1.2345";
+        assert_eq!(widget.extract_total_volume_from_signal(signal1), 1.2345);
+
+        // 测试卖单总量>=1的情况（应显示红色背景）
+        let signal2 = "[12:34:56] 点火检测 - 卖单 下跌 连续5笔 价格107000.00->106995.00 总量1.5678";
+        assert_eq!(widget.extract_total_volume_from_signal(signal2), 1.5678);
+
+        // 测试买单总量<1的情况（应显示绿色文字）
+        let signal3 = "[12:34:56] 短冲量跟随 - 买单 上涨 连续3笔 价格107000.00->107002.00 总量0.5678";
+        assert_eq!(widget.extract_total_volume_from_signal(signal3), 0.5678);
+
+        // 测试卖单总量<1的情况（应显示红色文字）
+        let signal4 = "[12:34:56] 短冲量跟随 - 卖单 下跌 连续3笔 价格107000.00->106995.00 总量0.3456";
+        assert_eq!(widget.extract_total_volume_from_signal(signal4), 0.3456);
+
+        // 测试整数总量
+        let signal5 = "[12:34:56] 点火检测 - 买单 上涨 连续7笔 价格107000.00->107010.00 总量2";
+        assert_eq!(widget.extract_total_volume_from_signal(signal5), 2.0);
+
+        // 测试没有总量的情况
+        let signal6 = "[12:34:56] 无效信号";
+        assert_eq!(widget.extract_total_volume_from_signal(signal6), 0.0);
     }
 }
