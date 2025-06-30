@@ -91,7 +91,7 @@ impl OrderBookManager {
             // 初始化ΔTick Pressure相关字段（同时用于Trade Imbalance计算）
             tick_pressure_window: std::collections::VecDeque::new(),
             tick_pressure_signals: std::collections::VecDeque::new(),
-            tick_pressure_k_value: 3, // 默认3笔
+            tick_pressure_k_value: 5, // 默认3笔
             tick_pressure_signal_capacity: 512, // 默认512容量
 
             last_history_reset_date: 0, // 初始化为0，表示还未重置过
