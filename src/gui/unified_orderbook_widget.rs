@@ -43,6 +43,8 @@ pub struct UnifiedOrderBookWidget {
     last_data_timestamp: u64,
     /// Logo纹理（可选）
     logo_texture: Option<egui::TextureHandle>,
+    /// 币安Logo纹理（用于价格图表当前价格标记）
+    binance_logo_texture: Option<egui::TextureHandle>,
     /// 交易信号窗口是否打开
     trading_signal_window_open: bool,
     /// 量化回测窗口是否打开
@@ -72,6 +74,7 @@ impl Default for UnifiedOrderBookWidget {
             cached_visible_data: Vec::new(),
             last_data_timestamp: 0,
             logo_texture: None,
+            binance_logo_texture: None,
             trading_signal_window_open: false,
             quantitative_backtest_window_open: false,
             price_chart_modal_open: false,
@@ -106,6 +109,8 @@ impl UnifiedOrderBookWidget {
 
     /// 加载Logo纹理
     fn load_logo(&mut self, ctx: &egui::Context) {
+        self.load_binance_logo(ctx);
+        
         if self.logo_texture.is_none() {
             let logo_path = "src/image/logo.png";
 
@@ -122,6 +127,28 @@ impl UnifiedOrderBookWidget {
                 }
             } else {
                 log::info!("Logo file not found at {}, using text logo", logo_path);
+            }
+        }
+    }
+
+    /// 加载币安Logo纹理
+    fn load_binance_logo(&mut self, ctx: &egui::Context) {
+        if self.binance_logo_texture.is_none() {
+            let binance_logo_path = "src/image/binance.png";
+
+            // 尝试加载币安Logo文件
+            if Path::new(binance_logo_path).exists() {
+                match self.load_image_from_path(ctx, binance_logo_path) {
+                    Ok(texture) => {
+                        self.binance_logo_texture = Some(texture);
+                        log::info!("币安Logo加载成功: {}", binance_logo_path);
+                    }
+                    Err(e) => {
+                        log::warn!("无法加载币安Logo {}: {}", binance_logo_path, e);
+                    }
+                }
+            } else {
+                log::info!("币安Logo文件不存在: {}", binance_logo_path);
             }
         }
     }
@@ -246,23 +273,23 @@ impl UnifiedOrderBookWidget {
                         self.update_price_history(current_price, volume, side);
                     }
 
-                    // 在右侧添加按钮
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        // 量化回测按钮
-                        if ui.button("量化回测").clicked() {
-                            self.quantitative_backtest_window_open = true;
-                        }
+                    // // 在右侧添加按钮
+                    // ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    //     // 量化回测按钮
+                    //     if ui.button("量化回测").clicked() {
+                    //         self.quantitative_backtest_window_open = true;
+                    //     }
 
-                        ui.add_space(10.0); // 按钮间距
+                    //     ui.add_space(10.0); // 按钮间距
 
-                        // 交易信号按钮
-                        if ui.button("交易信号").clicked() {
-                            self.trading_signal_window_open = true;
-                        }
+                    //     // 交易信号按钮
+                    //     if ui.button("交易信号").clicked() {
+                    //         self.trading_signal_window_open = true;
+                    //     }
 
-                        ui.add_space(10.0); // 按钮间距
+                    //     ui.add_space(10.0); // 按钮间距
 
-                    });
+                    // });
                 },
             );
 
@@ -1513,7 +1540,7 @@ impl UnifiedOrderBookWidget {
                 .default_size(egui::Vec2::new(1000.0, 600.0))
                 .resizable(true)
                 .show(ctx, |ui| {
-                    Self::render_price_chart_static(ui, &price_history, max_price_history);
+                    Self::render_price_chart_modal_static(ui, &price_history, max_price_history);
                 });
         }
     }
@@ -1546,8 +1573,8 @@ impl UnifiedOrderBookWidget {
         }
     }
 
-    /// 渲染价格图表（静态方法）
-    fn render_price_chart_static(
+    /// 渲染价格图表（模态窗口 - 静态方法）
+    fn render_price_chart_modal_static(
         ui: &mut egui::Ui,
         price_history: &std::collections::VecDeque<(f64, f64, f64, String)>,
         max_price_history: usize
@@ -1687,7 +1714,7 @@ impl UnifiedOrderBookWidget {
                         plot_ui.points(
                             egui_plot::Points::new(vec![[*i as f64, *current_price]])
                                 .color(egui::Color32::YELLOW)
-                                .radius(8.0)
+                                .radius(4.0) // 球头半径调小
                                 .name("当前价格")
                         );
                     }
@@ -1912,7 +1939,7 @@ impl UnifiedOrderBookWidget {
                             plot_ui.points(
                                 egui_plot::Points::new(vec![[*i as f64, *current_price]])
                                     .color(egui::Color32::YELLOW)
-                                    .radius(8.0)
+                                    .radius(4.0) // 球头半径调小
                                     .name("当前价格")
                             );
                         }
@@ -2207,6 +2234,10 @@ impl UnifiedOrderBookWidget {
                                             .rounding(egui::Rounding::same(3.0))
                                             .show(ui, |ui| {
                                                 ui.horizontal_wrapped(|ui| {
+                                                    // 带上币安logo
+                                                    if let Some(ref binance_logo) = self.binance_logo_texture {
+                                                        ui.add(egui::Image::from_texture(binance_logo).fit_to_exact_size(egui::Vec2::splat(16.0)));
+                                                    }
                                                     // 使用白色字体
                                                     ui.colored_label(egui::Color32::WHITE, signal);
                                                 });
@@ -2214,6 +2245,10 @@ impl UnifiedOrderBookWidget {
                                     } else {
                                         // 总量<1时使用原来的颜色方案
                                         ui.horizontal_wrapped(|ui| {
+                                            // 带上币安logo
+                                            if let Some(ref binance_logo) = self.binance_logo_texture {
+                                                ui.add(egui::Image::from_texture(binance_logo).fit_to_exact_size(egui::Vec2::splat(16.0)));
+                                            }
                                             // 根据买单/卖单选择颜色
                                             let signal_color = if signal.contains("买单") {
                                                 egui::Color32::from_rgb(100, 255, 100) // 绿色 - 买单冲击
@@ -2222,7 +2257,6 @@ impl UnifiedOrderBookWidget {
                                             } else {
                                                 egui::Color32::WHITE // 默认白色
                                             };
-
                                             // 显示信号文本
                                             ui.colored_label(signal_color, signal);
                                         });
