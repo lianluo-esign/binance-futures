@@ -18,20 +18,20 @@ impl TradingGUI {
     pub fn new(config: Config) -> Self {
         let mut app = ReactiveApp::new(config);
 
-        // 初始化应用程序
+        // Initialize application
         if let Err(e) = app.initialize() {
-            // 初始化错误写入日志文件，不输出到控制台
-            log::error!("应用程序初始化失败: {}", e);
+            // Write initialization error to log file, not output to console
+            log::error!("Application initialization failed: {}", e);
         }
 
-        // 创建并配置统一订单簿组件
+        // Create and configure unified orderbook widget
         let mut unified_orderbook_widget = UnifiedOrderBookWidget::new();
-        unified_orderbook_widget.set_price_chart_height(300.0); // 设置价格图表高度为300像素
+        unified_orderbook_widget.set_price_chart_height(300.0); // Set price chart height to 300 pixels
 
         Self {
             app,
             last_update: Instant::now(),
-            update_interval: Duration::from_millis(1), // 1ms 刷新间隔
+            update_interval: Duration::from_millis(1), // 1ms refresh interval
             show_settings: false,
             show_stats: false,
             unified_orderbook_widget,
@@ -42,55 +42,55 @@ impl TradingGUI {
 
 impl eframe::App for TradingGUI {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // 更新应用程序状态
+        // Update application status
         let now = Instant::now();
         if now.duration_since(self.last_update) >= self.update_interval {
-            self.app.event_loop(); // 使用正确的方法名
+            self.app.event_loop(); // Use correct method name
             self.last_update = now;
         }
         
-        // 顶部菜单栏
+        // Top menu bar
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
-                // ui.menu_button("视图", |ui| {
-                //     if ui.button("设置").clicked() {
+                // ui.menu_button("View", |ui| {
+                //     if ui.button("Settings").clicked() {
                 //         self.show_settings = !self.show_settings;
                 //     }
-                //     if ui.button("统计").clicked() {
+                //     if ui.button("Statistics").clicked() {
                 //         self.show_stats = !self.show_stats;
                 //     }
-                //     if ui.button("🔧 调试").clicked() {
+                //     if ui.button("🔧 Debug").clicked() {
                 //         self.debug_window.show = !self.debug_window.show;
                 //     }
                 // });
                 
                 // ui.separator();
                 
-                // 连接状态指示器 - 显示重连信息
+                // Connection status indicator - display reconnection information
                 let connection_status = self.app.get_connection_status();
                 let (status_text, status_color) = if connection_status.is_connected {
-                    ("🟢 已连接".to_string(), egui::Color32::from_rgb(120, 255, 120))
+                    ("🟢 Connected".to_string(), egui::Color32::from_rgb(120, 255, 120))
                 } else if connection_status.is_reconnecting {
                     (
-                        format!("🟡 重连中... ({}/{}) - 3秒间隔",
+                        format!("🟡 Reconnecting... ({}/{}) - 3s interval",
                             connection_status.reconnect_attempts,
                             connection_status.max_attempts
                         ),
                         egui::Color32::from_rgb(255, 255, 120)
                     )
                 } else {
-                    ("🔴 未连接".to_string(), egui::Color32::from_rgb(255, 120, 120))
+                    ("🔴 Disconnected".to_string(), egui::Color32::from_rgb(255, 120, 120))
                 };
                 ui.colored_label(status_color, status_text);
 
-                // 显示总重连次数
+                // Display total reconnection count
                 if connection_status.total_reconnects > 0 {
                     ui.separator();
                     ui.colored_label(egui::Color32::GRAY,
-                        format!("总重连: {}", connection_status.total_reconnects));
+                        format!("Total Reconnects: {}", connection_status.total_reconnects));
                 }
 
-                // 显示最后的错误信息（简短版本）
+                // Display last error message (short version)
                 if let Some(error) = &connection_status.last_error {
                     ui.separator();
                     let short_error = if error.len() > 30 {
@@ -99,14 +99,14 @@ impl eframe::App for TradingGUI {
                         error.clone()
                     };
                     ui.colored_label(egui::Color32::from_rgb(255, 180, 120),
-                        format!("错误: {}", short_error));
+                        format!("Error: {}", short_error));
                 }
 
-                // 性能指标
+                // Performance metrics
                 let stats = self.app.get_stats();
-                ui.label(format!("事件/秒: {:.1}", stats.events_processed_per_second));
+                ui.label(format!("Events/sec: {:.1}", stats.events_processed_per_second));
 
-                // RingBuffer容量使用情况
+                // RingBuffer capacity usage
                 ui.separator();
                 let (current_usage, max_capacity) = self.app.get_buffer_usage();
                 let usage_percentage = if max_capacity > 0 {
@@ -115,33 +115,33 @@ impl eframe::App for TradingGUI {
                     0.0
                 };
 
-                // 根据使用率选择颜色
+                // Choose color based on usage rate
                 let usage_color = if usage_percentage >= 90.0 {
-                    egui::Color32::from_rgb(255, 100, 100) // 红色 - 高使用率
+                    egui::Color32::from_rgb(255, 100, 100) // Red - high usage
                 } else if usage_percentage >= 70.0 {
-                    egui::Color32::from_rgb(255, 200, 100) // 橙色 - 中等使用率
+                    egui::Color32::from_rgb(255, 200, 100) // Orange - medium usage
                 } else {
-                    egui::Color32::from_rgb(120, 255, 120) // 绿色 - 低使用率
+                    egui::Color32::from_rgb(120, 255, 120) // Green - low usage
                 };
 
                 ui.colored_label(usage_color,
-                    format!("缓冲区: {}/{} ({:.1}%)", current_usage, max_capacity, usage_percentage));
+                    format!("Buffer: {}/{} ({:.1}%)", current_usage, max_capacity, usage_percentage));
             });
         });
         
 
-        // 主要内容区域 - 统一的订单流分析表格
+        // Main content area - unified order flow analysis table
         egui::CentralPanel::default().show(ctx, |ui| {
-            // 使用统一的订单簿组件，占满整个中央面板
+            // Use unified orderbook widget, occupying the entire central panel
             self.unified_orderbook_widget.show(ui, &self.app);
         });
         
-        // 设置窗口
+        // Settings window
         if self.show_settings {
-            egui::Window::new("设置")
+            egui::Window::new("Settings")
                 .open(&mut self.show_settings)
                 .show(ctx, |ui| {
-                    ui.label("更新间隔 (ms):");
+                    ui.label("Update Interval (ms):");
                     let mut interval_ms = self.update_interval.as_millis() as u64;
                     if ui.add(egui::Slider::new(&mut interval_ms, 50..=1000)).changed() {
                         self.update_interval = Duration::from_millis(interval_ms);
@@ -149,46 +149,46 @@ impl eframe::App for TradingGUI {
                     
                     ui.separator();
                     
-                    if ui.button("重新连接").clicked() {
-                        // 触发重连逻辑
+                    if ui.button("Reconnect").clicked() {
+                        // Trigger reconnection logic
                     }
                 });
         }
         
-        // 统计窗口
+        // Statistics window
         if self.show_stats {
-            egui::Window::new("统计信息")
+            egui::Window::new("Statistics")
                 .open(&mut self.show_stats)
                 .show(ctx, |ui| {
                     let stats = self.app.get_stats();
 
-                    ui.label(format!("运行状态: {}", if stats.running { "运行中" } else { "已停止" }));
-                    ui.label(format!("事件处理速度: {:.2} events/sec", stats.events_processed_per_second));
-                    ui.label(format!("待处理事件: {}", stats.pending_events));
-                    ui.label(format!("WebSocket连接: {}", if stats.websocket_connected { "已连接" } else { "未连接" }));
+                    ui.label(format!("Running Status: {}", if stats.running { "Running" } else { "Stopped" }));
+                    ui.label(format!("Event Processing Speed: {:.2} events/sec", stats.events_processed_per_second));
+                    ui.label(format!("Pending Events: {}", stats.pending_events));
+                    ui.label(format!("WebSocket Connection: {}", if stats.websocket_connected { "Connected" } else { "Disconnected" }));
 
                     ui.separator();
 
-                    ui.label("事件统计:");
+                    ui.label("Event Statistics:");
                     ui.indent("event_stats", |ui| {
-                        ui.label(format!("已发布事件: {}", stats.total_events_published));
-                        ui.label(format!("已处理事件: {}", stats.total_events_processed));
-                        ui.label(format!("WebSocket消息: {}", stats.websocket_messages_received));
-                        ui.label(format!("订单簿更新: {}", stats.orderbook_updates));
-                        ui.label(format!("交易处理: {}", stats.trades_processed));
+                        ui.label(format!("Total Events Published: {}", stats.total_events_published));
+                        ui.label(format!("Total Events Processed: {}", stats.total_events_processed));
+                        ui.label(format!("WebSocket Messages: {}", stats.websocket_messages_received));
+                        ui.label(format!("Orderbook Updates: {}", stats.orderbook_updates));
+                        ui.label(format!("Trades Processed: {}", stats.trades_processed));
                     });
                 });
         }
 
-        // 显示调试窗口
+        // Show debug window
         self.debug_window.show_window(ctx, &self.app);
 
-        // 请求重绘以实现实时更新
+        // Request repaint for real-time updates
         ctx.request_repaint_after(self.update_interval);
     }
     
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        // 清理资源
+        // Clean up resources
         self.app.stop();
     }
 }

@@ -1,4 +1,4 @@
-/// GUI模块 - 提供Windows图形界面支持
+/// GUI module - Provides Windows graphical interface support
 pub mod egui_app;
 pub mod orderbook_widget;
 pub mod trade_footprint_widget;

@@ -236,31 +236,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "binance-futures"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "core_affinity",
- "eframe",
- "egui",
- "egui_extras",
- "egui_plot",
- "env_logger",
- "image",
- "lazy_static",
- "log",
- "once_cell",
- "ordered-float",
- "rand",
- "rodio",
- "serde",
- "serde_json",
- "tokio",
- "tungstenite",
- "url",
-]
-
-[[package]]
 name = "bindgen"
 version = "0.72.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1069,6 +1044,31 @@ checksum = "4a3d7db9596fecd151c5f638c0ee5d5bd487b6e0ea232e5dc96d5250f6f94b1d"
 dependencies = [
  "crc32fast",
  "miniz_oxide",
+]
+
+[[package]]
+name = "flow_sight"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "core_affinity",
+ "eframe",
+ "egui",
+ "egui_extras",
+ "egui_plot",
+ "env_logger",
+ "image",
+ "lazy_static",
+ "log",
+ "once_cell",
+ "ordered-float",
+ "rand",
+ "rodio",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tungstenite",
+ "url",
 ]
 
 [[package]]

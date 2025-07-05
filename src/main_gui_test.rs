@@ -9,7 +9,7 @@ fn main() -> Result<(), eframe::Error> {
     };
 
     eframe::run_native(
-        "Binance Futures Trading GUI",
+        "FlowSight",
         options,
         Box::new(|_cc| Ok(Box::new(MyApp::default()))),
     )

@@ -1,4 +1,4 @@
-use binance_futures::{init_logging, Config, TradingGUI};
+use flow_sight::{init_logging, Config, TradingGUI};
 use std::env;
 use std::path::Path;
 
@@ -95,19 +95,16 @@ fn setup_dark_theme(ctx: &egui::Context) {
 
 /// 加载应用程序图标
 fn load_icon() -> egui::IconData {
-    let icon_path = "src/image/logo04.png";
-
+    let icon_path = "src/image/icon.png";
     if Path::new(icon_path).exists() {
         match image::open(icon_path) {
-            Ok(image) => {
-                let image = image.to_rgba8();
-                let (width, height) = image.dimensions();
-                let rgba = image.into_raw();
-
+            Ok(img) => {
+                let rgba = img.to_rgba8();
+                let (width, height) = rgba.dimensions();
                 egui::IconData {
-                    rgba,
-                    width: width as u32,
-                    height: height as u32,
+                    rgba: rgba.into_raw(),
+                    width,
+                    height,
                 }
             }
             Err(e) => {

@@ -110,10 +110,8 @@ impl UnifiedOrderBookWidget {
     /// 加载Logo纹理
     fn load_logo(&mut self, ctx: &egui::Context) {
         self.load_binance_logo(ctx);
-        
         if self.logo_texture.is_none() {
-            let logo_path = "src/image/logo.png";
-
+            let logo_path = "src/image/icon.png";
             // 尝试加载Logo文件
             if Path::new(logo_path).exists() {
                 match self.load_image_from_path(ctx, logo_path) {
@@ -257,39 +255,7 @@ impl UnifiedOrderBookWidget {
                 egui::Vec2::new(total_width, header_height),
                 egui::Layout::left_to_right(egui::Align::Center),
                 |ui| {
-                    ui.heading("订单流分析");
-
-                    // 显示当前价格并更新价格历史
-                    let snapshot = app.get_market_snapshot();
-                    if let Some(current_price) = snapshot.current_price {
-                        ui.separator();
-                        ui.label("当前价格:");
-                        ui.colored_label(egui::Color32::YELLOW, format!("{:.2}", current_price));
-
-                        // 获取最新交易信息并更新价格历史数据
-                        let (_, last_side, _, last_volume) = app.get_orderbook_manager().get_last_trade_highlight();
-                        let volume = last_volume.unwrap_or(0.0);
-                        let side = last_side.unwrap_or_else(|| "unknown".to_string());
-                        self.update_price_history(current_price, volume, side);
-                    }
-
-                    // // 在右侧添加按钮
-                    // ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    //     // 量化回测按钮
-                    //     if ui.button("量化回测").clicked() {
-                    //         self.quantitative_backtest_window_open = true;
-                    //     }
-
-                    //     ui.add_space(10.0); // 按钮间距
-
-                    //     // 交易信号按钮
-                    //     if ui.button("交易信号").clicked() {
-                    //         self.trading_signal_window_open = true;
-                    //     }
-
-                    //     ui.add_space(10.0); // 按钮间距
-
-                    // });
+                    // 移除顶部标题和当前价格显示
                 },
             );
 
@@ -319,7 +285,7 @@ impl UnifiedOrderBookWidget {
 
                             if visible_data.is_empty() {
                                 ui.centered_and_justified(|ui| {
-                                    ui.label("暂无订单簿数据");
+                                    ui.label("No Orderbook Data");
                                 });
                             } else {
                                 // 渲染订单簿表格，占据左侧一半空间
@@ -382,6 +348,15 @@ impl UnifiedOrderBookWidget {
 
         // 渲染弹出窗口
         self.render_popup_windows(ui.ctx());
+
+        // 保留价格历史数据的更新逻辑（不显示在UI上）
+        let snapshot = app.get_market_snapshot();
+        if let Some(current_price) = snapshot.current_price {
+            let (_, last_side, _, last_volume) = app.get_orderbook_manager().get_last_trade_highlight();
+            let volume = last_volume.unwrap_or(0.0);
+            let side = last_side.unwrap_or_else(|| "unknown".to_string());
+            self.update_price_history(current_price, volume, side);
+        }
     }
 
     /// 数据驱动UI：提取当前价格±40层的可见数据（总共最多81行）
@@ -614,13 +589,13 @@ impl UnifiedOrderBookWidget {
 
                 table
                     .header(25.0, |mut header| {
-                        header.col(|ui| { ui.strong("主动卖单"); });
-                        header.col(|ui| { ui.strong("买单深度"); });
-                        header.col(|ui| { ui.strong("价格"); });
-                        header.col(|ui| { ui.strong("卖单深度"); });
-                        header.col(|ui| { ui.strong("主动买单"); });
-                        header.col(|ui| { ui.strong("历史累计买单"); });
-                        header.col(|ui| { ui.strong("历史累计卖单"); });
+                        header.col(|ui| { ui.strong("Active Sell"); });
+                        header.col(|ui| { ui.strong("Bid Depth"); });
+                        header.col(|ui| { ui.strong("Price"); });
+                        header.col(|ui| { ui.strong("Ask Depth"); });
+                        header.col(|ui| { ui.strong("Active Buy"); });
+                        header.col(|ui| { ui.strong("Historical Buy"); });
+                        header.col(|ui| { ui.strong("Historical Sell"); });
                         header.col(|ui| { ui.strong("Delta"); });
                     })
                     .body(|mut body| {
@@ -838,25 +813,25 @@ impl UnifiedOrderBookWidget {
             table
                 .header(25.0, |mut header| {
                     header.col(|ui| {
-                        ui.strong("主动卖单累计(5s)");
+                        ui.strong("Active Sell");
                     });
                     header.col(|ui| {
-                        ui.strong("买单深度");
+                        ui.strong("Bid Depth");
                     });
                     header.col(|ui| {
-                        ui.strong("价格");
+                        ui.strong("Price");
                     });
                     header.col(|ui| {
-                        ui.strong("卖单深度");
+                        ui.strong("Ask Depth");
                     });
                     header.col(|ui| {
-                        ui.strong("主动买单累计(5s)");
+                        ui.strong("Active Buy");
                     });
                     header.col(|ui| {
-                        ui.strong("历史累计买单");
+                        ui.strong("Historical Buy");
                     });
                     header.col(|ui| {
-                        ui.strong("历史累计卖单");
+                        ui.strong("Historical Sell");
                     });
                     header.col(|ui| {
                         ui.strong("Delta");
@@ -927,25 +902,25 @@ impl UnifiedOrderBookWidget {
             table
                 .header(25.0, |mut header| {
                     header.col(|ui| {
-                        ui.strong("主动卖单累计(5s)");
+                        ui.strong("Active Sell");
                     });
                     header.col(|ui| {
-                        ui.strong("买单深度");
+                        ui.strong("Bid Depth");
                     });
                     header.col(|ui| {
-                        ui.strong("价格");
+                        ui.strong("Price");
                     });
                     header.col(|ui| {
-                        ui.strong("卖单深度");
+                        ui.strong("Ask Depth");
                     });
                     header.col(|ui| {
-                        ui.strong("主动买单累计(5s)");
+                        ui.strong("Active Buy");
                     });
                     header.col(|ui| {
-                        ui.strong("历史累计买单");
+                        ui.strong("Historical Buy");
                     });
                     header.col(|ui| {
-                        ui.strong("历史累计卖单");
+                        ui.strong("Historical Sell");
                     });
                     header.col(|ui| {
                         ui.strong("Delta");
@@ -1001,25 +976,25 @@ impl UnifiedOrderBookWidget {
             table
                 .header(25.0, |mut header| {
                     header.col(|ui| {
-                        ui.strong("主动卖单累计(5s)");
+                        ui.strong("Active Sell");
                     });
                     header.col(|ui| {
-                        ui.strong("买单深度");
+                        ui.strong("Bid Depth");
                     });
                     header.col(|ui| {
-                        ui.strong("价格");
+                        ui.strong("Price");
                     });
                     header.col(|ui| {
-                        ui.strong("卖单深度");
+                        ui.strong("Ask Depth");
                     });
                     header.col(|ui| {
-                        ui.strong("主动买单累计(5s)");
+                        ui.strong("Active Buy");
                     });
                     header.col(|ui| {
-                        ui.strong("历史累计买单");
+                        ui.strong("Historical Buy");
                     });
                     header.col(|ui| {
-                        ui.strong("历史累计卖单");
+                        ui.strong("Historical Sell");
                     });
                     header.col(|ui| {
                         ui.strong("Delta");
@@ -1590,7 +1565,7 @@ impl UnifiedOrderBookWidget {
 
                 if let Some((_, latest_price, latest_volume, latest_side)) = price_history.back() {
                     ui.separator();
-                    ui.label("当前价格:");
+                    ui.label("Current Price:");
                     ui.colored_label(egui::Color32::YELLOW, format!("{:.2}", latest_price));
                     ui.separator();
                     ui.label("最新成交量:");
@@ -1703,7 +1678,7 @@ impl UnifiedOrderBookWidget {
                                 egui_plot::Points::new(vec![[*i as f64, *price]])
                                     .color(color)
                                     .radius(radius)
-                                    .name(&format!("{}: {:.4}", if side == "buy" { "买单" } else { "卖单" }, volume))
+                                    .name(&format!("{}: {:.4}", if side == "buy" { "Buy" } else { "Sell" }, volume))
                             );
                         }
                     }
@@ -1715,7 +1690,7 @@ impl UnifiedOrderBookWidget {
                             egui_plot::Points::new(vec![[*i as f64, *current_price]])
                                 .color(egui::Color32::YELLOW)
                                 .radius(4.0) // 球头半径调小
-                                .name("当前价格")
+                                .name("Current Price")
                         );
                     }
                 });
@@ -1814,7 +1789,7 @@ impl UnifiedOrderBookWidget {
 
         if price_history.is_empty() {
             ui.centered_and_justified(|ui| {
-                ui.label("等待价格数据...");
+                ui.label("Waiting for price data...");
             });
         } else {
             // 过滤有效的价格历史数据
@@ -1829,7 +1804,7 @@ impl UnifiedOrderBookWidget {
 
             if valid_data.is_empty() {
                 ui.centered_and_justified(|ui| {
-                    ui.label("暂无有效价格数据...");
+                    ui.label("No valid price data available...");
                 });
                 return;
             }
@@ -1928,7 +1903,7 @@ impl UnifiedOrderBookWidget {
                                     egui_plot::Points::new(vec![[*i as f64, *price]])
                                         .color(color)
                                         .radius(radius)
-                                        .name(&format!("{}: {:.4}", if side == "buy" { "买单" } else { "卖单" }, volume))
+                                        .name(&format!("{}: {:.4}", if side == "buy" { "Buy" } else { "Sell" }, volume))
                                 );
                             }
                         }
@@ -1940,7 +1915,7 @@ impl UnifiedOrderBookWidget {
                                 egui_plot::Points::new(vec![[*i as f64, *current_price]])
                                     .color(egui::Color32::YELLOW)
                                     .radius(4.0) // 球头半径调小
-                                    .name("当前价格")
+                                    .name("Current Price")
                             );
                         }
                     });
@@ -1978,10 +1953,10 @@ impl UnifiedOrderBookWidget {
                     // 显示比率数值
                     ui.horizontal(|ui| {
                         ui.colored_label(egui::Color32::from_rgb(120, 180, 255),
-                            format!("买单: {:.1}%", bid_ratio * 100.0));
+                            format!("Bid: {:.1}%", bid_ratio * 100.0));
                         ui.separator();
                         ui.colored_label(egui::Color32::from_rgb(255, 120, 120),
-                            format!("卖单: {:.1}%", ask_ratio * 100.0));
+                            format!("Ask: {:.1}%", ask_ratio * 100.0));
                     });
 
                     ui.add_space(8.0);
@@ -2035,17 +2010,17 @@ impl UnifiedOrderBookWidget {
                     // 显示多空压力指示
                     let imbalance = bid_ratio - ask_ratio;
                     let pressure_text = if imbalance > 0.1 {
-                        ("🟢 多头压力", egui::Color32::from_rgb(120, 255, 120))
+                        ("🟢 Bullish Pressure", egui::Color32::from_rgb(120, 255, 120))
                     } else if imbalance < -0.1 {
-                        ("🔴 空头压力", egui::Color32::from_rgb(255, 120, 120))
+                        ("🔴 Bearish Pressure", egui::Color32::from_rgb(255, 120, 120))
                     } else {
-                        ("⚪ 均衡状态", egui::Color32::GRAY)
+                        ("⚪ Balanced", egui::Color32::GRAY)
                     };
 
                     ui.horizontal(|ui| {
                         ui.colored_label(pressure_text.1, pressure_text.0);
                         ui.colored_label(egui::Color32::GRAY,
-                            format!("(差值: {:.1}%)", imbalance * 100.0));
+                            format!("(Difference: {:.1}%)", imbalance * 100.0));
                     });
                 });
             });
@@ -2078,7 +2053,7 @@ impl UnifiedOrderBookWidget {
                 ui.vertical(|ui| {
                     // 标题
                     ui.horizontal(|ui| {
-                        ui.colored_label(egui::Color32::WHITE, "⚖️ Trade Imbalance (最近10笔)");
+                        ui.colored_label(egui::Color32::WHITE, "⚖️ Trade Imbalance (Last 10 Ticks)");
                     });
 
                     ui.add_space(5.0);
@@ -2089,10 +2064,10 @@ impl UnifiedOrderBookWidget {
                             format!("TI: {:.3}", trade_imbalance));
                         ui.separator();
                         ui.colored_label(egui::Color32::from_rgb(120, 255, 120),
-                            format!("买单: {:.1}%", buy_ratio * 100.0));
+                            format!("Buy: {:.1}%", buy_ratio * 100.0));
                         ui.separator();
                         ui.colored_label(egui::Color32::from_rgb(255, 120, 120),
-                            format!("卖单: {:.1}%", sell_ratio * 100.0));
+                            format!("Sell: {:.1}%", sell_ratio * 100.0));
                     });
 
                     ui.add_space(8.0);
@@ -2146,21 +2121,21 @@ impl UnifiedOrderBookWidget {
                     // 显示交易压力指示 - 基于买卖比例差值
                     let imbalance = buy_ratio - sell_ratio; // 计算不平衡程度
                     let (pressure_text, pressure_color) = if imbalance > 0.3 {
-                        ("🟢 强买压", egui::Color32::from_rgb(120, 255, 120))
+                        ("🟢 Strong Buy Pressure", egui::Color32::from_rgb(120, 255, 120))
                     } else if imbalance > 0.1 {
-                        ("🟡 轻买压", egui::Color32::from_rgb(255, 255, 120))
+                        ("🟡 Mild Buy Pressure", egui::Color32::from_rgb(255, 255, 120))
                     } else if imbalance < -0.3 {
-                        ("🔴 强卖压", egui::Color32::from_rgb(255, 120, 120))
+                        ("🔴 Strong Sell Pressure", egui::Color32::from_rgb(255, 120, 120))
                     } else if imbalance < -0.1 {
-                        ("🟠 轻卖压", egui::Color32::from_rgb(255, 180, 120))
+                        ("🟠 Mild Sell Pressure", egui::Color32::from_rgb(255, 180, 120))
                     } else {
-                        ("⚪ 均衡", egui::Color32::GRAY)
+                        ("⚪ Balanced", egui::Color32::GRAY)
                     };
 
                     ui.horizontal(|ui| {
                         ui.colored_label(pressure_color, pressure_text);
                         ui.colored_label(egui::Color32::GRAY,
-                            format!("(差值: {:.1}%)", imbalance * 100.0));
+                            format!("(Difference: {:.1}%)", imbalance * 100.0));
                     });
                 });
             });
@@ -2190,10 +2165,10 @@ impl UnifiedOrderBookWidget {
                         ui.separator();
 
                         // K值设置滑块
-                        ui.label("K值:");
+                        ui.label("K Value:");
                         let mut k_value = self.tick_pressure_k_value;
                         if ui.add(egui::Slider::new(&mut k_value, 3..=15)
-                            .suffix("笔")
+                            .suffix(" ticks")
                             .step_by(1.0)).changed() {
                             self.tick_pressure_k_value = k_value;
                             // 注意：这里无法直接更新ReactiveApp中的K值
@@ -2209,7 +2184,7 @@ impl UnifiedOrderBookWidget {
                         .show(ui, |ui| {
                             if signals.is_empty() {
                                 ui.centered_and_justified(|ui| {
-                                    ui.colored_label(egui::Color32::GRAY, "等待Tick Pressure信号...");
+                                    ui.colored_label(egui::Color32::GRAY, "Waiting for Tick Pressure signals...");
                                 });
                             } else {
                                 // 显示信号列表，最新的在最上面
@@ -2217,8 +2192,8 @@ impl UnifiedOrderBookWidget {
                                     // 解析信号文本中的总量值
                                     let total_volume = self.extract_total_volume_from_signal(signal);
                                     let has_significant_volume = total_volume >= 1.0;
-                                    let is_buy_signal = signal.contains("买单");
-                                    let is_sell_signal = signal.contains("卖单");
+                                    let is_buy_signal = signal.contains("Buy");
+                                    let is_sell_signal = signal.contains("Sell");
 
                                     if has_significant_volume && (is_buy_signal || is_sell_signal) {
                                         // 总量>=1时根据买单/卖单类型设置背景颜色
@@ -2250,9 +2225,9 @@ impl UnifiedOrderBookWidget {
                                                 ui.add(egui::Image::from_texture(binance_logo).fit_to_exact_size(egui::Vec2::splat(16.0)));
                                             }
                                             // 根据买单/卖单选择颜色
-                                            let signal_color = if signal.contains("买单") {
+                                            let signal_color = if signal.contains("Buy") {
                                                 egui::Color32::from_rgb(100, 255, 100) // 绿色 - 买单冲击
-                                            } else if signal.contains("卖单") {
+                                            } else if signal.contains("Sell") {
                                                 egui::Color32::from_rgb(255, 100, 100) // 红色 - 卖单冲击
                                             } else {
                                                 egui::Color32::WHITE // 默认白色
@@ -2270,12 +2245,12 @@ impl UnifiedOrderBookWidget {
     }
 
     /// 从信号文本中提取总量值
-    /// 信号格式: "[时间] 信号类型 - 买单/卖单 方向 连续X笔 价格A->B 总量C"
+    /// 信号格式: "[时间] 信号类型 - Buy/Sell 方向 连续X笔 价格A->B Volume C"
     fn extract_total_volume_from_signal(&self, signal: &str) -> f64 {
-        // 查找"总量"关键字
-        if let Some(volume_start) = signal.find("总量") {
-            // 从"总量"后开始提取数字
-            let volume_part = &signal[volume_start + "总量".len()..];
+        // 查找"Volume"关键字
+        if let Some(volume_start) = signal.find("Volume") {
+            // 从"Volume"后开始提取数字
+            let volume_part = &signal[volume_start + "Volume".len()..];
 
             // 提取数字部分（直到遇到非数字字符）
             let mut volume_str = String::new();
@@ -2304,27 +2279,27 @@ mod tests {
         let widget = UnifiedOrderBookWidget::new();
 
         // 测试买单总量>=1的情况（应显示绿色背景）
-        let signal1 = "[12:34:56] 点火检测 - 买单 上涨 连续5笔 价格107000.00->107005.00 总量1.2345";
+        let signal1 = "[12:34:56] Ignition Detection - Buy Up 5 ticks Price 107000.00->107005.00 Volume 1.2345";
         assert_eq!(widget.extract_total_volume_from_signal(signal1), 1.2345);
 
         // 测试卖单总量>=1的情况（应显示红色背景）
-        let signal2 = "[12:34:56] 点火检测 - 卖单 下跌 连续5笔 价格107000.00->106995.00 总量1.5678";
+        let signal2 = "[12:34:56] Ignition Detection - Sell Down 5 ticks Price 107000.00->106995.00 Volume 1.5678";
         assert_eq!(widget.extract_total_volume_from_signal(signal2), 1.5678);
 
         // 测试买单总量<1的情况（应显示绿色文字）
-        let signal3 = "[12:34:56] 短冲量跟随 - 买单 上涨 连续3笔 价格107000.00->107002.00 总量0.5678";
+        let signal3 = "[12:34:56] Momentum Follow - Buy Up 3 ticks Price 107000.00->107002.00 Volume 0.5678";
         assert_eq!(widget.extract_total_volume_from_signal(signal3), 0.5678);
 
         // 测试卖单总量<1的情况（应显示红色文字）
-        let signal4 = "[12:34:56] 短冲量跟随 - 卖单 下跌 连续3笔 价格107000.00->106995.00 总量0.3456";
+        let signal4 = "[12:34:56] Momentum Follow - Sell Down 3 ticks Price 107000.00->106995.00 Volume 0.3456";
         assert_eq!(widget.extract_total_volume_from_signal(signal4), 0.3456);
 
         // 测试整数总量
-        let signal5 = "[12:34:56] 点火检测 - 买单 上涨 连续7笔 价格107000.00->107010.00 总量2";
+        let signal5 = "[12:34:56] Ignition Detection - Buy Up 7 ticks Price 107000.00->107010.00 Volume 2";
         assert_eq!(widget.extract_total_volume_from_signal(signal5), 2.0);
 
         // 测试没有总量的情况
-        let signal6 = "[12:34:56] 无效信号";
+        let signal6 = "[12:34:56] Invalid Signal";
         assert_eq!(widget.extract_total_volume_from_signal(signal6), 0.0);
     }
 }

@@ -5,13 +5,13 @@ use std::collections::BTreeMap;
 use ordered_float::OrderedFloat;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// OrderBook深度数据展示组件
+/// OrderBook depth data display component
 pub struct OrderBookWidget {
-    /// 滚动位置
+    /// Scroll position
     scroll_position: f32,
-    /// 自动跟踪当前价格
+    /// Auto track current price
     auto_track_price: bool,
-    /// 5秒累计数据的时间窗口
+    /// 5-second cumulative data time window
     time_window_seconds: u64,
 }
 
@@ -30,62 +30,21 @@ impl OrderBookWidget {
         Self::default()
     }
 
-    /// 渲染OrderBook组件 - 响应式全屏布局
+    /// Render OrderBook component - responsive full-screen layout
     pub fn show(&mut self, ui: &mut egui::Ui, app: &ReactiveApp) {
-        // 获取可用空间
+        // Get available space
         let available_rect = ui.available_rect_before_wrap();
 
         ui.allocate_ui_with_layout(
             available_rect.size(),
             egui::Layout::top_down(egui::Align::LEFT),
             |ui| {
-                // 标题和控制按钮 - 固定高度
-                ui.horizontal(|ui| {
-                    ui.heading("订单流深度数据");
-                    ui.separator();
-
-                    // 自动跟踪价格开关
-                    ui.checkbox(&mut self.auto_track_price, "自动跟踪价格");
-
-                    // 重置滚动按钮
-                    if ui.button("重置视图").clicked() {
-                        self.scroll_position = 0.0;
-                    }
-                });
-
-                ui.separator();
-
-                // 获取订单流数据
-                let order_flows = app.get_orderbook_manager().get_order_flows();
-                let current_time = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs();
-
-                // 过滤和聚合5秒内的数据
-                let aggregated_data = self.aggregate_5s_data(&order_flows, current_time);
-
-                // 获取当前价格用于居中
-                let snapshot = app.get_market_snapshot();
-                let current_price = snapshot.current_price.unwrap_or(50000.0);
-
-                // 计算表格可用高度（总高度 - 标题栏高度 - 分隔符高度）
-                let header_height = 60.0; // 估算标题栏高度
-                let table_height = available_rect.height() - header_height;
-
-                // 渲染表格 - 占满剩余空间
-                if aggregated_data.is_empty() {
-                    ui.centered_and_justified(|ui| {
-                        ui.label("暂无数据");
-                    });
-                } else {
-                    self.render_orderbook_table(ui, &aggregated_data, current_price, table_height);
-                }
+                // 只保留表格和数据内容，不显示顶部标题和控件
             },
         );
     }
 
-    /// 聚合5秒内的主动买单和卖单数据
+    /// Aggregate 5-second active buy and sell order data
     fn aggregate_5s_data(
         &self,
         order_flows: &BTreeMap<OrderedFloat<f64>, OrderFlow>,
@@ -94,18 +53,18 @@ impl OrderBookWidget {
         let mut rows = Vec::new();
         let time_threshold = current_time - self.time_window_seconds;
 
-        // 按价格从高到低排序
+        // Sort by price from high to low
         let mut sorted_flows: Vec<_> = order_flows.iter().collect();
         sorted_flows.sort_by(|a, b| b.0.cmp(a.0));
 
         for (price, order_flow) in sorted_flows {
             let price_val = price.0;
 
-            // 获取订单簿数据
+            // Get orderbook data
             let bid_volume = order_flow.bid_ask.bid;
             let ask_volume = order_flow.bid_ask.ask;
 
-            // 计算5秒内的主动买单和卖单累计
+            // Calculate 5-second active buy and sell order accumulation
             let active_buy_volume = if order_flow.realtime_trade_record.timestamp >= time_threshold {
                 order_flow.realtime_trade_record.buy_volume
             } else {
@@ -130,7 +89,7 @@ impl OrderBookWidget {
         rows
     }
 
-    /// 渲染订单簿表格 - 响应式高度
+    /// Render orderbook table - responsive height
     fn render_orderbook_table(
         &mut self,
         ui: &mut egui::Ui,
@@ -140,52 +99,52 @@ impl OrderBookWidget {
     ) {
         use egui_extras::{Column, TableBuilder};
 
-        // 使用唯一的UI区域来避免ID冲突
+        // Use unique UI area to avoid ID conflicts
         ui.push_id("orderbook_table_container", |ui| {
-            // 获取可用宽度
+            // Get available width
             let available_width = ui.available_width();
-            let column_width = available_width / 5.0; // 5列平均分配
+            let column_width = available_width / 5.0; // 5 columns evenly distributed
 
-            // 设置表格占满可用空间
+            // Set table to occupy available space
             ui.allocate_ui_with_layout(
                 egui::Vec2::new(available_width, table_height),
                 egui::Layout::top_down(egui::Align::LEFT),
                 |ui| {
-                    // 创建表格 - 新布局：主动买单(5s) | Bid挂单 | 价格 | Ask挂单 | 主动卖单(5s)
+                    // Create table - new layout: Active Buy (5s) | Bid Orders | Price | Ask Orders | Active Sell (5s)
                     let table = TableBuilder::new(ui)
                         .striped(false)
                         .resizable(true)
                         .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-                        .column(Column::exact(column_width)) // 主动买单累计(5s)
-                        .column(Column::exact(column_width)) // Bid挂单
-                        .column(Column::exact(column_width)) // 价格
-                        .column(Column::exact(column_width)) // Ask挂单
-                        .column(Column::exact(column_width)) // 主动卖单累计(5s)
-                        .max_scroll_height(table_height - 30.0) // 减去表头高度
+                        .column(Column::exact(column_width)) // Active buy accumulation (5s)
+                        .column(Column::exact(column_width)) // Bid orders
+                        .column(Column::exact(column_width)) // Price
+                        .column(Column::exact(column_width)) // Ask orders
+                        .column(Column::exact(column_width)) // Active sell accumulation (5s)
+                        .max_scroll_height(table_height - 30.0) // Subtract header height
                         .vscroll(true);
 
         table
             .header(20.0, |mut header| {
                 header.col(|ui| {
-                    ui.strong("主动买单(5s)");
+                    ui.strong("Active Buy (5s)");
                 });
                 header.col(|ui| {
-                    ui.strong("Bid挂单");
+                    ui.strong("Bid Orders");
                 });
                 header.col(|ui| {
-                    ui.strong("价格");
+                    ui.strong("Price");
                 });
                 header.col(|ui| {
-                    ui.strong("Ask挂单");
+                    ui.strong("Ask Orders");
                 });
                 header.col(|ui| {
-                    ui.strong("主动卖单(5s)");
+                    ui.strong("Active Sell (5s)");
                 });
             })
             .body(|mut body| {
                 for row in data {
                     body.row(18.0, |mut row_ui| {
-                        // 第1列：主动买单累计(5s)
+                        // Column 1: Active buy accumulation (5s)
                         row_ui.col(|ui| {
                             if row.buy_volume_5s > 0.0 {
                                 ui.colored_label(egui::Color32::LIGHT_GREEN, format!("{:.4}", row.buy_volume_5s));
@@ -194,7 +153,7 @@ impl OrderBookWidget {
                             }
                         });
 
-                        // 第2列：Bid挂单
+                        // Column 2: Bid orders
                         row_ui.col(|ui| {
                             if row.bid_volume > 0.0 {
                                 ui.colored_label(egui::Color32::GREEN, format!("{:.4}", row.bid_volume));
@@ -203,26 +162,26 @@ impl OrderBookWidget {
                             }
                         });
 
-                        // 第3列：价格 - 高亮当前价格附近
+                        // Column 3: Price - highlight near current price
                         row_ui.col(|ui| {
                             let price_diff = (row.price - current_price).abs();
-                            let is_near_current = price_diff < 1.0; // 1美元范围内
+                            let is_near_current = price_diff < 1.0; // Within $1 range
 
                             if is_near_current {
-                                // 当前价格附近用黄色背景高亮
+                                // Highlight near current price with yellow background
                                 let _color = if row.price >= current_price {
-                                    egui::Color32::from_rgb(0, 100, 0) // 深绿色背景
+                                    egui::Color32::from_rgb(0, 100, 0) // Dark green background
                                 } else {
-                                    egui::Color32::from_rgb(100, 0, 0) // 深红色背景
+                                    egui::Color32::from_rgb(100, 0, 0) // Dark red background
                                 };
                                 ui.colored_label(egui::Color32::WHITE, format!("{:.2}", row.price))
-                                    .on_hover_text("当前价格附近");
+                                    .on_hover_text("Near current price");
                             } else {
                                 ui.label(format!("{:.2}", row.price));
                             }
                         });
 
-                        // 第4列：Ask挂单
+                        // Column 4: Ask orders
                         row_ui.col(|ui| {
                             if row.ask_volume > 0.0 {
                                 ui.colored_label(egui::Color32::RED, format!("{:.4}", row.ask_volume));
@@ -231,7 +190,7 @@ impl OrderBookWidget {
                             }
                         });
 
-                        // 第5列：主动卖单累计(5s)
+                        // Column 5: Active sell accumulation (5s)
                         row_ui.col(|ui| {
                             if row.sell_volume_5s > 0.0 {
                                 ui.colored_label(egui::Color32::LIGHT_RED, format!("{:.4}", row.sell_volume_5s));
@@ -248,7 +207,7 @@ impl OrderBookWidget {
     }
 }
 
-/// 订单簿行数据结构
+/// OrderBook table row data structure
 #[derive(Debug, Clone)]
 struct OrderBookRow {
     price: f64,

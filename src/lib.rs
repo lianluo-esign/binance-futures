@@ -31,7 +31,7 @@ pub fn init_logging() {
     let log_file = OpenOptions::new()
         .create(true)
         .append(true)
-        .open("binance_futures.log")
+        .open("flow_sight.log")
         .unwrap_or_else(|_| {
             // 如果无法创建日志文件，就完全禁用日志
             std::fs::File::create("/dev/null").unwrap()

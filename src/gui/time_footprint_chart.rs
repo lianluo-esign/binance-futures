@@ -5,36 +5,36 @@ use crate::app::ReactiveApp;
 use std::collections::HashMap;
 use chrono::{Utc, TimeZone};
 
-/// 价格线数据点 - 每秒的收盘价
+/// Price line data point - closing price per second
 #[derive(Debug, Clone)]
 struct PriceLinePoint {
-    /// 秒级时间戳
+    /// Second-level timestamp
     second_timestamp: u64,
-    /// 收盘价
+    /// Closing price
     close_price: f64,
 }
 
-/// Delta成交量点数据
+/// Delta volume point data
 #[derive(Debug, Clone)]
 struct DeltaVolumePoint {
-    /// 秒级时间戳
+    /// Second-level timestamp
     second_timestamp: u64,
-    /// 价格（收盘价）
+    /// Price (closing price)
     price: f64,
-    /// Delta成交量 (买单量 - 卖单量)
+    /// Delta volume (buy volume - sell volume)
     delta_volume: f64,
 }
 
-/// 秒级聚合数据
+/// Second-level aggregate data
 #[derive(Debug, Clone)]
 struct SecondAggregateData {
-    /// 总买单量
+    /// Total buy volume
     total_buy_volume: f64,
-    /// 总卖单量
+    /// Total sell volume
     total_sell_volume: f64,
-    /// 成交量加权价格总和
+    /// Volume-weighted price sum
     volume_weighted_price_sum: f64,
-    /// 总成交量
+    /// Total volume
     total_volume: f64,
 }
 
@@ -73,35 +73,35 @@ impl SecondAggregateData {
     }
 }
 
-/// 时间维度足迹图表组件
+/// Time dimension footprint chart component
 pub struct TimeFootprintChart {
-    /// 显示的时间窗口（分钟数）
+    /// Display time window (minutes)
     display_window_minutes: usize,
-    /// 是否自动跟随最新数据
+    /// Whether to auto-follow latest data
     auto_follow: bool,
-    /// 图表缩放状态
+    /// Chart zoom state
     zoom_level: f32,
-    /// 颜色配置
+    /// Color configuration
     buy_color: egui::Color32,
     sell_color: egui::Color32,
-    /// 上次更新时间（用于性能优化）
+    /// Last update time (for performance optimization)
     last_update_time: std::time::Instant,
-    /// 缓存的图表数据 - 按秒聚合的价格线数据
+    /// Cached chart data - second-aggregated price line data
     cached_price_line_data: Vec<PriceLinePoint>,
-    /// 缓存的delta成交量点数据
+    /// Cached delta volume point data
     cached_delta_points: Vec<DeltaVolumePoint>,
-    /// 数据版本（用于检测数据变化）
+    /// Data version (for detecting data changes)
     data_version: u64,
 }
 
 impl Default for TimeFootprintChart {
     fn default() -> Self {
         Self {
-            display_window_minutes: 25, // 显示最近25分钟
+            display_window_minutes: 25, // Display last 25 minutes
             auto_follow: true,
             zoom_level: 1.0,
-            buy_color: egui::Color32::from_rgba_unmultiplied(120, 255, 120, 180), // 半透明绿色
-            sell_color: egui::Color32::from_rgba_unmultiplied(255, 120, 120, 180), // 半透明红色
+            buy_color: egui::Color32::from_rgba_unmultiplied(120, 255, 120, 180), // Semi-transparent green
+            sell_color: egui::Color32::from_rgba_unmultiplied(255, 120, 120, 180), // Semi-transparent red
             last_update_time: std::time::Instant::now(),
             cached_price_line_data: Vec::new(),
             cached_delta_points: Vec::new(),
@@ -115,21 +115,21 @@ impl TimeFootprintChart {
         Self::default()
     }
 
-    /// 渲染时间维度足迹图表
+    /// Render time dimension footprint chart
     pub fn show(&mut self, ui: &mut egui::Ui, app: &ReactiveApp) {
-        // 获取时间维度数据
+        // Get time dimension data
         let time_footprint_data = app.get_orderbook_manager().get_time_footprint_data();
         
-        // 检查是否需要更新缓存数据
+        // Check if cached data needs updating
         let current_data_version = time_footprint_data.total_trades_processed;
         if current_data_version != self.data_version || 
-           self.last_update_time.elapsed().as_millis() > 100 { // 100ms更新间隔
+           self.last_update_time.elapsed().as_millis() > 100 { // 100ms update interval
             self.update_cached_data(time_footprint_data);
             self.data_version = current_data_version;
             self.last_update_time = std::time::Instant::now();
         }
 
-        // 创建图表，配置固定的网格间距和自定义格式化器
+        // Create chart, configure fixed grid spacing and custom formatters
         let plot = Plot::new("time_footprint_chart")
             .legend(egui_plot::Legend::default().position(egui_plot::Corner::LeftTop))
             .show_axes([true, true])
@@ -138,63 +138,63 @@ impl TimeFootprintChart {
             .allow_drag(true)
             .allow_scroll(true)
             .auto_bounds([true, true].into())
-            .x_axis_label("时间")
-            .y_axis_label("价格 (USD)")
+            .x_axis_label("Time")
+            .y_axis_label("Price (USD)")
             .width(ui.available_width())
             .height(ui.available_height())
-            // X轴：固定30秒间距，自定义时间格式化
+            // X-axis: fixed 30-second spacing, custom time formatting
             .x_grid_spacer(Self::time_grid_spacer)
             .x_axis_formatter(Self::format_time_axis)
-            // Y轴：固定50美元间距，自定义价格格式化
+            // Y-axis: fixed $50 spacing, custom price formatting
             .y_grid_spacer(Self::price_grid_spacer)
             .y_axis_formatter(Self::format_price_axis);
 
         plot.show(ui, |plot_ui| {
-            // 如果没有数据，显示提示
+            // If no data, show prompt
             if self.cached_price_line_data.is_empty() {
-                // 显示无数据提示
+                // Show no data prompt
                 let center_point = PlotPoint::new(0.0, 50000.0);
                 plot_ui.text(
-                    egui_plot::Text::new(center_point, "暂无交易数据")
+                    egui_plot::Text::new(center_point, "No Trade Data Available")
                         .color(egui::Color32::GRAY)
                 );
                 return;
             }
 
-            // 渲染价格线
+            // Render price line
             self.render_price_line(plot_ui);
 
-            // 渲染价格参考线
+            // Render price reference lines
             self.render_price_reference_lines(plot_ui, app);
         });
 
-        // 渲染控制面板
+        // Render control panel
         self.render_control_panel(ui);
     }
 
-    /// 更新缓存的图表数据 - 按秒聚合价格线和delta成交量
+    /// Update cached chart data - second-aggregated price line and delta volume
     fn update_cached_data(&mut self, time_footprint_data: &TimeFootprintData) {
         self.cached_price_line_data.clear();
         self.cached_delta_points.clear();
 
-        // 获取最近的数据
+        // Get recent data
         let recent_data = time_footprint_data.get_recent_data(self.display_window_minutes);
 
-        // 按秒聚合数据
+        // Aggregate data by second
         let mut second_data: HashMap<u64, SecondAggregateData> = HashMap::new();
 
         for minute_data in recent_data {
-            // 将分钟数据拆分为60秒
+            // Split minute data into 60 seconds
             for second_offset in 0..60 {
                 let second_timestamp = minute_data.minute_timestamp + (second_offset * 1000);
 
-                // 模拟每秒的数据（实际应用中应该有真实的秒级数据）
+                // Simulate per-second data (in real applications, there should be actual second-level data)
                 let mut second_aggregate = SecondAggregateData::new();
 
-                // 将分钟级数据平均分配到60秒中
+                // Evenly distribute minute-level data across 60 seconds
                 for price_level in minute_data.get_sorted_price_levels() {
                     if price_level.get_total_volume() > 0.0 {
-                        // 简单平均分配（实际应用中应该有更精确的时间戳）
+                        // Simple even distribution (in real applications, there should be more precise timestamps)
                         let buy_volume = price_level.buy_volume / 60.0;
                         let sell_volume = price_level.sell_volume / 60.0;
 
@@ -210,22 +210,22 @@ impl TimeFootprintChart {
             }
         }
 
-        // 生成价格线数据和delta成交量点
+        // Generate price line data and delta volume points
         let mut sorted_timestamps: Vec<u64> = second_data.keys().cloned().collect();
         sorted_timestamps.sort();
 
         for timestamp in sorted_timestamps {
             if let Some(aggregate) = second_data.get(&timestamp) {
-                // 价格线点（使用成交量加权平均价格作为收盘价）
+                // Price line point (use volume-weighted average price as closing price)
                 let close_price = aggregate.get_volume_weighted_price();
                 self.cached_price_line_data.push(PriceLinePoint {
                     second_timestamp: timestamp,
                     close_price,
                 });
 
-                // Delta成交量点
+                // Delta volume point
                 let delta_volume = aggregate.get_delta_volume();
-                if delta_volume.abs() > 0.01 { // 只显示有意义的delta
+                if delta_volume.abs() > 0.01 { // Only show meaningful delta
                     self.cached_delta_points.push(DeltaVolumePoint {
                         second_timestamp: timestamp,
                         price: close_price,
@@ -236,13 +236,13 @@ impl TimeFootprintChart {
         }
     }
 
-    /// 渲染价格线
+    /// Render price line
     fn render_price_line(&self, plot_ui: &mut egui_plot::PlotUi) {
         if self.cached_price_line_data.len() < 2 {
             return;
         }
 
-        // 构建价格线的点集合
+        // Build price line point collection
         let price_points: Vec<[f64; 2]> = self.cached_price_line_data
             .iter()
             .map(|point| [
@@ -251,22 +251,22 @@ impl TimeFootprintChart {
             ])
             .collect();
 
-        // 创建价格线
+        // Create price line
         let price_line = Line::new(price_points)
             .color(egui::Color32::WHITE)
             .width(2.0)
-            .name("价格线");
+            .name("Price Line");
 
         plot_ui.line(price_line);
     }
 
-    /// 渲染delta成交量点
+    /// Render delta volume points
     fn render_delta_volume_points(&self, plot_ui: &mut egui_plot::PlotUi) {
         if self.cached_delta_points.is_empty() {
             return;
         }
 
-        // 计算最大delta成交量用于缩放点的大小
+        // Calculate maximum delta volume for point size scaling
         let max_abs_delta = self.cached_delta_points
             .iter()
             .map(|p| p.delta_volume.abs())
@@ -276,7 +276,7 @@ impl TimeFootprintChart {
             return;
         }
 
-        // 分别处理正delta（买单优势）和负delta（卖单优势）
+        // Handle positive delta (buy advantage) and negative delta (sell advantage) separately
         let mut positive_points = Vec::new();
         let mut negative_points = Vec::new();
 
@@ -284,43 +284,43 @@ impl TimeFootprintChart {
             let x = self.timestamp_to_plot_x(point.second_timestamp);
             let y = point.price;
 
-            // 计算点的半径（基于delta成交量的绝对值）
+            // Calculate point radius (based on absolute delta volume)
             let normalized_delta = point.delta_volume.abs() / max_abs_delta;
-            let radius = (normalized_delta * 10.0).max(2.0); // 最小半径2，最大半径10
+            let radius = (normalized_delta * 10.0).max(2.0); // Minimum radius 2, maximum radius 10
 
             if point.delta_volume > 0.0 {
-                // 正delta - 买单优势，使用绿色
+                // Positive delta - buy advantage, use green
                 positive_points.push([x, y]);
             } else if point.delta_volume < 0.0 {
-                // 负delta - 卖单优势，使用红色
+                // Negative delta - sell advantage, use red
                 negative_points.push([x, y]);
             }
         }
 
-        // 渲染正delta点（买单优势）
+        // Render positive delta points (buy advantage)
         if !positive_points.is_empty() {
             let positive_points_plot = Points::new(positive_points)
                 .color(self.buy_color)
-                .radius(5.0) // 固定半径，后续可以根据需要调整
-                .name("买单优势");
+                .radius(5.0) // Fixed radius, can be adjusted as needed
+                .name("Buy Advantage");
             plot_ui.points(positive_points_plot);
         }
 
-        // 渲染负delta点（卖单优势）
+        // Render negative delta points (sell advantage)
         if !negative_points.is_empty() {
             let negative_points_plot = Points::new(negative_points)
                 .color(self.sell_color)
-                .radius(5.0) // 固定半径，后续可以根据需要调整
-                .name("卖单优势");
+                .radius(5.0) // Fixed radius, can be adjusted as needed
+                .name("Sell Advantage");
             plot_ui.points(negative_points_plot);
         }
     }
 
-    /// 渲染价格参考线
+    /// Render price reference lines
     fn render_price_reference_lines(&self, plot_ui: &mut egui_plot::PlotUi, app: &ReactiveApp) {
         let snapshot = app.get_market_snapshot();
         
-        // 当前价格线
+        // Current price line
         if let Some(current_price) = snapshot.current_price {
             let time_range = self.get_time_range();
             if let Some((start_time, end_time)) = time_range {
@@ -330,13 +330,13 @@ impl TimeFootprintChart {
                 ])
                 .color(egui::Color32::YELLOW)
                 .width(2.0)
-                .name("当前价格");
+                .name("Current Price");
                 
                 plot_ui.line(current_price_line);
             }
         }
         
-        // 最优买卖价线
+        // Best bid/ask price lines
         if let Some(best_bid) = snapshot.best_bid_price {
             let time_range = self.get_time_range();
             if let Some((start_time, end_time)) = time_range {
@@ -347,7 +347,7 @@ impl TimeFootprintChart {
                 .color(self.buy_color.gamma_multiply(1.5))
                 .width(1.0)
                 .style(egui_plot::LineStyle::Dashed { length: 5.0 })
-                .name("最优买价");
+                .name("Best Bid");
                 
                 plot_ui.line(bid_line);
             }
@@ -363,43 +363,43 @@ impl TimeFootprintChart {
                 .color(self.sell_color.gamma_multiply(1.5))
                 .width(1.0)
                 .style(egui_plot::LineStyle::Dashed { length: 5.0 })
-                .name("最优卖价");
+                .name("Best Ask");
                 
                 plot_ui.line(ask_line);
             }
         }
     }
 
-    /// 渲染控制面板
+    /// Render control panel
     fn render_control_panel(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.label("显示窗口:");
+            ui.label("Display Window:");
             ui.add(egui::Slider::new(&mut self.display_window_minutes, 10..=60)
-                .suffix(" 分钟"));
+                .suffix(" minutes"));
 
             ui.separator();
 
-            ui.checkbox(&mut self.auto_follow, "自动跟随");
+            ui.checkbox(&mut self.auto_follow, "Auto Follow");
 
             ui.separator();
 
-            if ui.button("重置缩放").clicked() {
+            if ui.button("Reset Zoom").clicked() {
                 self.zoom_level = 1.0;
             }
 
             ui.separator();
 
-            ui.label("显示: 每秒收盘价线型图");
+            ui.label("Display: Per-second closing price line chart");
         });
     }
 
-    /// 将时间戳转换为图表X坐标
+    /// Convert timestamp to chart X coordinate
     fn timestamp_to_plot_x(&self, timestamp: u64) -> f64 {
-        // 将毫秒时间戳转换为秒
+        // Convert millisecond timestamp to seconds
         (timestamp / 1000) as f64
     }
 
-    /// 获取当前显示的时间范围
+    /// Get current display time range
     fn get_time_range(&self) -> Option<(f64, f64)> {
         if self.cached_price_line_data.is_empty() {
             return None;
@@ -418,18 +418,18 @@ impl TimeFootprintChart {
         ))
     }
 
-    /// X轴时间网格间距器 - 固定30秒间距
+    /// X-axis time grid spacer - fixed 30-second spacing
     fn time_grid_spacer(input: GridInput) -> Vec<GridMark> {
         let mut marks = Vec::new();
 
-        // 固定30秒间距
-        let step_size = 30.0; // 30秒对应30.0单位
+        // Fixed 30-second spacing
+        let step_size = 30.0; // 30 seconds corresponds to 30.0 units
 
-        // 计算起始和结束的秒标记，向下和向上取整到30的倍数
+        // Calculate start and end second markers, round down and up to multiples of 30
         let start_second = ((input.bounds.0 / 30.0).floor() as i64) * 30;
         let end_second = ((input.bounds.1 / 30.0).ceil() as i64) * 30;
 
-        // 生成每30秒的网格标记
+        // Generate grid marks every 30 seconds
         let mut second = start_second;
         while second <= end_second {
             let value = second as f64;
@@ -439,24 +439,24 @@ impl TimeFootprintChart {
                     step_size,
                 });
             }
-            second += 30; // 每次增加30秒
+            second += 30; // Increment by 30 seconds each time
         }
 
         marks
     }
 
-    /// Y轴价格网格间距器 - 固定50美元间距
+    /// Y-axis price grid spacer - fixed $50 spacing
     fn price_grid_spacer(input: GridInput) -> Vec<GridMark> {
         let mut marks = Vec::new();
 
-        // 固定50美元间距
+        // Fixed $50 spacing
         let step_size = 50.0;
 
-        // 计算起始和结束的价格标记，向下和向上取整到50的倍数
+        // Calculate start and end price markers, round down and up to multiples of 50
         let start_price = ((input.bounds.0 / 50.0).floor() as i64) * 50;
         let end_price = ((input.bounds.1 / 50.0).ceil() as i64) * 50;
 
-        // 生成每50美元的网格标记
+        // Generate grid marks every $50
         let mut price = start_price;
         while price <= end_price {
             let value = price as f64;
@@ -466,29 +466,29 @@ impl TimeFootprintChart {
                     step_size,
                 });
             }
-            price += 50; // 每次增加50美元
+            price += 50; // Increment by $50 each time
         }
 
         marks
     }
 
-    /// X轴时间格式化器 - 显示为 HH:MM:SS 格式
+    /// X-axis time formatter - display as HH:MM:SS format
     fn format_time_axis(mark: GridMark, _axis_index: usize, _range: &std::ops::RangeInclusive<f64>) -> String {
-        // 将秒数转换回时间戳
-        let second_timestamp = (mark.value as u64) * 1000; // 转换为毫秒时间戳
+        // Convert seconds back to timestamp
+        let second_timestamp = (mark.value as u64) * 1000; // Convert to millisecond timestamp
 
-        // 转换为UTC时间
+        // Convert to UTC time
         let datetime = Utc.timestamp_millis_opt(second_timestamp as i64)
             .single()
             .unwrap_or_else(|| Utc::now());
 
-        // 格式化为 HH:MM:SS
+        // Format as HH:MM:SS
         datetime.format("%H:%M:%S").to_string()
     }
 
-    /// Y轴价格格式化器 - 显示为整数价格
+    /// Y-axis price formatter - display as integer price
     fn format_price_axis(mark: GridMark, _axis_index: usize, _range: &std::ops::RangeInclusive<f64>) -> String {
-        // 显示为整数价格，例如 101480, 101481, 101482
+        // Display as integer price, e.g., 101480, 101481, 101482
         format!("{:.0}", mark.value)
     }
 }

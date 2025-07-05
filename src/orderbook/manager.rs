@@ -421,8 +421,6 @@ impl OrderBookManager {
         &self.time_footprint_data
     }
 
-
-
     /// 定期清理过期数据
     pub fn cleanup_expired_data(&mut self) {
         let current_time = self.get_current_timestamp();
@@ -667,8 +665,8 @@ impl OrderBookManager {
         }
 
         // 生成信号
-        let direction_str = if is_ascending { "上涨" } else { "下跌" };
-        let side_str = if first_is_buy { "买单" } else { "卖单" };
+        let direction_str = if is_ascending { "Up" } else { "Down" };
+        let side_str = if first_is_buy { "Buy" } else { "Sell" };
         let total_volume: f64 = recent_ticks.iter().map(|tick| tick.volume).sum();
 
         // 如果总量为0，跳过信号生成
@@ -682,16 +680,16 @@ impl OrderBookManager {
 
         // 判断信号类型
         let signal_type = if total_volume >= 10.0 && price_change >= 0.05 {
-            "点火检测"
+            "Ignition Detection"
         } else {
-            "动量跟随"
+            "Momentum Follow"
         };
 
         // 格式化时间
         let time_str = self.format_timestamp(timestamp);
 
         let signal_text = format!(
-            "[{}] {} - {} {} 连续{}笔 价格{:.2}->{:.2} 总量{:.4}",
+            "[{}] {} - {} {} {} ticks Price {:.2}->{:.2} Volume {:.4}",
             time_str,
             signal_type,
             side_str,

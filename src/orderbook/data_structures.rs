@@ -1,4 +1,3 @@
-
 /// 价格级别数据结构
 #[derive(Debug, Clone)]
 pub struct PriceLevel {
@@ -51,7 +50,7 @@ pub struct BigOrder {
 #[derive(Debug, Clone)]
 pub struct TickPressureSignal {
     pub timestamp: u64,
-    pub signal_type: String, // "点火检测" 或 "短冲量跟随"
+    pub signal_type: String, // "Ignition Detection" or "Momentum Follow"
     pub direction: String,   // "上涨" 或 "下跌"
     pub tick_count: usize,   // 连续tick数量
     pub price_start: f64,    // 起始价格
