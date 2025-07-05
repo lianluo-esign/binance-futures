@@ -209,7 +209,7 @@ impl ReactiveApp {
                 }
 
                 // 限制每次处理的消息数量，防止阻塞
-                const MAX_MESSAGES_PER_CYCLE: usize = 50;
+                const MAX_MESSAGES_PER_CYCLE: usize = 1000;
                 let messages_to_process = messages.into_iter().take(MAX_MESSAGES_PER_CYCLE);
 
                 let mut events_created = 0;
