@@ -1,9 +1,12 @@
 use std::time::{Duration, Instant};
+use std::collections::HashMap;
 
 use crate::events::{Event, EventType, LockFreeEventDispatcher};
 use crate::orderbook::{OrderBookManager, MarketSnapshot};
 use crate::websocket::{WebSocketManager, WebSocketConfig};
+use crate::websocket::ExchangeConnectionState;
 use crate::monitoring::InternalMonitor;
+use crate::core::{BasicLayer, BasicLayerStats};
 use crate::Config;
 
 /// 响应式应用主结构（基于EventBus架构）
@@ -14,6 +17,9 @@ pub struct ReactiveApp {
     // 业务组件
     orderbook_manager: OrderBookManager,
     websocket_manager: WebSocketManager,
+    
+    // 数据层管理
+    basic_layer: BasicLayer,
     
     // 应用状态
     config: Config,
@@ -75,12 +81,16 @@ impl ReactiveApp {
         // 创建订单簿管理器
         let orderbook_manager = OrderBookManager::new();
         
+        // 创建基础数据层
+        let basic_layer = BasicLayer::new();
+        
         let now = Instant::now();
 
         Self {
             event_dispatcher,
             orderbook_manager,
             websocket_manager,
+            basic_layer,
             config,
             running: false,
             last_update: now,
@@ -290,7 +300,35 @@ impl ReactiveApp {
     fn process_events(&mut self) -> usize {
         // 限制每次处理的事件数量，避免UI阻塞
         const MAX_EVENTS_PER_CYCLE: usize = 100;
-        let events_processed = self.event_dispatcher.process_events_batch(MAX_EVENTS_PER_CYCLE);
+        let mut events_processed = 0;
+
+        // 手动处理事件，以便同时发送到BasicLayer
+        for _ in 0..MAX_EVENTS_PER_CYCLE {
+            if let Some(event) = self.event_dispatcher.poll_event() {
+                // 将事件发送到BasicLayer进行多交易所数据管理
+                self.basic_layer.handle_event(&event);
+                
+                // 根据事件类型分发给相应的处理器
+                match &event.event_type {
+                    EventType::DepthUpdate(ref data) => {
+                        self.orderbook_manager.handle_depth_update(data);
+                    }
+                    EventType::Trade(ref data) => {
+                        self.orderbook_manager.handle_trade(data);
+                    }
+                    EventType::BookTicker(ref data) => {
+                        self.orderbook_manager.handle_book_ticker(data);
+                    }
+                    _ => {
+                        // 其他事件类型的处理
+                    }
+                }
+                
+                events_processed += 1;
+            } else {
+                break;
+            }
+        }
 
         // 更新事件处理计数器
         self.total_events_processed += events_processed as u64;
@@ -563,6 +601,29 @@ impl ReactiveApp {
         self.websocket_manager.get_connection_status()
     }
 
+    /// 获取多交易所连接状态（模拟数据，用于UI显示）
+    pub fn get_multi_exchange_connection_status(&self) -> HashMap<String, ExchangeConnectionState> {
+        let mut status = HashMap::new();
+        
+        // 目前只有Binance连接，其他交易所状态为模拟
+        let binance_connected = self.websocket_manager.is_connected();
+        status.insert("Binance".to_string(), 
+            if binance_connected { 
+                ExchangeConnectionState::Connected 
+            } else { 
+                ExchangeConnectionState::Disconnected 
+            }
+        );
+        
+        // 模拟其他交易所状态（后续可以替换为真实的多交易所管理器）
+        status.insert("OKX".to_string(), ExchangeConnectionState::Disconnected);
+        status.insert("Bybit".to_string(), ExchangeConnectionState::Disconnected);
+        status.insert("Coinbase".to_string(), ExchangeConnectionState::Disconnected);
+        status.insert("Bitget".to_string(), ExchangeConnectionState::Disconnected);
+        
+        status
+    }
+
     // Getter方法
     pub fn is_running(&self) -> bool {
         self.running
@@ -590,6 +651,16 @@ impl ReactiveApp {
 
     pub fn get_orderbook_manager(&self) -> &OrderBookManager {
         &self.orderbook_manager
+    }
+
+    /// 获取BasicLayer的引用
+    pub fn get_basic_layer(&self) -> &BasicLayer {
+        &self.basic_layer
+    }
+
+    /// 获取BasicLayer的统计信息
+    pub fn get_basic_layer_stats(&self) -> BasicLayerStats {
+        self.basic_layer.get_global_stats()
     }
 
     pub fn get_max_visible_rows(&self) -> usize {

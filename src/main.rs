@@ -164,7 +164,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 创建配置
     let config = Config::new(symbol)
-        .with_buffer_size(10000)
+        .with_buffer_size(65536)
         .with_max_reconnects(5)
         .with_max_visible_rows(10000)    // 设置最大可见行数为3000
         .with_price_precision(0.01);    // 设置价格精度为0.01 USD (1分)

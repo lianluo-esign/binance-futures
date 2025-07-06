@@ -18,7 +18,7 @@ FlowSight 支持多种配置方式：
 use binance_futures::Config;
 
 let config = Config::new("BTCUSDT".to_string())
-    .with_buffer_size(10000)        // 事件缓冲区大小
+    .with_buffer_size(65536)        // 事件缓冲区大小
     .with_max_reconnects(5)         // 最大重连次数
     .with_max_visible_rows(3000)    // UI 最大显示行数
     .with_price_precision(0.01);    // 价格聚合精度
@@ -138,7 +138,7 @@ theme = "dark"
 ```rust
 // 高性能配置
 let high_perf_config = Config::new("BTCUSDT".to_string())
-    .with_buffer_size(32768)
+    .with_buffer_size(65536)
     .with_ui_refresh_rate(1)        // 1ms 刷新
     .with_cpu_affinity(Some(0))     // 绑定到核心 0
     .with_batch_processing(true);
@@ -310,7 +310,7 @@ valgrind --tool=massif cargo run --release
 
 ```rust
 Config::new("BTCUSDT".to_string())
-    .with_buffer_size(16384)
+    .with_buffer_size(65536)
     .with_max_reconnects(5)
     .with_ui_refresh_rate(16)
     .with_cpu_affinity(Some(0))
@@ -321,7 +321,7 @@ Config::new("BTCUSDT".to_string())
 
 ```rust
 Config::new("BTCUSDT".to_string())
-    .with_buffer_size(8192)
+    .with_buffer_size(65536)
     .with_max_reconnects(3)
     .with_ui_refresh_rate(33)
     .with_log_level("debug")

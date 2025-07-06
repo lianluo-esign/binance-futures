@@ -176,7 +176,7 @@ cargo test integration_test
 use binance_futures::Config;
 
 let config = Config::new("BTCUSDT".to_string())
-    .with_buffer_size(10000)        // 事件缓冲区大小
+    .with_buffer_size(65536)        // 事件缓冲区大小
     .with_max_reconnects(5)         // 最大重连次数
     .with_max_visible_rows(3000)    // UI 最大显示行数
     .with_price_precision(0.01);    // 价格聚合精度
@@ -190,7 +190,7 @@ let config = Config::new("BTCUSDT".to_string())
 ```rust
 // 高性能配置
 let config = Config::new("BTCUSDT".to_string())
-    .with_buffer_size(20000)        // 更大缓冲区
+    .with_buffer_size(65536)        // 更大缓冲区
     .with_cpu_affinity(Some(0))     // CPU 核心绑定
     .with_ui_refresh_rate(1);       // 1ms 刷新率
 

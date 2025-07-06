@@ -76,6 +76,15 @@ impl LockFreeEventDispatcher {
         self.event_bus.process_events(max_events)
     }
     
+    /// 轮询单个事件 - 完全无锁
+    /// 
+    /// # 返回值
+    /// * `Some(event)` - 获取到事件
+    /// * `None` - 没有待处理的事件
+    pub fn poll_event(&self) -> Option<Event> {
+        self.event_bus.poll_event()
+    }
+    
     /// 获取待处理事件数量 - 完全无锁
     pub fn pending_events(&self) -> usize {
         self.event_bus.pending_events()

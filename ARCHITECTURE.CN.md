@@ -214,7 +214,7 @@ pub struct Config {
 **构建器模式**
 ```rust
 let config = Config::new("BTCUSDT".to_string())
-    .with_buffer_size(10000)
+    .with_buffer_size(65536)
     .with_max_reconnects(5)
     .with_max_visible_rows(3000)
     .with_price_precision(0.01);

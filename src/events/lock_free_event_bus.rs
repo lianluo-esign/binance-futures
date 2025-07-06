@@ -165,6 +165,15 @@ impl LockFreeEventBus {
         processed
     }
     
+    /// 轮询单个事件（不处理）
+    /// 
+    /// # 返回值
+    /// * `Some(event)` - 获取到事件
+    /// * `None` - 没有待处理的事件
+    pub fn poll_event(&self) -> Option<Event> {
+        self.events.try_pop()
+    }
+    
     /// 同步处理单个事件
     fn process_event_sync(&self, event: &Event) {
         let event_type = event.event_type.type_name();

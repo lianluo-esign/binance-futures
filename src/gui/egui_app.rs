@@ -66,47 +66,59 @@ impl eframe::App for TradingGUI {
                 
                 // ui.separator();
                 
-                // Connection status indicator - display reconnection information
-                let connection_status = self.app.get_connection_status();
-                let (status_text, status_color) = if connection_status.is_connected {
-                    ("Connected".to_string(), egui::Color32::from_rgb(120, 255, 120))
-                } else if connection_status.is_reconnecting {
-                    (
-                        format!("Reconnecting... ({}/{}) - 3s interval",
-                            connection_status.reconnect_attempts,
-                            connection_status.max_attempts
-                        ),
-                        egui::Color32::from_rgb(255, 255, 120)
-                    )
-                } else {
-                    ("Disconnected".to_string(), egui::Color32::from_rgb(255, 120, 120))
-                };
+                // 多交易所连接状态指示器
+                let multi_exchange_status = self.app.get_multi_exchange_connection_status();
                 
-                // 绘制连接状态圆点
                 ui.horizontal(|ui| {
-                    let (rect, _) = ui.allocate_exact_size(egui::Vec2::splat(12.0), egui::Sense::hover());
-                    ui.painter().circle_filled(rect.center(), 6.0, status_color);
-                    ui.colored_label(status_color, status_text);
+                    ui.label("Exchange Connection Status:");
+                    
+                    // 按顺序显示各个交易所的状态
+                    let exchanges = ["Binance", "OKX", "Bybit", "Coinbase", "Bitget"];
+                    
+                    for exchange in &exchanges {
+                        let state = multi_exchange_status.get(*exchange).cloned()
+                            .unwrap_or(crate::websocket::ExchangeConnectionState::Disconnected);
+                        
+                        let (status_color, status_text) = match state {
+                            crate::websocket::ExchangeConnectionState::Connected => {
+                                (egui::Color32::from_rgb(120, 255, 120), "●")
+                            }
+                            crate::websocket::ExchangeConnectionState::Connecting => {
+                                (egui::Color32::from_rgb(255, 255, 120), "●")
+                            }
+                            crate::websocket::ExchangeConnectionState::Authenticating => {
+                                (egui::Color32::from_rgb(255, 255, 120), "●")
+                            }
+                            crate::websocket::ExchangeConnectionState::Authenticated => {
+                                (egui::Color32::from_rgb(120, 255, 120), "●")
+                            }
+                            crate::websocket::ExchangeConnectionState::Subscribing => {
+                                (egui::Color32::from_rgb(255, 255, 120), "●")
+                            }
+                            crate::websocket::ExchangeConnectionState::Subscribed => {
+                                (egui::Color32::from_rgb(120, 255, 120), "●")
+                            }
+                            crate::websocket::ExchangeConnectionState::Reconnecting => {
+                                (egui::Color32::from_rgb(255, 180, 120), "●")
+                            }
+                            crate::websocket::ExchangeConnectionState::Disconnected => {
+                                (egui::Color32::from_rgb(255, 120, 120), "●")
+                            }
+                            crate::websocket::ExchangeConnectionState::Failed(_) => {
+                                (egui::Color32::from_rgb(255, 80, 80), "●")
+                            }
+                        };
+                        
+                                                 ui.horizontal(|ui| {
+                             ui.colored_label(status_color, status_text);
+                             ui.label(*exchange);
+                         });
+                        
+                        ui.separator();
+                    }
                 });
 
-                // Display total reconnection count
-                if connection_status.total_reconnects > 0 {
-                    ui.separator();
-                    ui.colored_label(egui::Color32::GRAY,
-                        format!("Total Reconnects: {}", connection_status.total_reconnects));
-                }
 
-                // Display last error message (short version)
-                if let Some(error) = &connection_status.last_error {
-                    ui.separator();
-                    let short_error = if error.len() > 30 {
-                        format!("{}...", &error[..30])
-                    } else {
-                        error.clone()
-                    };
-                    ui.colored_label(egui::Color32::from_rgb(255, 180, 120),
-                        format!("Error: {}", short_error));
-                }
 
                 // Performance metrics
                 let stats = self.app.get_stats();

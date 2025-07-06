@@ -7,7 +7,7 @@ use std::thread;
 fn test_lock_free_performance() {
     // 创建配置
     let config = Config::new("BTCUSDT".to_string())
-        .with_buffer_size(10000);
+        .with_buffer_size(65536);
     
     // 创建应用程序
     let mut app = ReactiveApp::new(config);
@@ -58,7 +58,7 @@ fn test_concurrent_event_processing() {
     
     // 创建配置
     let config = Config::new("BTCUSDT".to_string())
-        .with_buffer_size(10000);
+        .with_buffer_size(65536);
     
     // 创建应用程序
     let app = Arc::new(std::sync::Mutex::new(ReactiveApp::new(config)));
@@ -116,7 +116,7 @@ fn test_concurrent_event_processing() {
 fn test_memory_usage_stability() {
     // 创建配置
     let config = Config::new("BTCUSDT".to_string())
-        .with_buffer_size(1000);
+        .with_buffer_size(65536);
     
     // 创建应用程序
     let mut app = ReactiveApp::new(config);
@@ -157,7 +157,7 @@ fn test_memory_usage_stability() {
 fn test_no_deadlock_under_stress() {
     // 创建配置
     let config = Config::new("BTCUSDT".to_string())
-        .with_buffer_size(5000);
+        .with_buffer_size(65536);
     
     // 创建应用程序
     let mut app = ReactiveApp::new(config);

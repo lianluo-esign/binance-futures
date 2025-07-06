@@ -74,6 +74,7 @@ pub struct Event {
     pub event_type: EventType,
     pub timestamp: u64,
     pub source: String,
+    pub exchange: String,
     pub priority: EventPriority,
 }
 
@@ -118,8 +119,16 @@ impl Event {
             event_type,
             timestamp,
             source,
+            exchange: "binance".to_string(),
             priority,
         }
+    }
+
+    /// 创建带有交易所信息的事件
+    pub fn new_with_exchange(event_type: EventType, source: String, exchange: String) -> Self {
+        let mut event = Self::new(event_type, source);
+        event.exchange = exchange;
+        event
     }
 
     pub fn with_priority(mut self, priority: EventPriority) -> Self {
@@ -135,5 +144,47 @@ impl Event {
             .as_millis() as u64;
         
         now.saturating_sub(self.timestamp) > max_age_ms
+    }
+}
+
+/// 支持的交易所枚举
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Exchange {
+    Binance,
+    OKX,
+    Bybit,
+    Coinbase,
+    Bitget,
+    Bitfinex,
+    GateIO,
+    MEXC,
+}
+
+impl Exchange {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Exchange::Binance => "binance",
+            Exchange::OKX => "okx",
+            Exchange::Bybit => "bybit",
+            Exchange::Coinbase => "coinbase",
+            Exchange::Bitget => "bitget",
+            Exchange::Bitfinex => "bitfinex",
+            Exchange::GateIO => "gateio",
+            Exchange::MEXC => "mexc",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "binance" => Some(Exchange::Binance),
+            "okx" => Some(Exchange::OKX),
+            "bybit" => Some(Exchange::Bybit),
+            "coinbase" => Some(Exchange::Coinbase),
+            "bitget" => Some(Exchange::Bitget),
+            "bitfinex" => Some(Exchange::Bitfinex),
+            "gateio" | "gate.io" => Some(Exchange::GateIO),
+            "mexc" => Some(Exchange::MEXC),
+            _ => None,
+        }
     }
 }

@@ -1,4 +1,4 @@
-use binance_futures::{Config, ReactiveApp, Event, EventType};
+use flow_sight::{Config, ReactiveApp, Event, EventType};
 use serde_json::json;
 use std::time::Duration;
 
@@ -6,7 +6,7 @@ use std::time::Duration;
 fn test_event_bus_basic_functionality() {
     // 创建配置
     let config = Config::new("BTCUSDT".to_string())
-        .with_buffer_size(1000);
+        .with_buffer_size(65536);
     
     // 创建应用程序
     let mut app = ReactiveApp::new(config);
@@ -66,12 +66,12 @@ fn test_event_creation() {
 #[test]
 fn test_config_builder() {
     let config = Config::new("ADAUSDT".to_string())
-        .with_buffer_size(5000)
+        .with_buffer_size(65536)
         .with_max_reconnects(10)
         .with_log_level("debug".to_string());
     
     assert_eq!(config.symbol, "ADAUSDT");
-    assert_eq!(config.event_buffer_size, 5000);
+    assert_eq!(config.event_buffer_size, 65536);
     assert_eq!(config.max_reconnect_attempts, 10);
     assert_eq!(config.log_level, "debug");
 }

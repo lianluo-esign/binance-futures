@@ -60,7 +60,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             symbol: "BTCUSDT".to_string(),
-            event_buffer_size: 10000,
+            event_buffer_size: 65536,   // 高性能缓冲区大小
             max_reconnect_attempts: 5,
             log_level: "info".to_string(),
             max_visible_rows: 3000,     // 默认最大可见行数为3000
