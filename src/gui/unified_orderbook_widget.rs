@@ -59,6 +59,11 @@ pub struct UnifiedOrderBookWidget {
     price_chart_height: f32,
     /// ΔTick Pressure K值设置
     tick_pressure_k_value: usize,
+    pub price_col_width: f32,
+    pub bids_asks_col_width: f32,
+    pub buy_col_width: f32,
+    pub sell_col_width: f32,
+    pub delta_col_width: f32,
 }
 
 impl Default for UnifiedOrderBookWidget {
@@ -82,6 +87,11 @@ impl Default for UnifiedOrderBookWidget {
             max_price_history: 10000,
             price_chart_height: 200.0, // 默认高度300像素
             tick_pressure_k_value: 5, // 默认5笔
+            price_col_width: 80.0,
+            bids_asks_col_width: 200.0,
+            buy_col_width: 80.0,
+            sell_col_width: 80.0,
+            delta_col_width: 80.0,
         }
     }
 }
@@ -357,6 +367,15 @@ impl UnifiedOrderBookWidget {
             let side = last_side.unwrap_or_else(|| "unknown".to_string());
             self.update_price_history(current_price, volume, side);
         }
+
+        ui.horizontal(|ui| {
+            ui.label("列宽设置：");
+            ui.add(egui::Slider::new(&mut self.price_col_width, 50.0..=300.0).text("Price"));
+            ui.add(egui::Slider::new(&mut self.bids_asks_col_width, 50.0..=300.0).text("Bids & Asks"));
+            ui.add(egui::Slider::new(&mut self.buy_col_width, 50.0..=300.0).text("Buy"));
+            ui.add(egui::Slider::new(&mut self.sell_col_width, 50.0..=300.0).text("Sell"));
+            ui.add(egui::Slider::new(&mut self.delta_col_width, 50.0..=300.0).text("Delta"));
+        });
     }
 
     /// 数据驱动UI：提取当前价格±40层的可见数据（总共最多81行）
@@ -574,35 +593,27 @@ impl UnifiedOrderBookWidget {
 
                 let table = TableBuilder::new(ui)
                     .striped(false)
-                    .resizable(false) // 禁用调整大小以保持固定宽度
+                    .resizable(false)
                     .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-                    .column(Column::exact(fixed_buyselltrade_width)) // 主动卖单累计(5s) - 固定80px
-                    .column(Column::exact(fixed_column_width)) // 买单深度 - 固定80px
-                    .column(Column::exact(price_width)) // 价格 - 固定50px
-                    .column(Column::exact(fixed_column_width)) // 卖单深度 - 固定80px
-                    .column(Column::exact(fixed_buyselltrade_width)) // 主动买单累计(5s) - 固定80px
-                    .column(Column::exact(flexible_column_width)) // 历史累计主动买单量 - 灵活宽度
-                    .column(Column::exact(flexible_column_width)) // 历史累计主动卖单量 - 灵活宽度
-                    .column(Column::remainder()) // 主动订单delta - 使用剩余空间
-                    .max_scroll_height(table_height - 30.0) // 为表头预留空间
+                    .column(Column::exact(self.price_col_width))        // Price
+                    .column(Column::exact(self.bids_asks_col_width))    // Bids & Asks
+                    .column(Column::exact(self.buy_col_width))          // Buy
+                    .column(Column::exact(self.sell_col_width))         // Sell
+                    .column(Column::exact(self.delta_col_width))        // Delta
+                    .max_scroll_height(table_height - 30.0)
                     .scroll_to_row(self.calculate_center_row_index(data, current_price), None);
 
-                table
-                    .header(25.0, |mut header| {
-                        header.col(|ui| { ui.strong("Active Sell"); });
-                        header.col(|ui| { ui.strong("Bid Depth"); });
+                table.header(25.0, |mut header| {
                         header.col(|ui| { ui.strong("Price"); });
-                        header.col(|ui| { ui.strong("Ask Depth"); });
-                        header.col(|ui| { ui.strong("Active Buy"); });
-                        header.col(|ui| { ui.strong("Historical Buy"); });
-                        header.col(|ui| { ui.strong("Historical Sell"); });
+                        header.col(|ui| { ui.strong("Bids & Asks"); });
+                        header.col(|ui| { ui.strong("Buy"); });
+                        header.col(|ui| { ui.strong("Sell"); });
                         header.col(|ui| { ui.strong("Delta"); });
-                    })
-                    .body(|mut body| {
+                    }).body(|mut body| {
                         // 渲染所有可见数据行（最多81行）
                         for row in data {
                             body.row(25.0, |mut row_ui| {
-                                self.render_table_row(&mut row_ui, row, current_price, max_history_buy, max_history_sell, max_delta);
+                                self.render_table_row(&mut row_ui, row, current_price);
                             });
                         }
                     });
@@ -792,46 +803,34 @@ impl UnifiedOrderBookWidget {
         let max_ask_volume = data.iter().map(|row| row.ask_volume).fold(0.0, f64::max);
 
         ui.push_id("unified_orderbook_table", |ui| {
-            // 获取可用宽度并平均分配给8列
+            // 获取可用宽度并平均分配给5列
             let available_width = ui.available_width();
-            let column_width = available_width / 8.0;
+            let column_width = available_width / 5.0;
 
             let table = TableBuilder::new(ui)
                 .striped(false)
                 .resizable(false) // 禁用调整大小以保持均匀分布
                 .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-                .column(Column::exact(column_width)) // 主动卖单累计(5s)
-                .column(Column::exact(column_width)) // 买单深度
                 .column(Column::exact(column_width)) // 价格
-                .column(Column::exact(column_width)) // 卖单深度
-                .column(Column::exact(column_width)) // 主动买单累计(5s)
-                .column(Column::exact(column_width)) // 历史累计主动买单量
-                .column(Column::exact(column_width)) // 历史累计主动卖单量
-                .column(Column::remainder()) // 主动订单delta - 使用剩余空间
+                .column(Column::exact(column_width)) // Bids & Asks (合并显示)
+                .column(Column::exact(column_width)) // Buy (主动买单)
+                .column(Column::exact(column_width)) // Sell (主动卖单)
+                .column(Column::exact(column_width)) // Delta
                 .sense(egui::Sense::click()); // 不使用内置滚动，由外部ScrollArea控制
 
             table
                 .header(25.0, |mut header| {
                     header.col(|ui| {
-                        ui.strong("Active Sell");
-                    });
-                    header.col(|ui| {
-                        ui.strong("Bid Depth");
-                    });
-                    header.col(|ui| {
                         ui.strong("Price");
                     });
                     header.col(|ui| {
-                        ui.strong("Ask Depth");
+                        ui.strong("Bids & Asks");
                     });
                     header.col(|ui| {
-                        ui.strong("Active Buy");
+                        ui.strong("Buy");
                     });
                     header.col(|ui| {
-                        ui.strong("Historical Buy");
-                    });
-                    header.col(|ui| {
-                        ui.strong("Historical Sell");
+                        ui.strong("Sell");
                     });
                     header.col(|ui| {
                         ui.strong("Delta");
@@ -841,7 +840,7 @@ impl UnifiedOrderBookWidget {
                     // 渲染所有数据行
                     for row in data {
                         body.row(25.0, |mut row_ui| {
-                            self.render_table_row(&mut row_ui, row, current_price, max_history_buy, max_history_sell, max_delta);
+                            self.render_table_row(&mut row_ui, row, current_price);
                         });
                     }
                 });
@@ -880,47 +879,35 @@ impl UnifiedOrderBookWidget {
         };
 
         ui.push_id("unified_orderbook_table", |ui| {
-            // 获取可用宽度并平均分配给8列
+            // 获取可用宽度并平均分配给5列
             let available_width = ui.available_width();
-            let column_width = available_width / 8.0;
+            let column_width = available_width / 5.0;
 
             let table = TableBuilder::new(ui)
                 .striped(false)
                 .resizable(false) // 禁用调整大小以保持均匀分布
                 .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-                .column(Column::exact(column_width)) // 主动卖单累计(5s)
-                .column(Column::exact(column_width)) // 买单深度
                 .column(Column::exact(column_width)) // 价格
-                .column(Column::exact(column_width)) // 卖单深度
-                .column(Column::exact(column_width)) // 主动买单累计(5s)
-                .column(Column::exact(column_width)) // 历史累计主动买单量
-                .column(Column::exact(column_width)) // 历史累计主动卖单量
-                .column(Column::remainder()) // 主动订单delta - 使用剩余空间
+                .column(Column::exact(column_width)) // Bids & Asks (合并显示)
+                .column(Column::exact(column_width)) // Buy (主动买单)
+                .column(Column::exact(column_width)) // Sell (主动卖单)
+                .column(Column::exact(column_width)) // Delta
                 .vscroll(true) // 启用内置滚动
                 .max_scroll_height(table_height); // 设置最大滚动高度
 
             table
                 .header(25.0, |mut header| {
                     header.col(|ui| {
-                        ui.strong("Active Sell");
-                    });
-                    header.col(|ui| {
-                        ui.strong("Bid Depth");
-                    });
-                    header.col(|ui| {
                         ui.strong("Price");
                     });
                     header.col(|ui| {
-                        ui.strong("Ask Depth");
+                        ui.strong("Bids & Asks");
                     });
                     header.col(|ui| {
-                        ui.strong("Active Buy");
+                        ui.strong("Buy");
                     });
                     header.col(|ui| {
-                        ui.strong("Historical Buy");
-                    });
-                    header.col(|ui| {
-                        ui.strong("Historical Sell");
+                        ui.strong("Sell");
                     });
                     header.col(|ui| {
                         ui.strong("Delta");
@@ -930,7 +917,7 @@ impl UnifiedOrderBookWidget {
                     // 渲染所有数据行，表格内置滚动会自动处理
                     for row in data {
                         body.row(25.0, |mut row_ui| {
-                            self.render_table_row(&mut row_ui, row, current_price, max_history_buy, max_history_sell, max_delta);
+                            self.render_table_row(&mut row_ui, row, current_price);
                         });
                     }
                 });
@@ -948,53 +935,39 @@ impl UnifiedOrderBookWidget {
         use egui_extras::{Column, TableBuilder};
 
         // 计算各列的最大值用于条形图缩放
-        let max_history_buy = data.iter().map(|row| row.history_buy_volume).fold(0.0, f64::max);
-        let max_history_sell = data.iter().map(|row| row.history_sell_volume).fold(0.0, f64::max);
-        let max_delta = data.iter().map(|row| row.delta.abs()).fold(0.0, f64::max);
         let max_bid_volume = data.iter().map(|row| row.bid_volume).fold(0.0, f64::max);
         let max_ask_volume = data.iter().map(|row| row.ask_volume).fold(0.0, f64::max);
+        let max_delta = data.iter().map(|row| row.delta.abs()).fold(0.0, f64::max);
 
         ui.push_id("unified_orderbook_table", |ui| {
-            // 获取可用宽度并平均分配给8列
+            // 获取可用宽度并平均分配给5列
             let available_width = ui.available_width();
-            let column_width = available_width / 8.0;
+            let column_width = available_width / 5.0;
 
             let table = TableBuilder::new(ui)
                 .striped(false)
                 .resizable(false) // 禁用调整大小以保持均匀分布
                 .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-                .column(Column::exact(column_width)) // 主动卖单累计(5s)
-                .column(Column::exact(column_width)) // 买单深度
                 .column(Column::exact(column_width)) // 价格
-                .column(Column::exact(column_width)) // 卖单深度
-                .column(Column::exact(column_width)) // 主动买单累计(5s)
-                .column(Column::exact(column_width)) // 历史累计主动买单量
-                .column(Column::exact(column_width)) // 历史累计主动卖单量
-                .column(Column::remainder()) // 主动订单delta - 使用剩余空间
+                .column(Column::exact(column_width)) // Bids & Asks (合并显示)
+                .column(Column::exact(column_width)) // Buy (主动买单)
+                .column(Column::exact(column_width)) // Sell (主动卖单)
+                .column(Column::exact(column_width)) // Delta
                 .sense(egui::Sense::click()); // 移除内置滚动，使用外部ScrollArea
 
             table
                 .header(25.0, |mut header| {
                     header.col(|ui| {
-                        ui.strong("Active Sell");
-                    });
-                    header.col(|ui| {
-                        ui.strong("Bid Depth");
-                    });
-                    header.col(|ui| {
                         ui.strong("Price");
                     });
                     header.col(|ui| {
-                        ui.strong("Ask Depth");
+                        ui.strong("Bids & Asks");
                     });
                     header.col(|ui| {
-                        ui.strong("Active Buy");
+                        ui.strong("Buy");
                     });
                     header.col(|ui| {
-                        ui.strong("Historical Buy");
-                    });
-                    header.col(|ui| {
-                        ui.strong("Historical Sell");
+                        ui.strong("Sell");
                     });
                     header.col(|ui| {
                         ui.strong("Delta");
@@ -1005,45 +978,7 @@ impl UnifiedOrderBookWidget {
 
                     for row in data {
                         body.row(25.0, |mut row_ui| {
-                            // 第1列：主动卖单累计(5s) - 加粗显示
-                            row_ui.col(|ui| {
-                                if row.active_sell_volume_5s > 0.0 {
-                                    ui.add(egui::Label::new(egui::RichText::new(format!("{:.4}", row.active_sell_volume_5s))
-                                        .color(egui::Color32::from_rgb(255, 120, 120))
-                                        .strong()));
-                                } else {
-                                    ui.colored_label(egui::Color32::GRAY, "--");
-                                }
-                            });
-
-                            // 第2列：买单深度 + 背景条形图
-                            row_ui.col(|ui| {
-                                if row.bid_volume > 0.0 {
-                                    // 计算条形图宽度
-                                    let bar_width = self.calculate_bar_width(row.bid_volume, max_bid_volume);
-
-                                    // 使用层叠布局：先绘制背景条形图，再显示文本
-                                    ui.allocate_ui_with_layout(
-                                        ui.available_size(),
-                                        egui::Layout::left_to_right(egui::Align::Center),
-                                        |ui| {
-                                            if bar_width > 1.0 {
-                                                // 绘制背景条形图（使用与文本相同的颜色但更透明）
-                                                self.draw_background_bar(ui, bar_width, egui::Color32::from_rgb(120, 180, 255));
-                                            }
-
-                                            // 重置UI位置到开始处，在条形图上方显示文本
-                                            ui.allocate_ui_at_rect(ui.max_rect(), |ui| {
-                                                ui.colored_label(egui::Color32::from_rgb(120, 180, 255), format!("{:.4}", row.bid_volume));
-                                            });
-                                        }
-                                    );
-                                } else {
-                                    ui.colored_label(egui::Color32::GRAY, "--");
-                                }
-                            });
-
-                            // 第3列：价格 - 精确的当前价格高亮（只有一个价格层级被高亮）
+                            // 第1列：价格 - 精确的当前价格高亮（只有一个价格层级被高亮）
                             row_ui.col(|ui| {
                                 let is_current_price_row = self.is_current_price_row(row.price, current_price);
                                 // 格式化价格为整数美元显示（1美元聚合级别）
@@ -1071,98 +1006,174 @@ impl UnifiedOrderBookWidget {
                                 }
                             });
 
-                            // 第4列：卖单深度 + 背景条形图
+                            // 第2列：Bids & Asks - 横向条形图直观显示数值大小
                             row_ui.col(|ui| {
-                                if row.ask_volume > 0.0 {
-                                    // 计算条形图宽度
-                                    let bar_width = self.calculate_bar_width(row.ask_volume, max_ask_volume);
-
-                                    // 使用层叠布局：先绘制背景条形图，再显示文本
-                                    ui.allocate_ui_with_layout(
-                                        ui.available_size(),
-                                        egui::Layout::left_to_right(egui::Align::Center),
-                                        |ui| {
-                                            if bar_width > 1.0 {
-                                                // 绘制背景条形图（使用与文本相同的颜色但更透明）
-                                                self.draw_background_bar(ui, bar_width, egui::Color32::from_rgb(255, 120, 120));
-                                            }
-
-                                            // 重置UI位置到开始处，在条形图上方显示文本
-                                            ui.allocate_ui_at_rect(ui.max_rect(), |ui| {
-                                                ui.colored_label(egui::Color32::from_rgb(255, 120, 120), format!("{:.4}", row.ask_volume));
-                                            });
-                                        }
+                                let cell_rect = ui.max_rect();
+                                let cell_width = cell_rect.width();
+                                let cell_height = cell_rect.height();
+                                
+                                // 找出所有bid和ask中的最大值作为100%基准
+                                let max_value = self.cached_visible_data.iter()
+                                    .map(|r| r.bid_volume.max(r.ask_volume))
+                                    .fold(0.0, f64::max);
+                                
+                                // 如果同时有bid和ask，显示两行
+                                if row.bid_volume > 0.0 && row.ask_volume > 0.0 {
+                                    let half_height = cell_height / 2.0;
+                                    
+                                    // 上半部分：ask（红色）
+                                    let ask_width = if max_value > 0.0 { 
+                                        (cell_width * (row.ask_volume / max_value) as f32).min(cell_width) 
+                                    } else { 0.0 };
+                                    
+                                    if ask_width > 1.0 {
+                                        let ask_rect = egui::Rect::from_min_size(
+                                            cell_rect.min,
+                                            egui::Vec2::new(ask_width, half_height)
+                                        );
+                                        ui.painter().rect_filled(
+                                            ask_rect,
+                                            0.0,
+                                            egui::Color32::from_rgba_unmultiplied(255, 80, 80, 100)
+                                        );
+                                    }
+                                    
+                                    // ask数值显示
+                                    let ask_text_rect = egui::Rect::from_min_size(
+                                        cell_rect.min,
+                                        egui::Vec2::new(cell_width, half_height)
                                     );
-                                } else {
-                                    ui.colored_label(egui::Color32::GRAY, "--");
+                                    ui.allocate_ui_at_rect(ask_text_rect, |ui| {
+                                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                            ui.add_space(4.0);
+                                            ui.label(egui::RichText::new(format!("{:.4}", row.ask_volume))
+                                                .color(egui::Color32::WHITE)
+                                                .size(11.0));
+                                        });
+                                    });
+                                    
+                                    // 下半部分：bid（蓝色）
+                                    let bid_width = if max_value > 0.0 { 
+                                        (cell_width * (row.bid_volume / max_value) as f32).min(cell_width) 
+                                    } else { 0.0 };
+                                    
+                                    if bid_width > 1.0 {
+                                        let bid_rect = egui::Rect::from_min_size(
+                                            cell_rect.min + egui::Vec2::new(0.0, half_height),
+                                            egui::Vec2::new(bid_width, half_height)
+                                        );
+                                        ui.painter().rect_filled(
+                                            bid_rect,
+                                            0.0,
+                                            egui::Color32::from_rgba_unmultiplied(80, 150, 255, 100)
+                                        );
+                                    }
+                                    
+                                    // bid数值显示
+                                    let bid_text_rect = egui::Rect::from_min_size(
+                                        cell_rect.min + egui::Vec2::new(0.0, half_height),
+                                        egui::Vec2::new(cell_width, half_height)
+                                    );
+                                    ui.allocate_ui_at_rect(bid_text_rect, |ui| {
+                                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                            ui.add_space(4.0);
+                                            ui.label(egui::RichText::new(format!("{:.4}", row.bid_volume))
+                                                .color(egui::Color32::WHITE)
+                                                .size(11.0));
+                                        });
+                                    });
+                                } 
+                                // 只有ask
+                                else if row.ask_volume > 0.0 {
+                                    let ask_width = if max_value > 0.0 { 
+                                        (cell_width * (row.ask_volume / max_value) as f32).min(cell_width) 
+                                    } else { 0.0 };
+                                    
+                                    if ask_width > 1.0 {
+                                        let ask_rect = egui::Rect::from_min_size(
+                                            cell_rect.min,
+                                            egui::Vec2::new(ask_width, cell_height)
+                                        );
+                                        ui.painter().rect_filled(
+                                            ask_rect,
+                                            0.0,
+                                            egui::Color32::from_rgba_unmultiplied(255, 80, 80, 100)
+                                        );
+                                    }
+                                    
+                                    // 数值显示
+                                    ui.allocate_ui_at_rect(cell_rect, |ui| {
+                                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                            ui.add_space(4.0);
+                                            ui.label(egui::RichText::new(format!("{:.4}", row.ask_volume))
+                                                .color(egui::Color32::WHITE));
+                                        });
+                                    });
                                 }
+                                // 只有bid
+                                else if row.bid_volume > 0.0 {
+                                    let bid_width = if max_value > 0.0 { 
+                                        (cell_width * (row.bid_volume / max_value) as f32).min(cell_width) 
+                                    } else { 0.0 };
+                                    
+                                    if bid_width > 1.0 {
+                                        let bid_rect = egui::Rect::from_min_size(
+                                            cell_rect.min,
+                                            egui::Vec2::new(bid_width, cell_height)
+                                        );
+                                        ui.painter().rect_filled(
+                                            bid_rect,
+                                            0.0,
+                                            egui::Color32::from_rgba_unmultiplied(80, 150, 255, 100)
+                                        );
+                                    }
+                                    
+                                    // 数值显示
+                                    ui.allocate_ui_at_rect(cell_rect, |ui| {
+                                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                            ui.add_space(4.0);
+                                            ui.label(egui::RichText::new(format!("{:.4}", row.bid_volume))
+                                                .color(egui::Color32::WHITE));
+                                        });
+                                    });
+                                }
+                                                // 都没有 - 不显示任何内容
+                else {
+                    // 空白显示，不绘制任何内容
+                }
                             });
 
-                            // 第5列：主动买单累计(5s) - 加粗显示
+                            // 第3列：Buy (主动买单) - 使用5秒内的主动买单数据
                             row_ui.col(|ui| {
                                 if row.active_buy_volume_5s > 0.0 {
                                     ui.add(egui::Label::new(egui::RichText::new(format!("{:.4}", row.active_buy_volume_5s))
                                         .color(egui::Color32::from_rgb(120, 255, 120))
                                         .strong()));
-                                } else {
-                                    ui.colored_label(egui::Color32::GRAY, "--");
                                 }
+                                // 没有数据时不显示任何内容
                             });
 
-                            // 第6列：历史累计主动买单量 + 条形图
+                            // 第4列：Sell (主动卖单) - 使用5秒内的主动卖单数据
                             row_ui.col(|ui| {
-                                ui.horizontal(|ui| {
-                                    if row.history_buy_volume > 0.0 {
-                                        ui.colored_label(egui::Color32::from_rgb(120, 255, 120), format!("{:.4}", row.history_buy_volume));
-
-                                        // 绘制条形图
-                                        let bar_width = self.calculate_bar_width(row.history_buy_volume, max_history_buy);
-                                        if bar_width > 1.0 {
-                                            self.draw_horizontal_bar(ui, bar_width, egui::Color32::from_rgb(120, 255, 120));
-                                        }
-                                    } else {
-                                        ui.colored_label(egui::Color32::GRAY, "--");
-                                    }
-                                });
+                                if row.active_sell_volume_5s > 0.0 {
+                                    ui.add(egui::Label::new(egui::RichText::new(format!("{:.4}", row.active_sell_volume_5s))
+                                        .color(egui::Color32::from_rgb(255, 120, 120))
+                                        .strong()));
+                                }
+                                // 没有数据时不显示任何内容
                             });
 
-                            // 第7列：历史累计主动卖单量 + 条形图
+                            // 第5列：Delta - 主动订单delta
                             row_ui.col(|ui| {
-                                ui.horizontal(|ui| {
-                                    if row.history_sell_volume > 0.0 {
-                                        ui.colored_label(egui::Color32::from_rgb(255, 120, 120), format!("{:.4}", row.history_sell_volume));
-
-                                        // 绘制条形图
-                                        let bar_width = self.calculate_bar_width(row.history_sell_volume, max_history_sell);
-                                        if bar_width > 1.0 {
-                                            self.draw_horizontal_bar(ui, bar_width, egui::Color32::from_rgb(255, 120, 120));
-                                        }
+                                if row.delta.abs() > 0.0001 {
+                                    let color = if row.delta > 0.0 {
+                                        egui::Color32::from_rgb(120, 255, 120)
                                     } else {
-                                        ui.colored_label(egui::Color32::GRAY, "--");
-                                    }
-                                });
-                            });
-
-                            // 第8列：主动订单delta + 条形图
-                            row_ui.col(|ui| {
-                                ui.horizontal(|ui| {
-                                    if row.delta.abs() > 0.0001 {
-                                        let color = if row.delta > 0.0 {
-                                            egui::Color32::from_rgb(120, 255, 120)
-                                        } else {
-                                            egui::Color32::from_rgb(255, 120, 120)
-                                        };
-                                        ui.colored_label(color, format!("{:+.4}", row.delta));
-
-                                        // 绘制条形图
-                                        let bar_width = self.calculate_bar_width(row.delta.abs(), max_delta);
-                                        if bar_width > 1.0 {
-                                            self.draw_horizontal_bar(ui, bar_width, color);
-                                        }
-                                    } else {
-                                        ui.colored_label(egui::Color32::GRAY, "--");
-                                    }
-                                });
+                                        egui::Color32::from_rgb(255, 120, 120)
+                                    };
+                                    ui.colored_label(color, format!("{:+.4}", row.delta));
+                                }
+                                // 没有数据时不显示任何内容
                             });
 
 
@@ -1241,9 +1252,6 @@ impl UnifiedOrderBookWidget {
         row_ui: &mut egui_extras::TableRow,
         row: &UnifiedOrderBookRow,
         current_price: f64,
-        max_history_buy: f64,
-        max_history_sell: f64,
-        max_delta: f64,
     ) {
         // 计算买单和卖单深度的最大值用于条形图缩放
         let max_bid_volume = self.cached_visible_data.iter().map(|r| r.bid_volume).fold(0.0, f64::max);
@@ -1251,45 +1259,8 @@ impl UnifiedOrderBookWidget {
 
         // 计算是否为当前价格行（只有最接近的一行会被标记为当前价格）
         let is_current_price_row = self.is_current_price_row(row.price, current_price);
-        // 第1列：主动卖单累计(5s) - 加粗显示
-        row_ui.col(|ui| {
-            if row.active_sell_volume_5s > 0.0 {
-                ui.add(egui::Label::new(egui::RichText::new(format!("{:.4}", row.active_sell_volume_5s))
-                    .color(egui::Color32::from_rgb(255, 120, 120))
-                    .strong()));
-            } else {
-                ui.colored_label(egui::Color32::GRAY, "");
-            }
-        });
-
-        // 第2列：买单深度 + 背景条形图
-        row_ui.col(|ui| {
-            if row.bid_volume > 0.0 {
-                // 计算条形图宽度
-                let bar_width = self.calculate_bar_width(row.bid_volume, max_bid_volume);
-
-                // 使用层叠布局：先绘制背景条形图，再显示文本
-                ui.allocate_ui_with_layout(
-                    ui.available_size(),
-                    egui::Layout::left_to_right(egui::Align::Center),
-                    |ui| {
-                        if bar_width > 1.0 {
-                            // 绘制背景条形图（使用与文本相同的颜色但更透明）
-                            self.draw_background_bar(ui, bar_width, egui::Color32::from_rgb(120, 180, 255));
-                        }
-
-                        // 重置UI位置到开始处，在条形图上方显示文本
-                        ui.allocate_ui_at_rect(ui.max_rect(), |ui| {
-                            ui.colored_label(egui::Color32::from_rgb(120, 180, 255), format!("{:.4}", row.bid_volume));
-                        });
-                    }
-                );
-            } else {
-                ui.colored_label(egui::Color32::GRAY, "");
-            }
-        });
-
-        // 第3列：价格 - 精确的当前价格高亮（只有一个价格层级被高亮）
+        
+        // 第1列：价格 - 精确的当前价格高亮（只有一个价格层级被高亮）
         row_ui.col(|ui| {
             // 格式化价格为整数美元显示（1美元聚合级别）
             let price_display = format!("{:.0}", row.price);
@@ -1316,101 +1287,175 @@ impl UnifiedOrderBookWidget {
             }
         });
 
-        // 第4列：卖单深度 + 背景条形图
+        // 第2列：Bids & Asks - 横向条形图直观显示数值大小
         row_ui.col(|ui| {
-            if row.ask_volume > 0.0 {
-                // 计算条形图宽度
-                let bar_width = self.calculate_bar_width(row.ask_volume, max_ask_volume);
-
-                // 使用层叠布局：先绘制背景条形图，再显示文本
-                ui.allocate_ui_with_layout(
-                    ui.available_size(),
-                    egui::Layout::left_to_right(egui::Align::Center),
-                    |ui| {
-                        if bar_width > 1.0 {
-                            // 绘制背景条形图（使用与文本相同的颜色但更透明）
-                            self.draw_background_bar(ui, bar_width, egui::Color32::from_rgb(255, 120, 120));
-                        }
-
-                        // 重置UI位置到开始处，在条形图上方显示文本
-                        ui.allocate_ui_at_rect(ui.max_rect(), |ui| {
-                            ui.colored_label(egui::Color32::from_rgb(255, 120, 120), format!("{:.4}", row.ask_volume));
-                        });
-                    }
+            let cell_rect = ui.max_rect();
+            let cell_width = cell_rect.width();
+            let cell_height = cell_rect.height();
+            
+            // 找出所有bid和ask中的最大值作为100%基准
+            let max_value = self.cached_visible_data.iter()
+                .map(|r| r.bid_volume.max(r.ask_volume))
+                .fold(0.0, f64::max);
+            
+            // 如果同时有bid和ask，显示两行
+            if row.bid_volume > 0.0 && row.ask_volume > 0.0 {
+                let half_height = cell_height / 2.0;
+                
+                // 上半部分：ask（红色）
+                let ask_width = if max_value > 0.0 { 
+                    (cell_width * (row.ask_volume / max_value) as f32).min(cell_width) 
+                } else { 0.0 };
+                
+                if ask_width > 1.0 {
+                    let ask_rect = egui::Rect::from_min_size(
+                        cell_rect.min,
+                        egui::Vec2::new(ask_width, half_height)
+                    );
+                    ui.painter().rect_filled(
+                        ask_rect,
+                        0.0,
+                        egui::Color32::from_rgba_unmultiplied(255, 80, 80, 100)
+                    );
+                }
+                
+                // ask数值显示
+                let ask_text_rect = egui::Rect::from_min_size(
+                    cell_rect.min,
+                    egui::Vec2::new(cell_width, half_height)
                 );
-            } else {
-                ui.colored_label(egui::Color32::GRAY, "");
+                ui.allocate_ui_at_rect(ask_text_rect, |ui| {
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        ui.add_space(4.0);
+                        ui.label(egui::RichText::new(format!("{:.4}", row.ask_volume))
+                            .color(egui::Color32::WHITE)
+                            .size(11.0));
+                    });
+                });
+                
+                // 下半部分：bid（蓝色）
+                let bid_width = if max_value > 0.0 { 
+                    (cell_width * (row.bid_volume / max_value) as f32).min(cell_width) 
+                } else { 0.0 };
+                
+                if bid_width > 1.0 {
+                    let bid_rect = egui::Rect::from_min_size(
+                        cell_rect.min + egui::Vec2::new(0.0, half_height),
+                        egui::Vec2::new(bid_width, half_height)
+                    );
+                    ui.painter().rect_filled(
+                        bid_rect,
+                        0.0,
+                        egui::Color32::from_rgba_unmultiplied(80, 150, 255, 100)
+                    );
+                }
+                
+                // bid数值显示
+                let bid_text_rect = egui::Rect::from_min_size(
+                    cell_rect.min + egui::Vec2::new(0.0, half_height),
+                    egui::Vec2::new(cell_width, half_height)
+                );
+                ui.allocate_ui_at_rect(bid_text_rect, |ui| {
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        ui.add_space(4.0);
+                        ui.label(egui::RichText::new(format!("{:.4}", row.bid_volume))
+                            .color(egui::Color32::WHITE)
+                            .size(11.0));
+                    });
+                });
+            } 
+            // 只有ask
+            else if row.ask_volume > 0.0 {
+                let ask_width = if max_value > 0.0 { 
+                    (cell_width * (row.ask_volume / max_value) as f32).min(cell_width) 
+                } else { 0.0 };
+                
+                if ask_width > 1.0 {
+                    let ask_rect = egui::Rect::from_min_size(
+                        cell_rect.min,
+                        egui::Vec2::new(ask_width, cell_height)
+                    );
+                    ui.painter().rect_filled(
+                        ask_rect,
+                        0.0,
+                        egui::Color32::from_rgba_unmultiplied(255, 80, 80, 100)
+                    );
+                }
+                
+                // 数值显示
+                ui.allocate_ui_at_rect(cell_rect, |ui| {
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        ui.add_space(4.0);
+                        ui.label(egui::RichText::new(format!("{:.4}", row.ask_volume))
+                            .color(egui::Color32::WHITE));
+                    });
+                });
+            }
+            // 只有bid
+            else if row.bid_volume > 0.0 {
+                let bid_width = if max_value > 0.0 { 
+                    (cell_width * (row.bid_volume / max_value) as f32).min(cell_width) 
+                } else { 0.0 };
+                
+                if bid_width > 1.0 {
+                    let bid_rect = egui::Rect::from_min_size(
+                        cell_rect.min,
+                        egui::Vec2::new(bid_width, cell_height)
+                    );
+                    ui.painter().rect_filled(
+                        bid_rect,
+                        0.0,
+                        egui::Color32::from_rgba_unmultiplied(80, 150, 255, 100)
+                    );
+                }
+                
+                // 数值显示
+                ui.allocate_ui_at_rect(cell_rect, |ui| {
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        ui.add_space(4.0);
+                        ui.label(egui::RichText::new(format!("{:.4}", row.bid_volume))
+                            .color(egui::Color32::WHITE));
+                    });
+                });
+            }
+            // 都没有 - 不显示任何内容
+            else {
+                // 空白显示，不绘制任何内容
             }
         });
 
-        // 第5列：主动买单累计(5s) - 加粗显示
+        // 第3列：Buy (主动买单) - 使用5秒内的主动买单数据
         row_ui.col(|ui| {
             if row.active_buy_volume_5s > 0.0 {
                 ui.add(egui::Label::new(egui::RichText::new(format!("{:.4}", row.active_buy_volume_5s))
                     .color(egui::Color32::from_rgb(120, 255, 120))
                     .strong()));
-            } else {
-                ui.colored_label(egui::Color32::GRAY, "");
             }
+            // 没有数据时不显示任何内容
         });
 
-        // 第6列：历史累计主动买单量 + 条形图
+        // 第4列：Sell (主动卖单) - 使用5秒内的主动卖单数据
         row_ui.col(|ui| {
-            ui.horizontal(|ui| {
-                if row.history_buy_volume > 0.0 {
-                    ui.colored_label(egui::Color32::from_rgb(120, 255, 120), format!("{:.4}", row.history_buy_volume));
-
-                    // 绘制条形图
-                    let bar_width = self.calculate_bar_width(row.history_buy_volume, max_history_buy);
-                    if bar_width > 1.0 {
-                        self.draw_horizontal_bar(ui, bar_width, egui::Color32::from_rgb(120, 255, 120));
-                    }
-                } else {
-                    ui.colored_label(egui::Color32::GRAY, "");
-                }
-            });
+            if row.active_sell_volume_5s > 0.0 {
+                ui.add(egui::Label::new(egui::RichText::new(format!("{:.4}", row.active_sell_volume_5s))
+                    .color(egui::Color32::from_rgb(255, 120, 120))
+                    .strong()));
+            }
+            // 没有数据时不显示任何内容
         });
 
-        // 第7列：历史累计主动卖单量 + 条形图
+        // 第5列：Delta - 主动订单delta
         row_ui.col(|ui| {
-            ui.horizontal(|ui| {
-                if row.history_sell_volume > 0.0 {
-                    ui.colored_label(egui::Color32::from_rgb(255, 120, 120), format!("{:.4}", row.history_sell_volume));
-
-                    // 绘制条形图
-                    let bar_width = self.calculate_bar_width(row.history_sell_volume, max_history_sell);
-                    if bar_width > 1.0 {
-                        self.draw_horizontal_bar(ui, bar_width, egui::Color32::from_rgb(255, 120, 120));
-                    }
+            if row.delta.abs() > 0.0001 {
+                let color = if row.delta > 0.0 {
+                    egui::Color32::from_rgb(120, 255, 120)
                 } else {
-                    ui.colored_label(egui::Color32::GRAY, "");
-                }
-            });
+                    egui::Color32::from_rgb(255, 120, 120)
+                };
+                ui.colored_label(color, format!("{:+.4}", row.delta));
+            }
+            // 没有数据时不显示任何内容
         });
-
-        // 第8列：主动订单delta + 条形图
-        row_ui.col(|ui| {
-            ui.horizontal(|ui| {
-                if row.delta.abs() > 0.0001 {
-                    let color = if row.delta > 0.0 {
-                        egui::Color32::from_rgb(120, 255, 120)
-                    } else {
-                        egui::Color32::from_rgb(255, 120, 120)
-                    };
-                    ui.colored_label(color, format!("{:+.4}", row.delta));
-
-                    // 绘制条形图
-                    let bar_width = self.calculate_bar_width(row.delta.abs(), max_delta);
-                    if bar_width > 1.0 {
-                        self.draw_horizontal_bar(ui, bar_width, color);
-                    }
-                } else {
-                    ui.colored_label(egui::Color32::GRAY, "");
-                }
-            });
-        });
-
-
     }
 }
 
