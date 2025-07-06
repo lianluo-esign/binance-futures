@@ -69,19 +69,25 @@ impl eframe::App for TradingGUI {
                 // Connection status indicator - display reconnection information
                 let connection_status = self.app.get_connection_status();
                 let (status_text, status_color) = if connection_status.is_connected {
-                    ("🟢 Connected".to_string(), egui::Color32::from_rgb(120, 255, 120))
+                    ("Connected".to_string(), egui::Color32::from_rgb(120, 255, 120))
                 } else if connection_status.is_reconnecting {
                     (
-                        format!("🟡 Reconnecting... ({}/{}) - 3s interval",
+                        format!("Reconnecting... ({}/{}) - 3s interval",
                             connection_status.reconnect_attempts,
                             connection_status.max_attempts
                         ),
                         egui::Color32::from_rgb(255, 255, 120)
                     )
                 } else {
-                    ("🔴 Disconnected".to_string(), egui::Color32::from_rgb(255, 120, 120))
+                    ("Disconnected".to_string(), egui::Color32::from_rgb(255, 120, 120))
                 };
-                ui.colored_label(status_color, status_text);
+                
+                // 绘制连接状态圆点
+                ui.horizontal(|ui| {
+                    let (rect, _) = ui.allocate_exact_size(egui::Vec2::splat(12.0), egui::Sense::hover());
+                    ui.painter().circle_filled(rect.center(), 6.0, status_color);
+                    ui.colored_label(status_color, status_text);
+                });
 
                 // Display total reconnection count
                 if connection_status.total_reconnects > 0 {

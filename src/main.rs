@@ -95,7 +95,7 @@ fn setup_dark_theme(ctx: &egui::Context) {
 
 /// 加载应用程序图标
 fn load_icon() -> egui::IconData {
-    let icon_path = "src/image/icon.png";
+    let icon_path = "src/image/logo_golden.png";
     if Path::new(icon_path).exists() {
         match image::open(icon_path) {
             Ok(img) => {

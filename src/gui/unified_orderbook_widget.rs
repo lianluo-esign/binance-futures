@@ -1258,7 +1258,7 @@ impl UnifiedOrderBookWidget {
                     .color(egui::Color32::from_rgb(255, 120, 120))
                     .strong()));
             } else {
-                ui.colored_label(egui::Color32::GRAY, "--");
+                ui.colored_label(egui::Color32::GRAY, "");
             }
         });
 
@@ -1285,7 +1285,7 @@ impl UnifiedOrderBookWidget {
                     }
                 );
             } else {
-                ui.colored_label(egui::Color32::GRAY, "--");
+                ui.colored_label(egui::Color32::GRAY, "");
             }
         });
 
@@ -1339,7 +1339,7 @@ impl UnifiedOrderBookWidget {
                     }
                 );
             } else {
-                ui.colored_label(egui::Color32::GRAY, "--");
+                ui.colored_label(egui::Color32::GRAY, "");
             }
         });
 
@@ -1350,7 +1350,7 @@ impl UnifiedOrderBookWidget {
                     .color(egui::Color32::from_rgb(120, 255, 120))
                     .strong()));
             } else {
-                ui.colored_label(egui::Color32::GRAY, "--");
+                ui.colored_label(egui::Color32::GRAY, "");
             }
         });
 
@@ -1366,7 +1366,7 @@ impl UnifiedOrderBookWidget {
                         self.draw_horizontal_bar(ui, bar_width, egui::Color32::from_rgb(120, 255, 120));
                     }
                 } else {
-                    ui.colored_label(egui::Color32::GRAY, "--");
+                    ui.colored_label(egui::Color32::GRAY, "");
                 }
             });
         });
@@ -1383,7 +1383,7 @@ impl UnifiedOrderBookWidget {
                         self.draw_horizontal_bar(ui, bar_width, egui::Color32::from_rgb(255, 120, 120));
                     }
                 } else {
-                    ui.colored_label(egui::Color32::GRAY, "--");
+                    ui.colored_label(egui::Color32::GRAY, "");
                 }
             });
         });
@@ -1405,7 +1405,7 @@ impl UnifiedOrderBookWidget {
                         self.draw_horizontal_bar(ui, bar_width, color);
                     }
                 } else {
-                    ui.colored_label(egui::Color32::GRAY, "--");
+                    ui.colored_label(egui::Color32::GRAY, "");
                 }
             });
         });
