@@ -1,11 +1,11 @@
-use crate::websocket::exchange_trait::{ExchangeWebSocketManager, ExchangeConnectionState, ExchangeStats};
+use crate::websocket::exchange_trait::{ExchangeWebSocketManager, ExchangeConnectionState, ExchangeStats, StandardizedMarketData};
+use tokio::sync::mpsc;
 use crate::events::event_types::{Event, EventType};
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use std::error::Error;
 use tokio::net::TcpStream;
-use tokio::sync::mpsc;
 use tokio::time::{interval, Duration};
 use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
 
@@ -350,5 +350,25 @@ impl ExchangeWebSocketManager for BitgetWebSocketManager {
                 .as_millis() as u64,
         );
         stats
+    }
+
+    /// 判断是否为深度消息
+    fn is_depth_message(&self, message: &Value) -> bool {
+        if let Some(arg) = message.get("arg") {
+            if let Some(channel) = arg.get("channel").and_then(|c| c.as_str()) {
+                return channel == "books";
+            }
+        }
+        false
+    }
+
+    /// 判断是否为交易消息
+    fn is_trade_message(&self, message: &Value) -> bool {
+        if let Some(arg) = message.get("arg") {
+            if let Some(channel) = arg.get("channel").and_then(|c| c.as_str()) {
+                return channel == "trade";
+            }
+        }
+        false
     }
 } 

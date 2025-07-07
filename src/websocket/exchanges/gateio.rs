@@ -103,7 +103,7 @@ impl ExchangeWebSocketManager for GateioWebSocketManager {
         
         // 订阅合约深度更新推送
         // 使用futures.order_book频道
-        let payload = json!([gate_symbol, "20", "0"]);
+        let payload = json!([gate_symbol, "50", "0"]);
         self.send_request("futures.order_book", "subscribe", Some(payload)).await?;
         
         info!("Subscribed to Gate.io futures depth data for {}", gate_symbol);
@@ -237,4 +237,20 @@ impl ExchangeWebSocketManager for GateioWebSocketManager {
         info!("Successfully reconnected to Gate.io WebSocket");
         Ok(())
     }
-} 
+
+    /// 判断是否为深度消息
+    fn is_depth_message(&self, message: &Value) -> bool {
+        if let Some(channel) = message.get("channel").and_then(|c| c.as_str()) {
+            return channel == "futures.order_book";
+        }
+        false
+    }
+
+    /// 判断是否为交易消息
+    fn is_trade_message(&self, message: &Value) -> bool {
+        if let Some(channel) = message.get("channel").and_then(|c| c.as_str()) {
+            return channel == "futures.trades";
+        }
+        false
+    }
+}

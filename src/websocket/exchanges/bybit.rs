@@ -467,4 +467,20 @@ impl ExchangeWebSocketManager for BybitWebSocketManager {
     fn get_stats(&self) -> ExchangeStats {
         self.stats.clone()
     }
+
+    /// 判断是否为深度消息
+    fn is_depth_message(&self, message: &Value) -> bool {
+        if let Some(topic) = message.get("topic").and_then(|t| t.as_str()) {
+            return topic.starts_with("orderbook.");
+        }
+        false
+    }
+
+    /// 判断是否为交易消息
+    fn is_trade_message(&self, message: &Value) -> bool {
+        if let Some(topic) = message.get("topic").and_then(|t| t.as_str()) {
+            return topic.starts_with("publicTrade.");
+        }
+        false
+    }
 } 

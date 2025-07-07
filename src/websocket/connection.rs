@@ -28,7 +28,6 @@ impl WebSocketConfig {
             streams: vec![
                 format!("{}@depth20@100ms", symbol.to_lowercase()),
                 format!("{}@trade", symbol.to_lowercase()),
-                format!("{}@bookTicker", symbol.to_lowercase()),
             ],
             reconnect_attempts: 0,
             max_reconnect_attempts: 5, // 参照backup实现，减少到5次
@@ -221,8 +220,6 @@ impl WebSocketConnection {
         }
     }
 
-    /// 检查心跳状态并响应ping（币安模式：服务器发ping，客户端响应pong）
-    /// 简化版本，参照backup实现
     pub fn handle_heartbeat(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         // 简化心跳处理，只检查连接生命周期
         if let Some(connection_start) = self.connection_start {

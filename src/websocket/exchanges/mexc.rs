@@ -208,4 +208,20 @@ impl ExchangeWebSocketManager for MexcWebSocketManager {
         info!("Successfully reconnected to MEXC WebSocket");
         Ok(())
     }
+
+    /// 判断是否为深度消息
+    fn is_depth_message(&self, message: &Value) -> bool {
+        if let Some(channel) = message.get("channel").and_then(|c| c.as_str()) {
+            return channel.starts_with("push.depth");
+        }
+        false
+    }
+
+    /// 判断是否为交易消息
+    fn is_trade_message(&self, message: &Value) -> bool {
+        if let Some(channel) = message.get("channel").and_then(|c| c.as_str()) {
+            return channel.starts_with("push.deal");
+        }
+        false
+    }
 } 

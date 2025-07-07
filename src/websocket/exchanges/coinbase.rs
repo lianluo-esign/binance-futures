@@ -558,4 +558,20 @@ impl ExchangeWebSocketManager for CoinbaseWebSocketManager {
     fn get_stats(&self) -> ExchangeStats {
         self.stats.clone()
     }
+
+    /// 判断是否为深度消息
+    fn is_depth_message(&self, message: &Value) -> bool {
+        if let Some(msg_type) = message.get("type").and_then(|t| t.as_str()) {
+            return msg_type == "snapshot" || msg_type == "l2update";
+        }
+        false
+    }
+
+    /// 判断是否为交易消息
+    fn is_trade_message(&self, message: &Value) -> bool {
+        if let Some(msg_type) = message.get("type").and_then(|t| t.as_str()) {
+            return msg_type == "match" || msg_type == "last_match";
+        }
+        false
+    }
 } 

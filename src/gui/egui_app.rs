@@ -31,7 +31,7 @@ impl TradingGUI {
         Self {
             app,
             last_update: Instant::now(),
-            update_interval: Duration::from_millis(1), // 1ms refresh interval
+            update_interval: Duration::from_millis(50), // 50ms refresh interval (20 FPS)
             show_settings: false,
             show_stats: false,
             unified_orderbook_widget,

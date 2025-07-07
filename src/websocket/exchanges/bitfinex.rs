@@ -80,7 +80,7 @@ impl ExchangeWebSocketManager for BitfinexWebSocketManager {
             "event": "subscribe",
             "channel": "book",
             "symbol": bitfinex_symbol,
-            "prec": "P0",
+            "prec": "R0",
             "freq": "F0",
             "len": "25"
         });
@@ -144,6 +144,7 @@ impl ExchangeWebSocketManager for BitfinexWebSocketManager {
                 match msg {
                     Ok(Message::Text(text)) => {
                         if let Ok(value) = serde_json::from_str::<Value>(&text) {
+                            info!("收到消息 {:?}", value);
                             messages.push(value);
                             self.stats.total_messages_received += 1;
                             self.stats.total_bytes_received += text.len() as u64;
@@ -213,5 +214,87 @@ impl ExchangeWebSocketManager for BitfinexWebSocketManager {
 
     async fn reconnect(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         self.attempt_reconnect().await
+    }
+
+    /// 判断是否为深度消息
+    fn is_depth_message(&self, message: &Value) -> bool {
+        // Bitfinex深度消息是数组格式，第一个元素是channel ID，第二个元素是数据
+        // 订阅响应包含"channel": "book"
+        if let Some(event) = message.get("event").and_then(|e| e.as_str()) {
+            if event == "subscribed" {
+                if let Some(channel) = message.get("channel").and_then(|c| c.as_str()) {
+                    return channel == "book";
+                }
+            }
+        }
+        
+        // 实际数据消息是数组格式 [CHANNEL_ID, [...]]
+        if message.is_array() {
+            if let Some(array) = message.as_array() {
+                if array.len() >= 2 {
+                    // 深度数据通常是 [CHANNEL_ID, [[PRICE, COUNT, AMOUNT], ...]] 或 [CHANNEL_ID, [PRICE, COUNT, AMOUNT]]
+                    if let Some(second_element) = array.get(1) {
+                        if second_element.is_array() {
+                            if let Some(inner_array) = second_element.as_array() {
+                                // 检查是否是深度数据格式：包含价格、数量、金额的数组
+                                if !inner_array.is_empty() {
+                                    if let Some(first_item) = inner_array.get(0) {
+                                        if first_item.is_array() {
+                                            // 多个深度项 [[price, count, amount], ...]
+                                            return true;
+                                        } else if inner_array.len() == 3 {
+                                            // 单个深度项 [price, count, amount]
+                                            return true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// 判断是否为交易消息
+    fn is_trade_message(&self, message: &Value) -> bool {
+        // Bitfinex交易消息订阅响应
+        if let Some(event) = message.get("event").and_then(|e| e.as_str()) {
+            if event == "subscribed" {
+                if let Some(channel) = message.get("channel").and_then(|c| c.as_str()) {
+                    return channel == "trades";
+                }
+            }
+        }
+        
+        // 实际交易数据消息是数组格式 [CHANNEL_ID, [...]]
+        if message.is_array() {
+            if let Some(array) = message.as_array() {
+                if array.len() >= 2 {
+                    if let Some(second_element) = array.get(1) {
+                        if second_element.is_array() {
+                            if let Some(inner_array) = second_element.as_array() {
+                                // 交易数据格式检查：[ID, TIMESTAMP, AMOUNT, PRICE]
+                                if !inner_array.is_empty() {
+                                    if let Some(first_item) = inner_array.get(0) {
+                                        if first_item.is_array() {
+                                            // 多个交易 [[ID, TIMESTAMP, AMOUNT, PRICE], ...]
+                                            if let Some(trade_array) = first_item.as_array() {
+                                                return trade_array.len() == 4;
+                                            }
+                                        } else if inner_array.len() == 4 {
+                                            // 单个交易 [ID, TIMESTAMP, AMOUNT, PRICE]
+                                            return true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        false
     }
 } 

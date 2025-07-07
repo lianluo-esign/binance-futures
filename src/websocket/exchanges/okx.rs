@@ -6,11 +6,12 @@ use tokio::sync::Mutex;
 use tungstenite::{Message, WebSocket};
 use std::net::TcpStream;
 use tungstenite::stream::MaybeTlsStream;
-
+use std::time::Duration;
+use tokio::sync::mpsc;
 
 use crate::websocket::exchange_trait::{
     ExchangeWebSocketManager, ExchangeConfig, ExchangeConnectionState, 
-    ExchangeStats, ContractSpec
+    ExchangeStats, ContractSpec, StandardizedMarketData
 };
 
 /// OKX WebSocket管理器
@@ -325,150 +326,177 @@ impl ExchangeWebSocketManager for OkxWebSocketManager {
     }
 
     async fn subscribe_depth(&mut self, symbol: &str) -> Result<(), Box<dyn Error>> {
-        // OKX使用不同的symbol格式：BTC-USDT-SWAP
-        let okx_symbol = if symbol == "BTCUSDT" {
-            "BTC-USDT-SWAP"
-        } else {
-            symbol
-        };
-        
-        let msg = self.build_subscribe_message("books5", okx_symbol);
-        self.send_message(msg).await?;
-        
-        log::info!("[OKX] 订阅深度数据: {}", okx_symbol);
+        let subscribe_msg = self.build_subscribe_message("books5", symbol);
+        self.send_message(subscribe_msg).await?;
+        log::info!("[OKX] 已订阅深度数据: {}", symbol);
         Ok(())
     }
 
     async fn subscribe_trades(&mut self, symbol: &str) -> Result<(), Box<dyn Error>> {
-        let okx_symbol = if symbol == "BTCUSDT" {
-            "BTC-USDT-SWAP"
-        } else {
-            symbol
-        };
-        
-        let msg = self.build_subscribe_message("trades", okx_symbol);
-        self.send_message(msg).await?;
-        
-        log::info!("[OKX] 订阅成交数据: {}", okx_symbol);
+        let subscribe_msg = self.build_subscribe_message("trades", symbol);
+        self.send_message(subscribe_msg).await?;
+        log::info!("[OKX] 已订阅交易数据: {}", symbol);
         Ok(())
     }
 
     async fn subscribe_book_ticker(&mut self, symbol: &str) -> Result<(), Box<dyn Error>> {
-        let okx_symbol = if symbol == "BTCUSDT" {
-            "BTC-USDT-SWAP"
-        } else {
-            symbol
-        };
-        
-        let msg = self.build_subscribe_message("bbo-tbt", okx_symbol);
-        self.send_message(msg).await?;
-        
-        log::info!("[OKX] 订阅最优买卖价: {}", okx_symbol);
+        let subscribe_msg = self.build_subscribe_message("bbo-tbt", symbol);
+        self.send_message(subscribe_msg).await?;
+        log::info!("[OKX] 已订阅最优买卖价: {}", symbol);
         Ok(())
     }
 
     async fn read_messages(&mut self) -> Result<Vec<Value>, Box<dyn Error>> {
+        let mut messages = Vec::new();
+        
         if let Some(socket) = &self.socket {
-            let mut messages = Vec::new();
             let mut socket_guard = socket.lock().await;
             
             // 非阻塞读取
-            while let Ok(msg) = socket_guard.read() {
-                self.stats.total_messages_received += 1;
-                
-                match msg {
-                    Message::Text(text) => {
-                        self.stats.total_bytes_received += text.len() as u64;
-                        self.stats.last_message_time = Some(
-                            std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap()
-                                .as_millis() as u64
-                        );
-                        
-                        match serde_json::from_str::<Value>(&text) {
-                            Ok(json_value) => {
-                                // 解析OKX特定格式
-                                match self.parse_okx_message(&json_value) {
-                                    Ok(parsed) => messages.push(parsed),
-                                    Err(e) => {
-                                        log::error!("[OKX] 解析消息失败: {}", e);
-                                        self.stats.parse_errors += 1;
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                log::error!("[OKX] JSON解析错误: {}", e);
-                                self.stats.parse_errors += 1;
+            match socket_guard.read_message() {
+                Ok(msg) => {
+                    match msg {
+                        tungstenite::Message::Text(text) => {
+                            self.stats.total_messages_received += 1;
+                            self.stats.total_bytes_received += text.len() as u64;
+                            
+                            if let Ok(parsed) = serde_json::from_str::<Value>(&text) {
+                                let processed = self.parse_okx_message(&parsed)?;
+                                messages.push(processed);
+                            } else {
+                                log::warn!("[OKX] 解析消息失败: {}", text);
                             }
                         }
+                        tungstenite::Message::Ping(data) => {
+                            socket_guard.write_message(tungstenite::Message::Pong(data))?;
+                        }
+                        tungstenite::Message::Close(_) => {
+                            self.state = ExchangeConnectionState::Disconnected;
+                        }
+                        _ => {}
                     }
-                    Message::Ping(payload) => {
-                        // 响应ping
-                        socket_guard.send(Message::Pong(payload))?;
-                        log::debug!("[OKX] 响应ping");
-                    }
-                    Message::Close(_) => {
-                        self.state = ExchangeConnectionState::Disconnected;
-                        log::info!("[OKX] 收到关闭消息");
-                        break;
-                    }
-                    _ => {}
+                }
+                Err(tungstenite::Error::Io(ref e)) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    // 非阻塞模式下的正常情况
+                }
+                Err(e) => {
+                    log::error!("[OKX] 读取消息错误: {}", e);
+                    return Err(e.into());
                 }
             }
-            
-            Ok(messages)
-        } else {
-            Ok(vec![])
         }
+        
+        Ok(messages)
     }
 
     async fn send_heartbeat(&mut self) -> Result<(), Box<dyn Error>> {
-        // OKX使用ping/pong机制，不需要额外的心跳
-        // 服务器会定期发送ping，我们只需要响应pong
-        Ok(())
+        let ping_msg = json!({"op": "ping"});
+        self.send_message(ping_msg).await
+    }
+
+    fn should_reconnect(&self) -> bool {
+        matches!(self.state, ExchangeConnectionState::Disconnected | ExchangeConnectionState::Failed(_))
+    }
+
+    async fn attempt_reconnect(&mut self) -> Result<(), Box<dyn Error>> {
+        log::info!("[OKX] 尝试重连...");
+        self.connect().await
     }
 
     fn get_connection_state(&self) -> ExchangeConnectionState {
         self.state.clone()
     }
 
-    fn should_reconnect(&self) -> bool {
-        matches!(
-            self.state,
-            ExchangeConnectionState::Disconnected | ExchangeConnectionState::Failed(_)
-        ) && self.stats.reconnect_attempts < 5
-    }
-
-    async fn attempt_reconnect(&mut self) -> Result<(), Box<dyn Error>> {
-        self.stats.reconnect_attempts += 1;
-        log::info!("[OKX] 尝试重连 ({}/5)", self.stats.reconnect_attempts);
-        
-        self.connect().await?;
-        
-        // 重新订阅
-        self.subscribe_depth(&self.config.symbol.clone()).await?;
-        self.subscribe_trades(&self.config.symbol.clone()).await?;
-        self.subscribe_book_ticker(&self.config.symbol.clone()).await?;
-        
-        Ok(())
-    }
-
     fn get_stats(&self) -> ExchangeStats {
         self.stats.clone()
+    }
+
+    /// 判断是否为深度消息
+    fn is_depth_message(&self, message: &Value) -> bool {
+        if let Some(arg) = message.get("arg") {
+            if let Some(channel) = arg.get("channel").and_then(|c| c.as_str()) {
+                return channel == "books5" || channel == "books-l2-tbt";
+            }
+        }
+        false
+    }
+
+    /// 判断是否为交易消息
+    fn is_trade_message(&self, message: &Value) -> bool {
+        if let Some(arg) = message.get("arg") {
+            if let Some(channel) = arg.get("channel").and_then(|c| c.as_str()) {
+                return channel == "trades";
+            }
+        }
+        false
+    }
+
+    /// 启动独立线程管理WebSocket连接
+    async fn start_with_event_sender(
+        &mut self,
+        event_sender: mpsc::UnboundedSender<StandardizedMarketData>,
+    ) -> Result<(), Box<dyn Error>> {
+        log::info!("[OKX] 启动独立线程管理");
+        
+        // 连接到WebSocket
+        self.connect().await?;
+        
+        // 只订阅depth和trades数据
+        self.subscribe_depth("BTC-USDT-SWAP").await?;
+        self.subscribe_trades("BTC-USDT-SWAP").await?;
+        
+        // 启动消息处理循环
+        loop {
+            let should_reconnect = self.should_reconnect();
+            
+            match self.read_messages().await {
+                Ok(messages) => {
+                    for message in messages {
+                        // 根据消息内容判断类型并标准化
+                        let standardized_data = if self.is_depth_message(&message) {
+                            self.standardize_depth_data(&message)
+                        } else if self.is_trade_message(&message) {
+                            self.standardize_trade_data(&message)
+                        } else {
+                            continue; // 跳过不需要的消息类型
+                        };
+                        
+                        // 发送到事件总线
+                        if let Err(_) = event_sender.send(standardized_data) {
+                            log::error!("[OKX] 发送标准化数据到事件总线失败");
+                            break;
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::error!("[OKX] 读取消息失败: {}", e);
+                }
+            }
+            
+            // 在match块外检查重连，确保没有错误值跨越await
+            if should_reconnect {
+                if let Err(reconnect_error) = self.attempt_reconnect().await {
+                    log::error!("[OKX] 重连失败: {}", reconnect_error);
+                    break;
+                }
+            }
+            
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        
+        Ok(())
     }
 }
 
 impl OkxWebSocketManager {
-    /// 发送消息的辅助方法
+    /// 发送消息到WebSocket
     async fn send_message(&mut self, msg: Value) -> Result<(), Box<dyn Error>> {
         if let Some(socket) = &self.socket {
-            let text = serde_json::to_string(&msg)?;
             let mut socket_guard = socket.lock().await;
-            socket_guard.send(Message::Text(text))?;
-            Ok(())
-        } else {
-            Err("WebSocket未连接".into())
+            let text = msg.to_string();
+            socket_guard.write_message(tungstenite::Message::Text(text))?;
+            log::debug!("[OKX] 发送消息: {}", msg);
         }
+        Ok(())
     }
 } 

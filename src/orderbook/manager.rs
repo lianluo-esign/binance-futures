@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use ordered_float::OrderedFloat;
 use serde_json::Value;
 
@@ -105,6 +105,9 @@ impl OrderBookManager {
 
         let mut bid_count = 0;
         let mut ask_count = 0;
+        
+        // 收集本次更新的价格层级
+        let mut updated_prices = HashSet::new();
 
         // 处理买单
         if let Some(bids) = data["b"].as_array() {
@@ -112,6 +115,8 @@ impl OrderBookManager {
                 if let (Some(price_str), Some(qty_str)) = (bid[0].as_str(), bid[1].as_str()) {
                     if let (Ok(price), Ok(qty)) = (price_str.parse::<f64>(), qty_str.parse::<f64>()) {
                         let price_ordered = OrderedFloat(price);
+                        updated_prices.insert(price_ordered);
+                        
                         let order_flow = self.order_flows.entry(price_ordered).or_insert_with(OrderFlow::new);
                         order_flow.update_price_level(qty, 0.0, current_time);
                         bid_count += 1;
@@ -131,6 +136,8 @@ impl OrderBookManager {
                 if let (Some(price_str), Some(qty_str)) = (ask[0].as_str(), ask[1].as_str()) {
                     if let (Ok(price), Ok(qty)) = (price_str.parse::<f64>(), qty_str.parse::<f64>()) {
                         let price_ordered = OrderedFloat(price);
+                        updated_prices.insert(price_ordered);
+                        
                         let order_flow = self.order_flows.entry(price_ordered).or_insert_with(OrderFlow::new);
                         order_flow.update_price_level(0.0, qty, current_time);
                         ask_count += 1;
@@ -144,7 +151,10 @@ impl OrderBookManager {
             }
         }
 
-        // 调试信息已移除
+        // 根据配置决定是否清理未在本次更新中出现的深度数据
+        if self.config.keep_only_updated_depth {
+            self.clean_non_updated_depth_data(&updated_prices, current_time);
+        }
 
         self.update_market_snapshot();
     }
@@ -212,8 +222,8 @@ impl OrderBookManager {
                 self.best_bid_price = Some(best_bid_price);
                 self.best_ask_price = Some(best_ask_price);
 
-                // 清理非法的挂单数据
-                self.clean_invalid_orders(best_bid_price, best_ask_price);
+                // 禁用：不清理挂单数据，保持订单簿的持续性
+                // self.clean_invalid_orders(best_bid_price, best_ask_price);
 
                 // 创建快照
                 self.bookticker_snapshot = Some(BookTickerSnapshot {
@@ -232,6 +242,43 @@ impl OrderBookManager {
         }
     }
 
+    /// 清理未在本次深度更新中出现的挂单数据
+    fn clean_non_updated_depth_data(&mut self, updated_prices: &HashSet<OrderedFloat<f64>>, current_time: u64) {
+        let mut bid_cleared = 0;
+        let mut ask_cleared = 0;
+        let mut prices_to_remove = Vec::new();
+
+        // 遍历所有价格层级，清理未更新的深度数据
+        for (price, order_flow) in self.order_flows.iter_mut() {
+            // 如果这个价格层级在本次更新中没有出现，清理其深度数据
+            if !updated_prices.contains(price) {
+                // 清理挂单数据
+                if order_flow.bid_ask.bid > 0.0 {
+                    order_flow.bid_ask.bid = 0.0;
+                    bid_cleared += 1;
+                }
+                if order_flow.bid_ask.ask > 0.0 {
+                    order_flow.bid_ask.ask = 0.0;
+                    ask_cleared += 1;
+                }
+                
+                // 如果这个订单流现在完全为空，标记为待删除
+                if order_flow.is_empty() {
+                    prices_to_remove.push(*price);
+                }
+            }
+        }
+
+        // 删除完全为空的价格层级
+        for price in prices_to_remove {
+            self.order_flows.remove(&price);
+        }
+
+        if bid_cleared > 0 || ask_cleared > 0 {
+            log::debug!("清理未更新的深度数据: 清除了{}个bid挂单, {}个ask挂单", bid_cleared, ask_cleared);
+        }
+    }
+
     /// 清理不合理的挂单数据
     fn clean_invalid_orders(&mut self, best_bid_price: f64, best_ask_price: f64) {
         // println!("DEBUG: clean_invalid_orders - best_bid: {:.2}, best_ask: {:.2}",
@@ -241,7 +288,9 @@ impl OrderBookManager {
         let mut ask_cleared = 0;
         let total_flows = self.order_flows.len();
 
-        // 更保守的清理策略：只清理明显不合理的数据
+        // 禁用：不清理挂单数据，保持订单簿的完整性
+        // 原来的清理逻辑已被禁用，以保持bids和asks的持续性
+        /*
         for (price, order_flow) in self.order_flows.iter_mut() {
             let price_val = price.0;
 
@@ -251,18 +300,17 @@ impl OrderBookManager {
 
             // 处理asks时：只清除明显高于best_ask_price的bid挂单
             if price_val > best_ask_price + buffer && order_flow.bid_ask.bid > 0.0 {
-                // println!("DEBUG: clearing bid at price {:.2} (best_ask: {:.2})", price_val, best_ask_price);
                 order_flow.bid_ask.bid = 0.0;
                 bid_cleared += 1;
             }
 
             // 处理bids时：只清除明显低于best_bid_price的ask挂单
             if price_val < best_bid_price - buffer && order_flow.bid_ask.ask > 0.0 {
-                // println!("DEBUG: clearing ask at price {:.2} (best_bid: {:.2})", price_val, best_bid_price);
                 order_flow.bid_ask.ask = 0.0;
                 ask_cleared += 1;
             }
         }
+        */
 
         // println!("DEBUG: cleaned {} bid orders, {} ask orders from {} total flows",
                 // bid_cleared, ask_cleared, total_flows);
@@ -434,8 +482,8 @@ impl OrderBookManager {
             order_flow.clean_expired_cancels(current_time, 5000); // 5秒
             order_flow.clean_expired_increases(current_time, 5000); // 5秒
 
-            // 新增：清理超过5秒没有更新的挂单数据（1美元精度聚合的深度订单薄数据）
-            order_flow.clean_expired_price_levels(current_time, 500); // 500毫秒 = 0.5秒
+            // 禁用：不清理挂单数据，保持订单簿的持续性
+            // order_flow.clean_expired_price_levels(current_time, 500); // 已禁用挂单超时清除
         }
 
         // 清理空的或过期的订单流条目
@@ -734,6 +782,19 @@ impl OrderBookManager {
     /// 获取当前K值设置
     pub fn get_tick_pressure_k_value(&self) -> usize {
         self.tick_pressure_k_value
+    }
+
+    /// 设置是否只保留当前更新的深度数据
+    pub fn set_keep_only_updated_depth(&mut self, enabled: bool) {
+        self.config.keep_only_updated_depth = enabled;
+        log::info!("订单簿深度数据保留模式已{}：{}", 
+                  if enabled { "启用" } else { "禁用" },
+                  if enabled { "只保留当前更新的数据" } else { "保留所有历史数据" });
+    }
+
+    /// 获取当前深度数据保留模式
+    pub fn get_keep_only_updated_depth(&self) -> bool {
+        self.config.keep_only_updated_depth
     }
 }
 

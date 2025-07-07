@@ -104,6 +104,7 @@ pub struct OrderBookConfig {
     pub avg_speed_window_ms: u64,
     pub volatility_window_ms: u64,
     pub tick_price_diff_window_size: usize,
+    pub keep_only_updated_depth: bool, // 是否只保留当前正在更新的深度数据
 }
 
 impl Default for OrderBookConfig {
@@ -120,6 +121,7 @@ impl Default for OrderBookConfig {
             avg_speed_window_ms: 5000,
             volatility_window_ms: 60000,
             tick_price_diff_window_size: 10,
+            keep_only_updated_depth: true, // 默认启用，只保留当前更新的深度数据
         }
     }
 }

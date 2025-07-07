@@ -13,8 +13,7 @@ pub mod gui;
 pub mod audio;
 
 // 重新导出主要类型
-pub use core::RingBuffer;
-pub use events::{Event, EventType, EventBus, EventDispatcher};
+pub use events::{Event, EventType, LockFreeEventBus, LockFreeEventDispatcher};
 pub use orderbook::{OrderBookManager, OrderFlow, MarketSnapshot};
 pub use websocket::{WebSocketManager, WebSocketConnection};
 pub use app::ReactiveApp;
