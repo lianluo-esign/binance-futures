@@ -83,8 +83,8 @@ impl Default for UnifiedOrderBookWidget {
             trading_signal_window_open: false,
             quantitative_backtest_window_open: false,
             price_chart_modal_open: false,
-            price_history: std::collections::VecDeque::with_capacity(10000),
-            max_price_history: 10000,
+            price_history: std::collections::VecDeque::with_capacity(20000),
+            max_price_history: 20000,
             price_chart_height: 200.0, // 默认高度300像素
             tick_pressure_k_value: 5, // 默认5笔
             price_col_width: 80.0,
@@ -260,12 +260,15 @@ impl UnifiedOrderBookWidget {
         let content_height = total_height; // 95% 用于内容
 
         ui.vertical(|ui| {
-            // 1. 顶部标题区域：5% 高度
+            // 1. 顶部标题区域：5% 高度，简化为仅显示基本信息
             ui.allocate_ui_with_layout(
                 egui::Vec2::new(total_width, header_height),
                 egui::Layout::left_to_right(egui::Align::Center),
                 |ui| {
-                    // 移除顶部标题和当前价格显示
+                    // 显示基本信息
+                    ui.horizontal(|ui| {
+                        ui.colored_label(egui::Color32::LIGHT_GRAY, "FlowSight - Real-time Order Flow Analysis");
+                    });
                 },
             );
 
@@ -304,54 +307,21 @@ impl UnifiedOrderBookWidget {
                         },
                     );
 
-                    // 右侧：预留空间 - 占窗体宽度的另一半
-                    ui.allocate_ui_with_layout(
-                        egui::Vec2::new(total_width * 0.5, content_height),
-                        egui::Layout::top_down(egui::Align::LEFT),
-                        |ui| {
-                            // 上半部分：实时价格图表 - 使用固定高度
-                            let chart_height = self.price_chart_height.min(content_height - 200.0); // 确保至少留200像素给前两个指标区域
-                            if chart_height > 0.0 {
-                                ui.allocate_ui_with_layout(
-                                    egui::Vec2::new(total_width * 0.5, chart_height),
-                                    egui::Layout::top_down(egui::Align::LEFT),
-                                    |ui| {
-                                        self.render_embedded_price_chart(ui, app);
-                                    },
-                                );
-                            }
+                    // 右侧：预留空间 - 占窗体宽度的另一半，直接使用垂直布局，占满宽度
+                    ui.vertical(|ui| {
+                        // 上半部分：实时价格图表 - 使用固定高度，占满宽度
+                        let chart_height = self.price_chart_height.min(content_height - 200.0); // 确保至少留200像素给指标区域
+                        if chart_height > 0.0 {
+                            // 直接渲染价格图表，不再使用容器限制
+                            self.render_embedded_price_chart(ui, app);
+                        }
 
-                            // 中间部分：Orderbook Imbalance指标 - 固定高度100像素
-                            let imbalance_height = 100.0;
-                            ui.allocate_ui_with_layout(
-                                egui::Vec2::new(total_width * 0.5, imbalance_height),
-                                egui::Layout::top_down(egui::Align::LEFT),
-                                |ui| {
-                                    self.render_orderbook_imbalance(ui, app);
-                                },
-                            );
+                        // 中间部分：Trade Imbalance指标
+                        self.render_trade_imbalance(ui, app);
 
-                            // 中间部分：Trade Imbalance指标 - 固定高度100像素
-                            let trade_imbalance_height = 100.0;
-                            ui.allocate_ui_with_layout(
-                                egui::Vec2::new(total_width * 0.5, trade_imbalance_height),
-                                egui::Layout::top_down(egui::Align::LEFT),
-                                |ui| {
-                                    self.render_trade_imbalance(ui, app);
-                                },
-                            );
-
-                            // 下半部分：ΔTick Pressure指标 - 占满剩余高度
-                            let remaining_height = ui.available_height();
-                            ui.allocate_ui_with_layout(
-                                egui::Vec2::new(total_width * 0.5, remaining_height),
-                                egui::Layout::top_down(egui::Align::LEFT),
-                                |ui| {
-                                    self.render_tick_pressure(ui, app);
-                                },
-                            );
-                        },
-                    );
+                        // 下半部分：ΔTick Pressure指标 - 占满剩余空间
+                        self.render_tick_pressure(ui, app);
+                    });
                 },
             );
         });
@@ -505,6 +475,8 @@ impl UnifiedOrderBookWidget {
                 history_buy_volume: aggregated_flow.history_buy_volume,
                 history_sell_volume: aggregated_flow.history_sell_volume,
                 delta: aggregated_flow.history_buy_volume - aggregated_flow.history_sell_volume,
+                bid_fade_alpha: aggregated_flow.bid_fade_alpha,
+                ask_fade_alpha: aggregated_flow.ask_fade_alpha,
             })
             .collect();
 
@@ -514,51 +486,7 @@ impl UnifiedOrderBookWidget {
         rows
     }
 
-    /// 将价格聚合到1美元级别（使用向下取整策略）
-    fn aggregate_prices_to_usd_levels(
-        &self,
-        order_flows: &BTreeMap<OrderedFloat<f64>, OrderFlow>,
-        visible_prices: &[f64],
-        time_threshold: u64,
-    ) -> BTreeMap<OrderedFloat<f64>, AggregatedOrderFlow> {
-        use std::collections::HashMap;
 
-        let mut aggregated_map: HashMap<i64, AggregatedOrderFlow> = HashMap::new();
-
-        // 遍历所有可见价格，进行聚合
-        for &price_val in visible_prices {
-            // 使用向下取整策略：floor(price) 聚合到1美元级别
-            let price_level_int = price_val.floor() as i64;
-            let price_key = OrderedFloat(price_val);
-
-            // 确保每个价格级别都有一个条目（即使没有数据也显示空行）
-            let entry = aggregated_map.entry(price_level_int).or_insert_with(|| AggregatedOrderFlow::new());
-
-            // 获取该价格的订单流数据（如果存在）
-            if let Some(order_flow) = order_flows.get(&price_key) {
-                // 聚合订单簿深度数据
-                entry.bid_volume += order_flow.bid_ask.bid;
-                entry.ask_volume += order_flow.bid_ask.ask;
-
-                // 聚合5秒内的主动交易数据
-                if order_flow.realtime_trade_record.timestamp >= time_threshold {
-                    entry.active_buy_volume_5s += order_flow.realtime_trade_record.buy_volume;
-                    entry.active_sell_volume_5s += order_flow.realtime_trade_record.sell_volume;
-                }
-
-                // 聚合历史交易足迹数据
-                entry.history_buy_volume += order_flow.history_trade_record.buy_volume;
-                entry.history_sell_volume += order_flow.history_trade_record.sell_volume;
-            }
-            // 如果没有订单流数据，entry 保持为默认的零值，这样会显示空行
-        }
-
-        // 转换为BTreeMap以保持排序，并将整数价格转换回浮点数
-        aggregated_map
-            .into_iter()
-            .map(|(price_int, flow)| (OrderedFloat(price_int as f64), flow))
-            .collect()
-    }
 
     /// 渲染边界受限的表格 - 严格控制在95%区域内
     fn render_bounded_table(
@@ -1130,11 +1058,13 @@ impl UnifiedOrderBookWidget {
                                     
                                     // 数值显示
                                     ui.allocate_ui_at_rect(cell_rect, |ui| {
-                                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                                            ui.add_space(4.0);
-                                            ui.label(egui::RichText::new(format!("{:.4}", row.bid_volume))
-                                                .color(egui::Color32::WHITE));
-                                        });
+                                                            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        ui.add_space(4.0);
+                        // 应用淡出透明度到文本
+                        let text_alpha = (255.0 * row.bid_fade_alpha) as u8;
+                        ui.label(egui::RichText::new(format!("{:.4}", row.bid_volume))
+                            .color(egui::Color32::from_rgba_unmultiplied(255, 255, 255, text_alpha)));
+                    });
                                     });
                                 }
                                                 // 都没有 - 不显示任何内容
@@ -1312,10 +1242,12 @@ impl UnifiedOrderBookWidget {
                         cell_rect.min,
                         egui::Vec2::new(ask_width, half_height)
                     );
+                    // 应用淡出透明度
+                    let alpha = (100.0 * row.ask_fade_alpha) as u8;
                     ui.painter().rect_filled(
                         ask_rect,
                         0.0,
-                        egui::Color32::from_rgba_unmultiplied(255, 80, 80, 100)
+                        egui::Color32::from_rgba_unmultiplied(255, 80, 80, alpha)
                     );
                 }
                 
@@ -1327,8 +1259,10 @@ impl UnifiedOrderBookWidget {
                 ui.allocate_ui_at_rect(ask_text_rect, |ui| {
                     ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                         ui.add_space(4.0);
+                        // 应用淡出透明度到文本
+                        let text_alpha = (255.0 * row.ask_fade_alpha) as u8;
                         ui.label(egui::RichText::new(format!("{:.4}", row.ask_volume))
-                            .color(egui::Color32::WHITE)
+                            .color(egui::Color32::from_rgba_unmultiplied(255, 255, 255, text_alpha))
                             .size(11.0));
                     });
                 });
@@ -1343,10 +1277,12 @@ impl UnifiedOrderBookWidget {
                         cell_rect.min + egui::Vec2::new(0.0, half_height),
                         egui::Vec2::new(bid_width, half_height)
                     );
+                    // 应用淡出透明度
+                    let alpha = (100.0 * row.bid_fade_alpha) as u8;
                     ui.painter().rect_filled(
                         bid_rect,
                         0.0,
-                        egui::Color32::from_rgba_unmultiplied(80, 150, 255, 100)
+                        egui::Color32::from_rgba_unmultiplied(80, 150, 255, alpha)
                     );
                 }
                 
@@ -1358,8 +1294,10 @@ impl UnifiedOrderBookWidget {
                 ui.allocate_ui_at_rect(bid_text_rect, |ui| {
                     ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                         ui.add_space(4.0);
+                        // 应用淡出透明度到文本
+                        let text_alpha = (255.0 * row.bid_fade_alpha) as u8;
                         ui.label(egui::RichText::new(format!("{:.4}", row.bid_volume))
-                            .color(egui::Color32::WHITE)
+                            .color(egui::Color32::from_rgba_unmultiplied(255, 255, 255, text_alpha))
                             .size(11.0));
                     });
                 });
@@ -1375,10 +1313,12 @@ impl UnifiedOrderBookWidget {
                         cell_rect.min,
                         egui::Vec2::new(ask_width, cell_height)
                     );
+                    // 应用淡出透明度
+                    let alpha = (100.0 * row.ask_fade_alpha) as u8;
                     ui.painter().rect_filled(
                         ask_rect,
                         0.0,
-                        egui::Color32::from_rgba_unmultiplied(255, 80, 80, 100)
+                        egui::Color32::from_rgba_unmultiplied(255, 80, 80, alpha)
                     );
                 }
                 
@@ -1386,8 +1326,10 @@ impl UnifiedOrderBookWidget {
                 ui.allocate_ui_at_rect(cell_rect, |ui| {
                     ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                         ui.add_space(4.0);
+                        // 应用淡出透明度到文本
+                        let text_alpha = (255.0 * row.ask_fade_alpha) as u8;
                         ui.label(egui::RichText::new(format!("{:.4}", row.ask_volume))
-                            .color(egui::Color32::WHITE));
+                            .color(egui::Color32::from_rgba_unmultiplied(255, 255, 255, text_alpha)));
                     });
                 });
             }
@@ -1402,10 +1344,12 @@ impl UnifiedOrderBookWidget {
                         cell_rect.min,
                         egui::Vec2::new(bid_width, cell_height)
                     );
+                    // 应用淡出透明度
+                    let alpha = (100.0 * row.bid_fade_alpha) as u8;
                     ui.painter().rect_filled(
                         bid_rect,
                         0.0,
-                        egui::Color32::from_rgba_unmultiplied(80, 150, 255, 100)
+                        egui::Color32::from_rgba_unmultiplied(80, 150, 255, alpha)
                     );
                 }
                 
@@ -1413,8 +1357,10 @@ impl UnifiedOrderBookWidget {
                 ui.allocate_ui_at_rect(cell_rect, |ui| {
                     ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                         ui.add_space(4.0);
+                        // 应用淡出透明度到文本
+                        let text_alpha = (255.0 * row.bid_fade_alpha) as u8;
                         ui.label(egui::RichText::new(format!("{:.4}", row.bid_volume))
-                            .color(egui::Color32::WHITE));
+                            .color(egui::Color32::from_rgba_unmultiplied(255, 255, 255, text_alpha)));
                     });
                 });
             }
@@ -1459,29 +1405,8 @@ impl UnifiedOrderBookWidget {
     }
 }
 
-/// 聚合订单流数据结构（用于1美元级别聚合）
-#[derive(Debug, Clone)]
-struct AggregatedOrderFlow {
-    bid_volume: f64,           // 聚合买单深度
-    ask_volume: f64,           // 聚合卖单深度
-    active_buy_volume_5s: f64, // 聚合5秒内主动买单累计
-    active_sell_volume_5s: f64,// 聚合5秒内主动卖单累计
-    history_buy_volume: f64,   // 聚合历史累计主动买单量
-    history_sell_volume: f64,  // 聚合历史累计主动卖单量
-}
 
-impl AggregatedOrderFlow {
-    fn new() -> Self {
-        Self {
-            bid_volume: 0.0,
-            ask_volume: 0.0,
-            active_buy_volume_5s: 0.0,
-            active_sell_volume_5s: 0.0,
-            history_buy_volume: 0.0,
-            history_sell_volume: 0.0,
-        }
-    }
-}
+
 
 /// 统一订单簿行数据结构
 #[derive(Debug, Clone)]
@@ -1494,6 +1419,38 @@ struct UnifiedOrderBookRow {
     history_buy_volume: f64,   // 历史累计主动买单量
     history_sell_volume: f64,  // 历史累计主动卖单量
     delta: f64,                // 主动订单delta (买单量 - 卖单量)
+    // 淡出动画支持
+    bid_fade_alpha: f32,       // bid淡出透明度 (0.0 = 完全透明, 1.0 = 完全不透明)
+    ask_fade_alpha: f32,       // ask淡出透明度 (0.0 = 完全透明, 1.0 = 完全不透明)
+}
+
+/// 聚合订单流数据结构（用于1美元级别聚合）
+#[derive(Debug, Clone)]
+struct AggregatedOrderFlow {
+    bid_volume: f64,           // 聚合买单深度
+    ask_volume: f64,           // 聚合卖单深度
+    active_buy_volume_5s: f64, // 聚合5秒内主动买单累计
+    active_sell_volume_5s: f64,// 聚合5秒内主动卖单累计
+    history_buy_volume: f64,   // 聚合历史累计主动买单量
+    history_sell_volume: f64,  // 聚合历史累计主动卖单量
+    // 淡出动画支持
+    bid_fade_alpha: f32,       // bid淡出透明度 (0.0 = 完全透明, 1.0 = 完全不透明)
+    ask_fade_alpha: f32,       // ask淡出透明度 (0.0 = 完全透明, 1.0 = 完全不透明)
+}
+
+impl AggregatedOrderFlow {
+    fn new() -> Self {
+        Self {
+            bid_volume: 0.0,
+            ask_volume: 0.0,
+            active_buy_volume_5s: 0.0,
+            active_sell_volume_5s: 0.0,
+            history_buy_volume: 0.0,
+            history_sell_volume: 0.0,
+            bid_fade_alpha: 1.0,  // 默认完全不透明
+            ask_fade_alpha: 1.0,  // 默认完全不透明
+        }
+    }
 }
 
 impl UnifiedOrderBookWidget {
@@ -1882,11 +1839,7 @@ impl UnifiedOrderBookWidget {
             let available_height = ui.available_height();
             let chart_height = self.price_chart_height.min(available_height);
 
-            // 使用固定高度的容器来限制图表大小
-            ui.allocate_ui_with_layout(
-                egui::Vec2::new(ui.available_width(), chart_height),
-                egui::Layout::top_down(egui::Align::LEFT),
-                |ui| {
+            // 直接使用可用空间，不再限制容器大小
                     // 创建嵌入式图表 - 移除view_aspect以避免高度冲突，添加固定1美元Y轴刻度，移除margin
                     // 设置固定的X轴显示窗口，只显示最近的1000个数据点，防止数据增多时图表缩小
                     let display_window_size = 1000.0; // 固定显示窗口大小
@@ -1964,8 +1917,6 @@ impl UnifiedOrderBookWidget {
                             );
                         }
                     });
-                },
-            );
         }
     }
 
@@ -2289,6 +2240,66 @@ impl UnifiedOrderBookWidget {
             });
     }
 
+    /// 将价格聚合到1美元级别（使用向下取整策略）
+    fn aggregate_prices_to_usd_levels(
+        &self,
+        order_flows: &BTreeMap<OrderedFloat<f64>, OrderFlow>,
+        visible_prices: &[f64],
+        time_threshold: u64,
+    ) -> BTreeMap<OrderedFloat<f64>, AggregatedOrderFlow> {
+        use std::collections::HashMap;
+
+        let mut aggregated_map: HashMap<i64, AggregatedOrderFlow> = HashMap::new();
+
+        // 遍历所有可见价格，进行聚合
+        for &price_val in visible_prices {
+            // 使用向下取整策略：floor(price) 聚合到1美元级别
+            let price_level_int = price_val.floor() as i64;
+            let price_key = OrderedFloat(price_val);
+
+            // 确保每个价格级别都有一个条目（即使没有数据也显示空行）
+            let entry = aggregated_map.entry(price_level_int).or_insert_with(|| AggregatedOrderFlow::new());
+
+            // 获取该价格的订单流数据（如果存在）
+            if let Some(order_flow) = order_flows.get(&price_key) {
+                // 聚合订单簿深度数据
+                entry.bid_volume += order_flow.bid_ask.bid;
+                entry.ask_volume += order_flow.bid_ask.ask;
+
+                // 聚合历史累计数据（用于delta计算）
+                entry.history_buy_volume += order_flow.history_trade_record.buy_volume;
+                entry.history_sell_volume += order_flow.history_trade_record.sell_volume;
+
+                // 聚合5秒内主动交易数据（时间窗口过滤）
+                if order_flow.realtime_trade_record.timestamp >= time_threshold {
+                    entry.active_buy_volume_5s += order_flow.realtime_trade_record.buy_volume;
+                    entry.active_sell_volume_5s += order_flow.realtime_trade_record.sell_volume;
+                }
+
+                // 计算淡出透明度（取所有价格层级的最小透明度）
+                let bid_alpha = order_flow.get_bid_fade_alpha(self.get_current_timestamp());
+                let ask_alpha = order_flow.get_ask_fade_alpha(self.get_current_timestamp());
+                entry.bid_fade_alpha = entry.bid_fade_alpha.min(bid_alpha);
+                entry.ask_fade_alpha = entry.ask_fade_alpha.min(ask_alpha);
+            }
+        }
+
+        // 转换为BTreeMap以保持排序
+        aggregated_map.into_iter()
+            .map(|(price_level_int, aggregated_flow)| {
+                (OrderedFloat(price_level_int as f64), aggregated_flow)
+            })
+            .collect()
+    }
+
+    /// 获取当前时间戳
+    fn get_current_timestamp(&self) -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64
+    }
+
     /// 从信号文本中提取总量值
     /// 信号格式: "[时间] 信号类型 - Buy/Sell 方向 连续X笔 价格A->B Volume C"
     fn extract_total_volume_from_signal(&self, signal: &str) -> f64 {
@@ -2312,6 +2323,70 @@ impl UnifiedOrderBookWidget {
         } else {
             0.0
         }
+    }
+
+    /// 渲染紧凑版Orderbook Imbalance指标 - 适合顶部狭窄区域
+    fn render_compact_orderbook_imbalance(&mut self, ui: &mut egui::Ui, app: &crate::app::reactive_app::ReactiveApp) {
+        // 获取市场快照数据
+        let snapshot = app.get_market_snapshot();
+        let bid_ratio = snapshot.bid_volume_ratio;
+        let ask_ratio = snapshot.ask_volume_ratio;
+
+        // 计算可用宽度（为条形图预留空间）
+        let available_width = 300.0; // 固定宽度，适合顶部区域
+        let bar_height = 20.0;
+
+        ui.horizontal(|ui| {
+            // 显示标题和数值
+            ui.colored_label(egui::Color32::WHITE, "📊 OB Imbalance:");
+            ui.colored_label(egui::Color32::from_rgb(120, 180, 255), format!("{:.0}%", bid_ratio * 100.0));
+            ui.colored_label(egui::Color32::GRAY, "/");
+            ui.colored_label(egui::Color32::from_rgb(255, 120, 120), format!("{:.0}%", ask_ratio * 100.0));
+
+            // 绘制紧凑的条形图
+            ui.allocate_ui_with_layout(
+                egui::Vec2::new(available_width, bar_height),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    let rect = ui.available_rect_before_wrap();
+
+                    // 计算买单和卖单条形图的宽度
+                    let bid_width = available_width * bid_ratio as f32;
+                    let ask_width = available_width * ask_ratio as f32;
+
+                    // 绘制背景
+                    ui.painter().rect_filled(rect, 2.0, egui::Color32::from_rgb(40, 40, 50));
+
+                    // 绘制买单条形图（蓝色，从左边开始）
+                    if bid_width > 1.0 {
+                        let bid_rect = egui::Rect::from_min_size(
+                            rect.min,
+                            egui::Vec2::new(bid_width, bar_height)
+                        );
+                        ui.painter().rect_filled(bid_rect, 2.0, egui::Color32::from_rgb(120, 180, 255));
+                    }
+
+                    // 绘制卖单条形图（红色，从右边开始）
+                    if ask_width > 1.0 {
+                        let ask_rect = egui::Rect::from_min_size(
+                            egui::Pos2::new(rect.max.x - ask_width, rect.min.y),
+                            egui::Vec2::new(ask_width, bar_height)
+                        );
+                        ui.painter().rect_filled(ask_rect, 2.0, egui::Color32::from_rgb(255, 120, 120));
+                    }
+
+                    // 绘制中心分割线
+                    let center_x = rect.min.x + available_width * 0.5;
+                    ui.painter().line_segment(
+                        [egui::Pos2::new(center_x, rect.min.y), egui::Pos2::new(center_x, rect.max.y)],
+                        egui::Stroke::new(1.0, egui::Color32::WHITE)
+                    );
+
+                    // 占用整个区域以防止其他元素覆盖
+                    ui.allocate_rect(rect, egui::Sense::hover());
+                }
+            );
+        });
     }
 }
 

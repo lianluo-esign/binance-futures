@@ -16,7 +16,10 @@ impl OrderFlow {
             bid_ask: PriceLevel { 
                 bid: 0.0, 
                 ask: 0.0, 
-                timestamp: 0 
+                timestamp: 0,
+                bid_fade_start_time: None,
+                ask_fade_start_time: None,
+                fade_duration_ms: 300, // 300ms淡出动画
             },
             history_trade_record: TradeRecord { 
                 buy_volume: 0.0, 
@@ -46,6 +49,69 @@ impl OrderFlow {
         self.bid_ask.bid = bid;
         self.bid_ask.ask = ask;
         self.bid_ask.timestamp = timestamp;
+        
+        // 重置淡出动画状态（因为数据被更新了）
+        self.bid_ask.bid_fade_start_time = None;
+        self.bid_ask.ask_fade_start_time = None;
+    }
+
+    /// 开始bid淡出动画
+    pub fn start_bid_fade(&mut self, timestamp: u64) {
+        if self.bid_ask.bid > 0.0 && self.bid_ask.bid_fade_start_time.is_none() {
+            self.bid_ask.bid_fade_start_time = Some(timestamp);
+        }
+    }
+
+    /// 开始ask淡出动画
+    pub fn start_ask_fade(&mut self, timestamp: u64) {
+        if self.bid_ask.ask > 0.0 && self.bid_ask.ask_fade_start_time.is_none() {
+            self.bid_ask.ask_fade_start_time = Some(timestamp);
+        }
+    }
+
+    /// 获取bid淡出透明度 (0.0 = 完全透明, 1.0 = 完全不透明)
+    pub fn get_bid_fade_alpha(&self, current_time: u64) -> f32 {
+        if let Some(fade_start) = self.bid_ask.bid_fade_start_time {
+            let elapsed = current_time.saturating_sub(fade_start);
+            if elapsed >= self.bid_ask.fade_duration_ms {
+                0.0 // 完全透明
+            } else {
+                1.0 - (elapsed as f32 / self.bid_ask.fade_duration_ms as f32)
+            }
+        } else {
+            1.0 // 完全不透明
+        }
+    }
+
+    /// 获取ask淡出透明度 (0.0 = 完全透明, 1.0 = 完全不透明)
+    pub fn get_ask_fade_alpha(&self, current_time: u64) -> f32 {
+        if let Some(fade_start) = self.bid_ask.ask_fade_start_time {
+            let elapsed = current_time.saturating_sub(fade_start);
+            if elapsed >= self.bid_ask.fade_duration_ms {
+                0.0 // 完全透明
+            } else {
+                1.0 - (elapsed as f32 / self.bid_ask.fade_duration_ms as f32)
+            }
+        } else {
+            1.0 // 完全不透明
+        }
+    }
+
+    /// 检查淡出动画是否完成
+    pub fn is_fade_complete(&self, current_time: u64) -> (bool, bool) {
+        let bid_complete = if let Some(fade_start) = self.bid_ask.bid_fade_start_time {
+            current_time.saturating_sub(fade_start) >= self.bid_ask.fade_duration_ms
+        } else {
+            false
+        };
+
+        let ask_complete = if let Some(fade_start) = self.bid_ask.ask_fade_start_time {
+            current_time.saturating_sub(fade_start) >= self.bid_ask.fade_duration_ms
+        } else {
+            false
+        };
+
+        (bid_complete, ask_complete)
     }
 
     /// 添加交易记录
@@ -143,6 +209,7 @@ impl OrderFlow {
     }
 
     /// 检查是否为空的订单流（没有任何活跃数据）
+    /// 重要：历史累积数据不能被清除，因为它们用于计算delta
     pub fn is_empty(&self) -> bool {
         self.bid_ask.bid == 0.0 &&
         self.bid_ask.ask == 0.0 &&
@@ -151,7 +218,10 @@ impl OrderFlow {
         self.realtime_cancel_records.bid_cancel == 0.0 &&
         self.realtime_cancel_records.ask_cancel == 0.0 &&
         self.realtime_increase_order.bid == 0.0 &&
-        self.realtime_increase_order.ask == 0.0
+        self.realtime_increase_order.ask == 0.0 &&
+        // 关键：只有历史累积数据也为空时才认为是真正的空
+        self.history_trade_record.buy_volume == 0.0 &&
+        self.history_trade_record.sell_volume == 0.0
     }
 
     /// 获取总交易量

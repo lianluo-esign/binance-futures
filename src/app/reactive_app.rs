@@ -510,6 +510,22 @@ impl ReactiveApp {
         self.orderbook_manager.get_market_snapshot()
     }
 
+    /// 获取详细的OBI数据：(买单比例, 卖单比例, 总买单量, 总卖单量, 总挂单量)
+    pub fn get_detailed_orderbook_imbalance(&self) -> (f64, f64, f64, f64, f64) {
+        self.orderbook_manager.get_detailed_volume_ratios()
+    }
+
+    /// 获取高频波动率和价格跳跃数据：(高频波动率, 价格跳跃信号)
+    pub fn get_volatility_and_jump_data(&self) -> (f64, f64) {
+        let snapshot = self.orderbook_manager.get_market_snapshot();
+        (snapshot.realized_volatility, snapshot.jump_signal)
+    }
+
+    /// 获取RV历史数据用于线型图显示
+    pub fn get_rv_history(&self) -> &std::collections::VecDeque<(u64, f64)> {
+        self.orderbook_manager.get_rv_history()
+    }
+
     /// 获取应用程序统计信息
     pub fn get_stats(&self) -> AppStats {
         let event_bus_stats = self.event_dispatcher.get_stats();

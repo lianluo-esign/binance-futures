@@ -4,6 +4,10 @@ pub struct PriceLevel {
     pub bid: f64,
     pub ask: f64,
     pub timestamp: u64,
+    // 淡出动画支持
+    pub bid_fade_start_time: Option<u64>, // bid开始淡出的时间
+    pub ask_fade_start_time: Option<u64>, // ask开始淡出的时间
+    pub fade_duration_ms: u64, // 淡出动画持续时间（毫秒）
 }
 
 /// 交易记录数据结构
@@ -104,6 +108,9 @@ pub struct OrderBookConfig {
     pub avg_speed_window_ms: u64,
     pub volatility_window_ms: u64,
     pub tick_price_diff_window_size: usize,
+    pub keep_only_updated_depth: bool, // 是否只保留当前正在更新的深度数据
+    pub depth_cleanup_interval_ms: u64, // 深度数据清理间隔（毫秒）
+    pub max_cleanup_batch_size: usize, // 单次清理的最大批量大小
 }
 
 impl Default for OrderBookConfig {
@@ -120,6 +127,9 @@ impl Default for OrderBookConfig {
             avg_speed_window_ms: 5000,
             volatility_window_ms: 60000,
             tick_price_diff_window_size: 10,
+            keep_only_updated_depth: true, // 默认启用，只保留当前更新的深度数据
+            depth_cleanup_interval_ms: 50, // 50ms清理间隔，平衡性能和数据新鲜度
+            max_cleanup_batch_size: 15, // 每次最多清理15个价格层级
         }
     }
 }
@@ -149,6 +159,8 @@ pub struct MarketSnapshot {
     pub avg_speed: f64,
     pub volatility: f64,
     pub tick_price_diff_volatility: f64,
+    pub realized_volatility: f64,    // 高频波动率（Realized Volatility）
+    pub jump_signal: f64,            // 价格跳跃信号（Jump）
 }
 
 impl MarketSnapshot {
@@ -169,6 +181,8 @@ impl MarketSnapshot {
             avg_speed: 0.0,
             volatility: 0.0,
             tick_price_diff_volatility: 0.0,
+            realized_volatility: 0.0,
+            jump_signal: 0.0,
         }
     }
 

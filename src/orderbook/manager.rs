@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use ordered_float::OrderedFloat;
 use serde_json::Value;
 
@@ -28,11 +28,16 @@ pub struct OrderBookManager {
     price_speed: f64,
     avg_speed: f64,
     volatility: f64,
+    realized_volatility: f64,    // 高频波动率（Realized Volatility）
+    jump_signal: f64,            // 价格跳跃信号（Jump）
     
     // 内部缓冲区
     tick_buffer: Vec<u64>,
     speed_history: Vec<(u64, f64)>,
     volatility_buffer: Vec<(u64, f64)>,
+    price_returns: std::collections::VecDeque<f64>,  // 价格收益率序列，用于计算高频波动率
+    price_history: std::collections::VecDeque<(u64, f64)>, // 价格历史数据，用于跳跃检测
+    rv_history: std::collections::VecDeque<(u64, f64)>, // RV历史数据，用于线型图显示
 
     // 交易高亮显示
     last_trade_price: Option<f64>,
@@ -75,10 +80,15 @@ impl OrderBookManager {
             price_speed: 0.0,
             avg_speed: 0.0,
             volatility: 0.0,
+            realized_volatility: 0.0,    // 高频波动率（Realized Volatility）
+            jump_signal: 0.0,            // 价格跳跃信号（Jump）
             
             tick_buffer: Vec::new(),
             speed_history: Vec::new(),
             volatility_buffer: Vec::new(),
+            price_returns: std::collections::VecDeque::new(),  // 价格收益率序列，用于计算高频波动率
+            price_history: std::collections::VecDeque::new(), // 价格历史数据，用于跳跃检测
+            rv_history: std::collections::VecDeque::new(), // RV历史数据，用于线型图显示
 
             last_trade_price: None,
             last_trade_side: None,
@@ -105,6 +115,9 @@ impl OrderBookManager {
 
         let mut bid_count = 0;
         let mut ask_count = 0;
+        
+        // 收集本次更新的价格层级
+        let mut updated_prices = HashSet::new();
 
         // 处理买单
         if let Some(bids) = data["b"].as_array() {
@@ -112,6 +125,8 @@ impl OrderBookManager {
                 if let (Some(price_str), Some(qty_str)) = (bid[0].as_str(), bid[1].as_str()) {
                     if let (Ok(price), Ok(qty)) = (price_str.parse::<f64>(), qty_str.parse::<f64>()) {
                         let price_ordered = OrderedFloat(price);
+                        updated_prices.insert(price_ordered);
+                        
                         let order_flow = self.order_flows.entry(price_ordered).or_insert_with(OrderFlow::new);
                         order_flow.update_price_level(qty, 0.0, current_time);
                         bid_count += 1;
@@ -131,6 +146,8 @@ impl OrderBookManager {
                 if let (Some(price_str), Some(qty_str)) = (ask[0].as_str(), ask[1].as_str()) {
                     if let (Ok(price), Ok(qty)) = (price_str.parse::<f64>(), qty_str.parse::<f64>()) {
                         let price_ordered = OrderedFloat(price);
+                        updated_prices.insert(price_ordered);
+                        
                         let order_flow = self.order_flows.entry(price_ordered).or_insert_with(OrderFlow::new);
                         order_flow.update_price_level(0.0, qty, current_time);
                         ask_count += 1;
@@ -144,7 +161,13 @@ impl OrderBookManager {
             }
         }
 
-        // 调试信息已移除
+        // 根据配置决定是否清理未在本次更新中出现的深度数据
+        if self.config.keep_only_updated_depth {
+            self.clean_non_updated_depth_data(&updated_prices, current_time);
+        }
+
+        // 重新计算基于整个订单簿的多空比例
+        self.calculate_volume_ratio(0.0, 0.0);
 
         self.update_market_snapshot();
     }
@@ -191,6 +214,10 @@ impl OrderBookManager {
                 self.calculate_price_speed(current_time);
                 self.calculate_volatility(current_time, price);
 
+                // 计算高频波动率和价格跳跃
+                self.calculate_realized_volatility(current_time, price);
+                self.calculate_jump_signal(current_time, price);
+
                 self.update_market_snapshot();
             }
         }
@@ -229,6 +256,85 @@ impl OrderBookManager {
 
                 self.update_market_snapshot();
             }
+        }
+    }
+
+    /// 清理未在本次深度更新中出现的挂单数据（优化版本，支持淡出动画）
+    fn clean_non_updated_depth_data(&mut self, updated_prices: &HashSet<OrderedFloat<f64>>, _current_time: u64) {
+        // 限制清理频率，避免每次更新都清理
+        static mut LAST_CLEANUP_TIME: u64 = 0;
+        let current_time = self.get_current_timestamp();
+        
+        unsafe {
+            if current_time.saturating_sub(LAST_CLEANUP_TIME) < self.config.depth_cleanup_interval_ms {
+                return;
+            }
+            LAST_CLEANUP_TIME = current_time;
+        }
+
+        let mut bid_fade_started = 0;
+        let mut ask_fade_started = 0;
+        let mut prices_to_remove = Vec::new();
+
+        // 批量处理，减少单次操作的影响
+        let mut batch_count = 0;
+        let max_batch_size = self.config.max_cleanup_batch_size;
+
+        // 遍历所有价格层级，处理未更新的深度数据
+        for (price, order_flow) in self.order_flows.iter_mut() {
+            if batch_count >= max_batch_size {
+                break; // 限制单次处理数量
+            }
+
+            // 如果这个价格层级在本次更新中没有出现，启动淡出动画
+            if !updated_prices.contains(price) {
+                // 启动bid淡出动画
+                if order_flow.bid_ask.bid > 0.0 && order_flow.bid_ask.bid_fade_start_time.is_none() {
+                    order_flow.start_bid_fade(current_time);
+                    bid_fade_started += 1;
+                }
+                
+                // 启动ask淡出动画
+                if order_flow.bid_ask.ask > 0.0 && order_flow.bid_ask.ask_fade_start_time.is_none() {
+                    order_flow.start_ask_fade(current_time);
+                    ask_fade_started += 1;
+                }
+                
+                batch_count += 1;
+            }
+
+            // 检查淡出动画是否完成，如果完成则清理数据
+            let (bid_fade_complete, ask_fade_complete) = order_flow.is_fade_complete(current_time);
+            
+            if bid_fade_complete && order_flow.bid_ask.bid > 0.0 {
+                order_flow.bid_ask.bid = 0.0;
+                order_flow.bid_ask.bid_fade_start_time = None;
+            }
+            
+            if ask_fade_complete && order_flow.bid_ask.ask > 0.0 {
+                order_flow.bid_ask.ask = 0.0;
+                order_flow.bid_ask.ask_fade_start_time = None;
+            }
+            
+            // 如果这个订单流现在完全为空，标记为待删除
+            if order_flow.is_empty() {
+                prices_to_remove.push(*price);
+            }
+        }
+
+        // 限制删除操作的数量，避免一次性删除太多导致卡顿
+        let max_delete_count = (max_batch_size / 2).max(5); // 最多删除批量大小的一半，最少5个
+        if prices_to_remove.len() > max_delete_count {
+            prices_to_remove.truncate(max_delete_count);
+        }
+
+        // 删除完全为空的价格层级
+        for price in prices_to_remove {
+            self.order_flows.remove(&price);
+        }
+
+        if bid_fade_started > 0 || ask_fade_started > 0 {
+            log::debug!("启动深度数据淡出动画: {}个bid, {}个ask", bid_fade_started, ask_fade_started);
         }
     }
 
@@ -341,12 +447,143 @@ impl OrderBookManager {
         }
     }
 
-    /// 计算多空比例
-    fn calculate_volume_ratio(&mut self, bid_qty: f64, ask_qty: f64) {
-        let total_volume = bid_qty + ask_qty;
+    /// 计算高频波动率（Realized Volatility）
+    /// 基于5秒窗口的高频价格收益率的方差计算
+    fn calculate_realized_volatility(&mut self, timestamp: u64, price: f64) {
+        if price <= 0.0 {
+            return;
+        }
+
+        // 添加价格到历史记录
+        self.price_history.push_back((timestamp, price));
+        
+        // 保持价格历史窗口大小（5秒窗口）
+        let window_ms = 5000; // 5秒 = 5000毫秒
+        let cutoff_time = timestamp.saturating_sub(window_ms);
+        while let Some(&(ts, _)) = self.price_history.front() {
+            if ts < cutoff_time {
+                self.price_history.pop_front();
+            } else {
+                break;
+            }
+        }
+
+        // 计算价格收益率 - 每个新价格都计算收益率
+        if self.price_history.len() >= 2 {
+            let (_, prev_price) = self.price_history[self.price_history.len() - 2];
+            if prev_price > 0.0 {
+                // 使用对数收益率，更适合高频数据
+                let log_return = (price / prev_price).ln() * 10000.0; // 放大10000倍以便观察
+                self.price_returns.push_back(log_return);
+                
+                // 调试输出
+                if self.price_returns.len() % 10 == 0 { // 每10个数据点输出一次
+                    log::debug!("RV计算(5s): 价格 {:.2} -> {:.2}, 收益率 {:.4}, 历史长度 {}", 
+                               prev_price, price, log_return, self.price_returns.len());
+                }
+            }
+        }
+
+        // 保持收益率序列长度 - 5秒窗口，保持最近500个点
+        while self.price_returns.len() > 500 {
+            self.price_returns.pop_front();
+        }
+
+        // 计算高频波动率（基于收益率的标准差）- 降低最小样本要求
+        if self.price_returns.len() >= 5 {
+            let mean: f64 = self.price_returns.iter().sum::<f64>() / self.price_returns.len() as f64;
+            let variance: f64 = self.price_returns.iter()
+                .map(|&r| (r - mean).powi(2))
+                .sum::<f64>() / (self.price_returns.len() - 1) as f64; // 使用样本方差
+            
+            if variance >= 0.0 && !variance.is_nan() && !variance.is_infinite() {
+                let new_volatility = variance.sqrt();
+                self.realized_volatility = new_volatility;
+                
+                // 记录RV历史数据用于线型图显示
+                self.rv_history.push_back((timestamp, new_volatility));
+                
+                // 保持RV历史数据长度（最近5分钟的数据，约300个点）
+                while self.rv_history.len() > 300 {
+                    self.rv_history.pop_front();
+                }
+                
+                // 调试输出
+                if self.price_returns.len() % 20 == 0 { // 每20个数据点输出一次
+                    log::debug!("RV更新(5s): 波动率 {:.4}, 样本数 {}, 均值 {:.4}, 方差 {:.4}", 
+                               new_volatility, self.price_returns.len(), mean, variance);
+                }
+            }
+        }
+    }
+
+    /// 计算价格跳跃信号（Jump Detection）
+    /// 基于价格变化的Z-score检测异常跳跃
+    fn calculate_jump_signal(&mut self, _timestamp: u64, price: f64) {
+        if price <= 0.0 || self.price_returns.len() < 30 {
+            return;
+        }
+
+        // 计算最近的价格变化
+        if let Some(&last_return) = self.price_returns.back() {
+            // 计算历史收益率的统计特征
+            let returns_vec: Vec<f64> = self.price_returns.iter().cloned().collect();
+            let mean: f64 = returns_vec.iter().sum::<f64>() / returns_vec.len() as f64;
+            let variance: f64 = returns_vec.iter()
+                .map(|&r| (r - mean).powi(2))
+                .sum::<f64>() / returns_vec.len() as f64;
+            
+            if variance > 0.0 && !variance.is_nan() && !variance.is_infinite() {
+                let std_dev = variance.sqrt();
+                
+                // 计算Z-score
+                let z_score = (last_return - mean) / std_dev;
+                
+                // 跳跃检测：如果Z-score超过阈值（2.5标准差），认为是跳跃
+                let jump_threshold = 2.5;
+                if z_score.abs() > jump_threshold {
+                    self.jump_signal = z_score.abs();
+                } else {
+                    // 逐渐衰减跳跃信号
+                    self.jump_signal = (self.jump_signal * 0.95).max(0.0);
+                }
+            }
+        }
+    }
+
+    /// 计算多空比例 - 基于整个订单簿的所有挡位挂单数据
+    fn calculate_volume_ratio(&mut self, _best_bid_qty: f64, _best_ask_qty: f64) {
+        // 累计所有挡位的买单和卖单数量
+        let mut total_bid_volume = 0.0;
+        let mut total_ask_volume = 0.0;
+        
+        // 遍历所有价格层级，累计所有有效的挂单数据
+        for (_, order_flow) in &self.order_flows {
+            // 只计算有效的挂单量（大于0的）
+            if order_flow.bid_ask.bid > 0.0 {
+                total_bid_volume += order_flow.bid_ask.bid;
+            }
+            if order_flow.bid_ask.ask > 0.0 {
+                total_ask_volume += order_flow.bid_ask.ask;
+            }
+        }
+        
+        // 计算比例
+        let total_volume = total_bid_volume + total_ask_volume;
         if total_volume > 0.0 {
-            self.bid_volume_ratio = bid_qty / total_volume;
-            self.ask_volume_ratio = ask_qty / total_volume;
+            self.bid_volume_ratio = total_bid_volume / total_volume;
+            self.ask_volume_ratio = total_ask_volume / total_volume;
+        } else {
+            // 如果没有挂单数据，保持默认比例
+            self.bid_volume_ratio = 0.5;
+            self.ask_volume_ratio = 0.5;
+        }
+        
+        // 调试输出（可选）
+        if total_volume > 0.0 {
+            log::debug!("OBI计算: 总买单={:.2}, 总卖单={:.2}, 买单比例={:.1}%, 卖单比例={:.1}%", 
+                       total_bid_volume, total_ask_volume, 
+                       self.bid_volume_ratio * 100.0, self.ask_volume_ratio * 100.0);
         }
     }
 
@@ -363,13 +600,15 @@ impl OrderBookManager {
             avg_speed: self.avg_speed,
             volatility: self.volatility,
             tick_price_diff_volatility: 0.0, // 简化版本暂不实现
+            realized_volatility: self.realized_volatility,
+            jump_signal: self.jump_signal,
         };
         
         self.stats.last_update_time = self.market_snapshot.timestamp;
     }
 
     /// 获取当前时间戳
-    fn get_current_timestamp(&self) -> u64 {
+    pub fn get_current_timestamp(&self) -> u64 {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -399,6 +638,28 @@ impl OrderBookManager {
 
     pub fn get_volume_ratios(&self) -> (f64, f64) {
         (self.bid_volume_ratio, self.ask_volume_ratio)
+    }
+
+    /// 获取详细的OBI数据：(买单比例, 卖单比例, 总买单量, 总卖单量, 总挂单量)
+    pub fn get_detailed_volume_ratios(&self) -> (f64, f64, f64, f64, f64) {
+        let mut total_bid_volume = 0.0;
+        let mut total_ask_volume = 0.0;
+        
+        // 遍历所有价格层级，累计所有有效的挂单数据
+        for (_, order_flow) in &self.order_flows {
+            if order_flow.bid_ask.bid > 0.0 {
+                total_bid_volume += order_flow.bid_ask.bid;
+            }
+            if order_flow.bid_ask.ask > 0.0 {
+                total_ask_volume += order_flow.bid_ask.ask;
+            }
+        }
+        
+        let total_volume = total_bid_volume + total_ask_volume;
+        let bid_ratio = if total_volume > 0.0 { total_bid_volume / total_volume } else { 0.5 };
+        let ask_ratio = if total_volume > 0.0 { total_ask_volume / total_volume } else { 0.5 };
+        
+        (bid_ratio, ask_ratio, total_bid_volume, total_ask_volume, total_volume)
     }
 
     /// 获取最近交易高亮信息
@@ -734,6 +995,36 @@ impl OrderBookManager {
     /// 获取当前K值设置
     pub fn get_tick_pressure_k_value(&self) -> usize {
         self.tick_pressure_k_value
+    }
+
+    /// 设置是否只保留当前更新的深度数据
+    pub fn set_keep_only_updated_depth(&mut self, enabled: bool) {
+        self.config.keep_only_updated_depth = enabled;
+        log::info!("订单簿深度数据保留模式已{}：{}", 
+                  if enabled { "启用" } else { "禁用" },
+                  if enabled { "只保留当前更新的数据" } else { "保留所有历史数据" });
+    }
+
+    /// 获取当前深度数据保留模式
+    pub fn get_keep_only_updated_depth(&self) -> bool {
+        self.config.keep_only_updated_depth
+    }
+
+    /// 设置深度数据清理参数
+    pub fn set_depth_cleanup_params(&mut self, interval_ms: u64, batch_size: usize) {
+        self.config.depth_cleanup_interval_ms = interval_ms;
+        self.config.max_cleanup_batch_size = batch_size;
+        log::info!("深度数据清理参数已更新: 间隔{}ms, 批量大小{}", interval_ms, batch_size);
+    }
+
+    /// 获取深度数据清理参数
+    pub fn get_depth_cleanup_params(&self) -> (u64, usize) {
+        (self.config.depth_cleanup_interval_ms, self.config.max_cleanup_batch_size)
+    }
+
+    /// 获取RV历史数据用于线型图显示
+    pub fn get_rv_history(&self) -> &std::collections::VecDeque<(u64, f64)> {
+        &self.rv_history
     }
 }
 
