@@ -1,4 +1,4 @@
-use binance_futures::orderbook::{OrderBookManager, OrderFlow};
+use flow_sight::orderbook::{OrderBookManager, OrderFlow};
 use serde_json::json;
 use std::thread;
 use std::time::Duration;
@@ -163,4 +163,166 @@ fn test_order_flow_keep_recent_price_levels() {
     assert_eq!(order_flow.bid_ask.timestamp, recent_timestamp, "时间戳应该保持不变");
     
     println!("OrderFlow保留功能验证通过");
+}
+
+#[test]
+fn test_depth_cleanup_logic() {
+    let mut manager = OrderBookManager::new();
+    
+    // 模拟第一次深度更新 - 20档数据
+    let first_depth_data = json!({
+        "b": [
+            ["50000.0", "1.0"],
+            ["49999.0", "2.0"],
+            ["49998.0", "3.0"],
+            ["49997.0", "4.0"],
+            ["49996.0", "5.0"],
+            ["49995.0", "6.0"],
+            ["49994.0", "7.0"],
+            ["49993.0", "8.0"],
+            ["49992.0", "9.0"],
+            ["49991.0", "10.0"],
+            ["49990.0", "11.0"],
+            ["49989.0", "12.0"],
+            ["49988.0", "13.0"],
+            ["49987.0", "14.0"],
+            ["49986.0", "15.0"],
+            ["49985.0", "16.0"],
+            ["49984.0", "17.0"],
+            ["49983.0", "18.0"],
+            ["49982.0", "19.0"],
+            ["49981.0", "20.0"]
+        ],
+        "a": [
+            ["50001.0", "1.0"],
+            ["50002.0", "2.0"],
+            ["50003.0", "3.0"],
+            ["50004.0", "4.0"],
+            ["50005.0", "5.0"],
+            ["50006.0", "6.0"],
+            ["50007.0", "7.0"],
+            ["50008.0", "8.0"],
+            ["50009.0", "9.0"],
+            ["50010.0", "10.0"],
+            ["50011.0", "11.0"],
+            ["50012.0", "12.0"],
+            ["50013.0", "13.0"],
+            ["50014.0", "14.0"],
+            ["50015.0", "15.0"],
+            ["50016.0", "16.0"],
+            ["50017.0", "17.0"],
+            ["50018.0", "18.0"],
+            ["50019.0", "19.0"],
+            ["50020.0", "20.0"]
+        ]
+    });
+    
+    manager.handle_depth_update(&first_depth_data);
+    
+    // 验证第一次更新后的数据
+    let order_flows = manager.get_order_flows();
+    assert_eq!(order_flows.len(), 40); // 20个bid + 20个ask
+    
+    // 模拟第二次深度更新 - 价格范围发生变化，只有15档数据
+    let second_depth_data = json!({
+        "b": [
+            ["50010.0", "1.0"],
+            ["50009.0", "2.0"],
+            ["50008.0", "3.0"],
+            ["50007.0", "4.0"],
+            ["50006.0", "5.0"],
+            ["50005.0", "6.0"],
+            ["50004.0", "7.0"],
+            ["50003.0", "8.0"],
+            ["50002.0", "9.0"],
+            ["50001.0", "10.0"],
+            ["50000.0", "11.0"],
+            ["49999.0", "12.0"],
+            ["49998.0", "13.0"],
+            ["49997.0", "14.0"],
+            ["49996.0", "15.0"]
+        ],
+        "a": [
+            ["50011.0", "1.0"],
+            ["50012.0", "2.0"],
+            ["50013.0", "3.0"],
+            ["50014.0", "4.0"],
+            ["50015.0", "5.0"],
+            ["50016.0", "6.0"],
+            ["50017.0", "7.0"],
+            ["50018.0", "8.0"],
+            ["50019.0", "9.0"],
+            ["50020.0", "10.0"],
+            ["50021.0", "11.0"],
+            ["50022.0", "12.0"],
+            ["50023.0", "13.0"],
+            ["50024.0", "14.0"],
+            ["50025.0", "15.0"]
+        ]
+    });
+    
+    manager.handle_depth_update(&second_depth_data);
+    
+    // 验证第二次更新后的数据 - 应该只保留新的15档数据
+    let order_flows_after = manager.get_order_flows();
+    assert_eq!(order_flows_after.len(), 30); // 15个bid + 15个ask
+    
+    // 验证旧的价格层级已被清除
+    assert!(!order_flows_after.contains_key(&49981.0.into())); // 旧的bid价格
+    assert!(!order_flows_after.contains_key(&50020.0.into())); // 旧的ask价格
+    
+    // 验证新的价格层级存在
+    assert!(order_flows_after.contains_key(&50010.0.into())); // 新的bid价格
+    assert!(order_flows_after.contains_key(&50025.0.into())); // 新的ask价格
+}
+
+#[test]
+fn test_depth_cleanup_with_trades() {
+    let mut manager = OrderBookManager::new();
+    
+    // 先添加一些深度数据
+    let depth_data = json!({
+        "b": [
+            ["50000.0", "1.0"],
+            ["49999.0", "2.0"]
+        ],
+        "a": [
+            ["50001.0", "1.0"],
+            ["50002.0", "2.0"]
+        ]
+    });
+    
+    manager.handle_depth_update(&depth_data);
+    
+    // 添加一些交易数据
+    let trade_data = json!({
+        "p": "50000.5",
+        "q": "0.5",
+        "m": false
+    });
+    
+    manager.handle_trade(&trade_data);
+    
+    // 验证交易数据被正确添加
+    let order_flows = manager.get_order_flows();
+    assert!(order_flows.contains_key(&50000.5.into()));
+    
+    // 更新深度数据，不包含交易价格
+    let new_depth_data = json!({
+        "b": [
+            ["50010.0", "1.0"],
+            ["50009.0", "2.0"]
+        ],
+        "a": [
+            ["50011.0", "1.0"],
+            ["50012.0", "2.0"]
+        ]
+    });
+    
+    manager.handle_depth_update(&new_depth_data);
+    
+    // 验证深度数据被清理，但交易数据仍然保留（因为交易数据不是通过深度更新添加的）
+    let order_flows_after = manager.get_order_flows();
+    assert!(!order_flows_after.contains_key(&50000.0.into())); // 旧的深度数据被清除
+    assert!(order_flows_after.contains_key(&50000.5.into())); // 交易数据仍然保留
 }

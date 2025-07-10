@@ -1,4 +1,4 @@
-use binance_futures::{Config, ReactiveApp, Event, EventType};
+use flow_sight::{Config, ReactiveApp, Event, EventType};
 use serde_json::json;
 use std::time::Duration;
 

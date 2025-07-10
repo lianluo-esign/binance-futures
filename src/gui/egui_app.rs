@@ -115,24 +115,59 @@ impl TradingGUI {
 
         ui.separator();
 
-        // 价格跳跃信号显示区域 - 固定宽度
+        // Jump信号线型图显示区域 - 固定宽度
         ui.allocate_ui_with_layout(
-            egui::Vec2::new(100.0, ui.available_height()),
+            egui::Vec2::new(150.0, ui.available_height()),
             egui::Layout::left_to_right(egui::Align::Center),
             |ui| {
-                // 根据跳跃信号强度选择颜色和显示
-                let (jump_color, jump_text) = if jump_signal > 3.0 {
-                    (egui::Color32::from_rgb(255, 50, 50), "🚨 HIGH") // 红色 - 强烈跳跃
-                } else if jump_signal > 2.0 {
-                    (egui::Color32::from_rgb(255, 150, 50), "⚠️ MED") // 橙色 - 中等跳跃
-                } else if jump_signal > 1.0 {
-                    (egui::Color32::from_rgb(255, 255, 100), "⚡ LOW") // 黄色 - 轻微跳跃
-                } else {
-                    (egui::Color32::from_rgb(150, 150, 150), "📊 NORM") // 灰色 - 正常
-                };
-
                 ui.colored_label(egui::Color32::WHITE, "Jump:");
-                ui.colored_label(jump_color, jump_text);
+                // 获取Jump历史数据
+                let jump_history = self.app.get_jump_history();
+                let (rect, _response) = ui.allocate_exact_size(
+                    egui::Vec2::new(80.0, 20.0),
+                    egui::Sense::hover()
+                );
+                if jump_history.len() >= 2 {
+                    let min_jump = jump_history.iter().map(|(_, v)| *v).fold(f64::INFINITY, f64::min);
+                    let max_jump = jump_history.iter().map(|(_, v)| *v).fold(f64::NEG_INFINITY, f64::max);
+                    let range = (max_jump - min_jump).max(0.001);
+                    ui.painter().rect_filled(
+                        rect,
+                        egui::Rounding::same(2.0),
+                        egui::Color32::from_rgba_unmultiplied(20, 20, 30, 150)
+                    );
+                    let mut points = Vec::new();
+                    for (i, (_, v)) in jump_history.iter().enumerate() {
+                        let x = rect.min.x + (i as f32 / (jump_history.len() - 1) as f32) * rect.width();
+                        let normalized_y = ((v - min_jump) / range) as f32;
+                        let y = rect.max.y - normalized_y * rect.height();
+                        points.push(egui::Pos2::new(x, y));
+                    }
+                    if points.len() >= 2 {
+                        for i in 1..points.len() {
+                            ui.painter().line_segment(
+                                [points[i-1], points[i]],
+                                egui::Stroke::new(1.5, egui::Color32::from_rgb(255, 180, 80))
+                            );
+                        }
+                    }
+                    ui.painter().rect_stroke(
+                        rect,
+                        egui::Rounding::same(2.0),
+                        egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(180, 120, 80, 100))
+                    );
+                }
+                // 显示当前Jump数值
+                let jump_color = if jump_signal > 3.0 {
+                    egui::Color32::from_rgb(255, 50, 50)
+                } else if jump_signal > 2.0 {
+                    egui::Color32::from_rgb(255, 150, 50)
+                } else if jump_signal > 1.0 {
+                    egui::Color32::from_rgb(255, 255, 100)
+                } else {
+                    egui::Color32::from_rgb(150, 150, 150)
+                };
+                ui.colored_label(jump_color, format!("{:4.2}", jump_signal));
             },
         );
 

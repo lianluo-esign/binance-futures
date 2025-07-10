@@ -108,9 +108,6 @@ pub struct OrderBookConfig {
     pub avg_speed_window_ms: u64,
     pub volatility_window_ms: u64,
     pub tick_price_diff_window_size: usize,
-    pub keep_only_updated_depth: bool, // 是否只保留当前正在更新的深度数据
-    pub depth_cleanup_interval_ms: u64, // 深度数据清理间隔（毫秒）
-    pub max_cleanup_batch_size: usize, // 单次清理的最大批量大小
 }
 
 impl Default for OrderBookConfig {
@@ -127,9 +124,6 @@ impl Default for OrderBookConfig {
             avg_speed_window_ms: 5000,
             volatility_window_ms: 60000,
             tick_price_diff_window_size: 10,
-            keep_only_updated_depth: true, // 默认启用，只保留当前更新的深度数据
-            depth_cleanup_interval_ms: 50, // 50ms清理间隔，平衡性能和数据新鲜度
-            max_cleanup_batch_size: 15, // 每次最多清理15个价格层级
         }
     }
 }

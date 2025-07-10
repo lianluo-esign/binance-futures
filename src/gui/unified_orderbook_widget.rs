@@ -316,8 +316,8 @@ impl UnifiedOrderBookWidget {
                             self.render_embedded_price_chart(ui, app);
                         }
 
-                        // 中间部分：Trade Imbalance指标
-                        self.render_trade_imbalance(ui, app);
+                        // 中间部分：成交量加权动量指标
+                        self.render_volume_weighted_momentum(ui, app);
 
                         // 下半部分：ΔTick Pressure指标 - 占满剩余空间
                         self.render_tick_pressure(ui, app);
@@ -2022,120 +2022,7 @@ impl UnifiedOrderBookWidget {
             });
     }
 
-    /// 渲染Trade Imbalance指标 - 基于最近10笔交易的tick数据
-    fn render_trade_imbalance(&mut self, ui: &mut egui::Ui, app: &crate::app::reactive_app::ReactiveApp) {
-        // 获取Trade Imbalance数据 - 从orderbook manager获取实时计算的TI值
-        let trade_imbalance = app.get_orderbook_manager().get_trade_imbalance();
 
-        // 计算买单和卖单的比例（用于可视化显示）
-        let buy_ratio = if trade_imbalance >= 0.0 {
-            (trade_imbalance + 1.0) / 2.0 // 将[-1,1]映射到[0,1]，正值时买单比例更高
-        } else {
-            0.5 + trade_imbalance / 2.0 // 负值时买单比例较低
-        };
-        let sell_ratio = 1.0 - buy_ratio;
-
-        // 创建带边框的面板 - 移除左边距以与上方组件左对齐
-        egui::Frame::none()
-            .fill(egui::Color32::from_rgb(25, 25, 35))
-            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(60, 60, 80)))
-            .inner_margin(egui::Margin {
-                left: 0.0,    // 移除左边距
-                right: 8.0,   // 保持右边距
-                top: 8.0,     // 保持上边距
-                bottom: 8.0,  // 保持下边距
-            })
-            .show(ui, |ui| {
-                ui.vertical(|ui| {
-                    // 标题
-                    ui.horizontal(|ui| {
-                        ui.colored_label(egui::Color32::WHITE, "⚖️ Trade Imbalance (Last 10 Ticks)");
-                    });
-
-                    ui.add_space(5.0);
-
-                    // 显示TI数值和买卖比例
-                    ui.horizontal(|ui| {
-                        ui.colored_label(egui::Color32::LIGHT_BLUE,
-                            format!("TI: {:.3}", trade_imbalance));
-                        ui.separator();
-                        ui.colored_label(egui::Color32::from_rgb(120, 255, 120),
-                            format!("Buy: {:.1}%", buy_ratio * 100.0));
-                        ui.separator();
-                        ui.colored_label(egui::Color32::from_rgb(255, 120, 120),
-                            format!("Sell: {:.1}%", sell_ratio * 100.0));
-                    });
-
-                    ui.add_space(8.0);
-
-                    // 绘制横向条形图
-                    let available_width = ui.available_width() - 20.0; // 留出边距
-                    let bar_height = 20.0;
-
-                    ui.allocate_ui_with_layout(
-                        egui::Vec2::new(available_width, bar_height),
-                        egui::Layout::left_to_right(egui::Align::Center),
-                        |ui| {
-                            let rect = ui.available_rect_before_wrap();
-
-                            // 计算买单和卖单条形图的宽度 - 与Orderbook Imbalance显示效果一致
-                            let buy_width = available_width * buy_ratio as f32;
-                            let sell_width = available_width * sell_ratio as f32;
-
-                            // 绘制买单条形图（绿色，从左边开始）
-                            if buy_width > 1.0 {
-                                let buy_rect = egui::Rect::from_min_size(
-                                    rect.min,
-                                    egui::Vec2::new(buy_width, bar_height)
-                                );
-                                ui.painter().rect_filled(buy_rect, 2.0, egui::Color32::from_rgb(120, 255, 120));
-                            }
-
-                            // 绘制卖单条形图（红色，从右边开始）
-                            if sell_width > 1.0 {
-                                let sell_rect = egui::Rect::from_min_size(
-                                    egui::Pos2::new(rect.max.x - sell_width, rect.min.y),
-                                    egui::Vec2::new(sell_width, bar_height)
-                                );
-                                ui.painter().rect_filled(sell_rect, 2.0, egui::Color32::from_rgb(255, 120, 120));
-                            }
-
-                            // 绘制中心分割线
-                            let center_x = rect.min.x + available_width * 0.5;
-                            ui.painter().line_segment(
-                                [egui::Pos2::new(center_x, rect.min.y), egui::Pos2::new(center_x, rect.max.y)],
-                                egui::Stroke::new(1.0, egui::Color32::WHITE)
-                            );
-
-                            // 占用整个区域以防止其他元素覆盖
-                            ui.allocate_rect(rect, egui::Sense::hover());
-                        }
-                    );
-
-                    ui.add_space(5.0);
-
-                    // 显示交易压力指示 - 基于买卖比例差值
-                    let imbalance = buy_ratio - sell_ratio; // 计算不平衡程度
-                    let (pressure_text, pressure_color) = if imbalance > 0.3 {
-                        ("🟢 Strong Buy Pressure", egui::Color32::from_rgb(120, 255, 120))
-                    } else if imbalance > 0.1 {
-                        ("🟡 Mild Buy Pressure", egui::Color32::from_rgb(255, 255, 120))
-                    } else if imbalance < -0.3 {
-                        ("🔴 Strong Sell Pressure", egui::Color32::from_rgb(255, 120, 120))
-                    } else if imbalance < -0.1 {
-                        ("🟠 Mild Sell Pressure", egui::Color32::from_rgb(255, 180, 120))
-                    } else {
-                        ("⚪ Balanced", egui::Color32::GRAY)
-                    };
-
-                    ui.horizontal(|ui| {
-                        ui.colored_label(pressure_color, pressure_text);
-                        ui.colored_label(egui::Color32::GRAY,
-                            format!("(Difference: {:.1}%)", imbalance * 100.0));
-                    });
-                });
-            });
-    }
 
     /// 渲染ΔTick Pressure指标 - 显示连续K笔成交量方向一致且价位递增/递减的信号
     fn render_tick_pressure(&mut self, ui: &mut egui::Ui, app: &crate::app::reactive_app::ReactiveApp) {
@@ -2323,6 +2210,180 @@ impl UnifiedOrderBookWidget {
         } else {
             0.0
         }
+    }
+
+    /// 渲染成交量加权动量指标
+    fn render_volume_weighted_momentum(&mut self, ui: &mut egui::Ui, app: &crate::app::reactive_app::ReactiveApp) {
+        // 获取成交量加权动量数据
+        let current_momentum = app.get_volume_weighted_momentum();
+        let momentum_history = app.get_momentum_history();
+        let window_size = app.get_momentum_window_size();
+        let threshold = app.get_momentum_threshold();
+
+        // 创建带边框的面板
+        egui::Frame::none()
+            .fill(egui::Color32::from_rgb(25, 25, 35))
+            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(60, 60, 80)))
+            .inner_margin(egui::Margin {
+                left: 0.0,    // 移除左边距以与上方组件对齐
+                right: 8.0,   // 保持右边距
+                top: 8.0,     // 保持上边距
+                bottom: 8.0,  // 保持下边距
+            })
+            .show(ui, |ui| {
+                ui.vertical(|ui| {
+                    // 标题
+                    ui.horizontal(|ui| {
+                        ui.colored_label(egui::Color32::WHITE, format!("📈 Z-Score动量 ({}点)", window_size));
+                    });
+
+                    ui.add_space(5.0);
+
+                    // 显示当前动量值和趋势
+                    ui.horizontal(|ui| {
+                        let momentum_color = if current_momentum > 0.0 {
+                            egui::Color32::from_rgb(120, 255, 120) // 绿色 - 多头
+                        } else if current_momentum < 0.0 {
+                            egui::Color32::from_rgb(255, 120, 120) // 红色 - 空头
+                        } else {
+                            egui::Color32::GRAY // 灰色 - 中性
+                        };
+
+                        ui.colored_label(momentum_color,
+                            format!("Z-Score: {:.3}", current_momentum));
+                        
+                        ui.separator();
+                        
+                        let trend_text = if current_momentum > threshold {
+                            "🟢 买入信号"
+                        } else if current_momentum < -threshold {
+                            "🔴 卖出信号"
+                        } else {
+                            "⚪ 持有"
+                        };
+                        
+                        let trend_color = if current_momentum > threshold {
+                            egui::Color32::from_rgb(120, 255, 120)
+                        } else if current_momentum < -threshold {
+                            egui::Color32::from_rgb(255, 120, 120)
+                        } else {
+                            egui::Color32::GRAY
+                        };
+                        
+                        ui.colored_label(trend_color, trend_text);
+                    });
+
+                    ui.add_space(8.0);
+
+                    // 绘制线型图
+                    let available_width = ui.available_width() - 20.0;
+                    let chart_height = 80.0; // 增加图表高度以显示更多细节
+
+                    ui.allocate_ui_with_layout(
+                        egui::Vec2::new(available_width, chart_height),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| {
+                            let rect = ui.available_rect_before_wrap();
+
+                            if momentum_history.len() >= 2 {
+                                // 计算数据范围
+                                let min_momentum = momentum_history.iter().map(|(_, v)| *v).fold(f64::INFINITY, f64::min);
+                                let max_momentum = momentum_history.iter().map(|(_, v)| *v).fold(f64::NEG_INFINITY, f64::max);
+                                let range = (max_momentum - min_momentum).max(0.000001); // 避免除零
+
+                                // 绘制零线
+                                let zero_y = rect.min.y + (rect.height() * 0.5);
+                                ui.painter().line_segment(
+                                    [egui::Pos2::new(rect.min.x, zero_y), egui::Pos2::new(rect.max.x, zero_y)],
+                                    egui::Stroke::new(1.0, egui::Color32::from_rgb(80, 80, 80))
+                                );
+
+                                // 数据采样：如果数据点太多，进行采样以提高性能
+                                let max_points = 500; // 最大显示点数
+                                let step = if momentum_history.len() > max_points {
+                                    momentum_history.len() / max_points
+                                } else {
+                                    1
+                                };
+
+                                // 绘制动量线（使用采样数据）
+                                let mut points = Vec::new();
+                                let mut colors = Vec::new();
+                                
+                                for (i, (_, momentum)) in momentum_history.iter().enumerate().step_by(step) {
+                                    let x = rect.min.x + (i as f32 / (momentum_history.len() - 1) as f32) * available_width;
+                                    let normalized_momentum = (momentum - min_momentum) / range;
+                                    let y = rect.max.y - (normalized_momentum as f32 * rect.height());
+                                    points.push(egui::Pos2::new(x, y));
+                                    
+                                    let color = if *momentum > 0.0 {
+                                        egui::Color32::from_rgb(120, 255, 120) // 绿色
+                                    } else {
+                                        egui::Color32::from_rgb(255, 120, 120) // 红色
+                                    };
+                                    colors.push(color);
+                                }
+
+                                // 绘制线条
+                                if points.len() >= 2 {
+                                    for i in 1..points.len() {
+                                        ui.painter().line_segment(
+                                            [points[i-1], points[i]],
+                                            egui::Stroke::new(1.5, colors[i])
+                                        );
+                                    }
+                                }
+
+                                // 显示数据点数量信息
+                                if momentum_history.len() > max_points {
+                                    ui.painter().text(
+                                        egui::Pos2::new(rect.min.x + 5.0, rect.min.y + 15.0),
+                                        egui::Align2::LEFT_TOP,
+                                        format!("显示 {} / {} 个数据点", max_points, momentum_history.len()),
+                                        egui::FontId::proportional(10.0),
+                                        egui::Color32::GRAY
+                                    );
+                                }
+                            }
+
+                            // 占用整个区域以防止其他元素覆盖
+                            ui.allocate_rect(rect, egui::Sense::hover());
+                        }
+                    );
+
+                    ui.add_space(5.0);
+
+                    // 显示统计信息
+                    if !momentum_history.is_empty() {
+                        let avg_momentum: f64 = momentum_history.iter().map(|(_, v)| v).sum::<f64>() / momentum_history.len() as f64;
+                        let std_dev: f64 = {
+                            let variance = momentum_history.iter()
+                                .map(|(_, v)| (v - avg_momentum).powi(2))
+                                .sum::<f64>() / momentum_history.len() as f64;
+                            variance.sqrt()
+                        };
+
+                        // 计算最近100个点的统计
+                        let recent_count = momentum_history.len().min(100);
+                        let recent_momentum: Vec<f64> = momentum_history.iter().rev().take(recent_count).map(|(_, v)| *v).collect();
+                        let recent_avg: f64 = recent_momentum.iter().sum::<f64>() / recent_count as f64;
+
+                        ui.horizontal(|ui| {
+                            ui.colored_label(egui::Color32::GRAY, 
+                                format!("总均值: {:.3}", avg_momentum));
+                            ui.separator();
+                            ui.colored_label(egui::Color32::GRAY, 
+                                format!("标准差: {:.3}", std_dev));
+                            ui.separator();
+                            ui.colored_label(egui::Color32::GRAY, 
+                                format!("最近{}点均值: {:.3}", recent_count, recent_avg));
+                            ui.separator();
+                            ui.colored_label(egui::Color32::GRAY, 
+                                format!("总数据点: {}", momentum_history.len()));
+                        });
+                    }
+                });
+            });
     }
 
     /// 渲染紧凑版Orderbook Imbalance指标 - 适合顶部狭窄区域

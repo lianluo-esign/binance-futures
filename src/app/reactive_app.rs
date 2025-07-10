@@ -526,6 +526,29 @@ impl ReactiveApp {
         self.orderbook_manager.get_rv_history()
     }
 
+    /// 获取Jump历史数据用于线型图显示
+    pub fn get_jump_history(&self) -> &std::collections::VecDeque<(u64, f64)> {
+        self.orderbook_manager.get_jump_history()
+    }
+
+    pub fn get_momentum_history(&self) -> &std::collections::VecDeque<(u64, f64)> {
+        self.orderbook_manager.get_momentum_history()
+    }
+
+    pub fn get_volume_weighted_momentum(&self) -> f64 {
+        self.orderbook_manager.get_volume_weighted_momentum()
+    }
+
+    /// 获取动量计算窗口大小
+    pub fn get_momentum_window_size(&self) -> usize {
+        self.orderbook_manager.get_momentum_window_size()
+    }
+
+    /// 获取动量计算阈值
+    pub fn get_momentum_threshold(&self) -> f64 {
+        self.orderbook_manager.get_momentum_threshold()
+    }
+
     /// 获取应用程序统计信息
     pub fn get_stats(&self) -> AppStats {
         let event_bus_stats = self.event_dispatcher.get_stats();
