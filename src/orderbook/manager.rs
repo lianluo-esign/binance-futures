@@ -221,6 +221,14 @@ impl OrderBookManager {
                 let price_ordered = OrderedFloat(price);
                 let order_flow = self.order_flows.entry(price_ordered).or_insert_with(OrderFlow::new);
                 order_flow.add_trade(side, qty, current_time);
+                
+                // 临时解决方案：使用交易数据更新深度数据
+                // 这样可以在没有深度数据的情况下显示一些数据
+                if side == "buy" {
+                    order_flow.update_price_level(order_flow.bid_ask.bid + qty, order_flow.bid_ask.ask, current_time);
+                } else {
+                    order_flow.update_price_level(order_flow.bid_ask.bid, order_flow.bid_ask.ask + qty, current_time);
+                }
 
                 // 更新时间维度足迹数据
                 self.time_footprint_data.add_trade(price, side, qty, current_time);

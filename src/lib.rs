@@ -18,7 +18,7 @@ pub use events::{Event, EventType, EventBus, EventDispatcher};
 pub use orderbook::{OrderBookManager, OrderFlow, MarketSnapshot};
 pub use websocket::{WebSocketManager, WebSocketConnection};
 pub use app::ReactiveApp;
-pub use gui::TradingGUI;
+pub use gui::{TradingGUI, GpuConfig, GpuPerformanceMonitor, GpuRenderSettings};
 
 /// 库的版本信息
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -59,7 +59,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            symbol: "BTCUSDT".to_string(),
+            symbol: "BTCFDUSD".to_string(),
             event_buffer_size: 10000,
             max_reconnect_attempts: 5,
             log_level: "info".to_string(),

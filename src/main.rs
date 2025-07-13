@@ -160,7 +160,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_logging();
 
     // 获取交易对参数
-    let symbol = env::args().nth(1).unwrap_or_else(|| "BTCUSDT".to_string());
+    let symbol = env::args().nth(1).unwrap_or_else(|| "BTCFDUSD".to_string());
 
     // 创建配置
     let config = Config::new(symbol)
@@ -175,12 +175,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 加载应用程序图标
     let icon_data = load_icon();
 
-    // 配置egui应用选项
+    // 配置egui应用选项 - 启用GPU渲染
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1200.0, 800.0])
-            .with_title("FlowSight")
+            .with_title("FlowSight - GPU加速版")
             .with_icon(icon_data),
+        renderer: eframe::Renderer::Wgpu, // 强制使用WGPU渲染器进行GPU加速
         ..Default::default()
     };
 

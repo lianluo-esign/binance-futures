@@ -1,7 +1,7 @@
 use eframe::egui;
 use crate::app::ReactiveApp;
 use crate::Config;
-use crate::gui::{UnifiedOrderBookWidget, DebugWindow};
+use crate::gui::{UnifiedOrderBookWidget, DebugWindow, GpuPerformanceMonitor, GpuRenderSettings};
 use std::time::{Duration, Instant};
 
 pub struct TradingGUI {
@@ -10,8 +10,11 @@ pub struct TradingGUI {
     update_interval: Duration,
     show_settings: bool,
     show_stats: bool,
+    show_gpu_settings: bool,
     unified_orderbook_widget: UnifiedOrderBookWidget,
     debug_window: DebugWindow,
+    gpu_performance_monitor: GpuPerformanceMonitor,
+    gpu_render_settings: GpuRenderSettings,
 }
 
 impl TradingGUI {
@@ -34,8 +37,11 @@ impl TradingGUI {
             update_interval: Duration::from_millis(1), // 1ms refresh interval
             show_settings: false,
             show_stats: false,
+            show_gpu_settings: false,
             unified_orderbook_widget,
             debug_window: DebugWindow::new(),
+            gpu_performance_monitor: GpuPerformanceMonitor::new(120), // 保存2秒的帧率数据
+            gpu_render_settings: GpuRenderSettings::default(),
         }
     }
 
@@ -280,6 +286,9 @@ impl TradingGUI {
 
 impl eframe::App for TradingGUI {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // 记录GPU性能监控
+        self.gpu_performance_monitor.record_frame();
+        
         // Update application status
         let now = Instant::now();
         if now.duration_since(self.last_update) >= self.update_interval {
@@ -360,6 +369,13 @@ impl eframe::App for TradingGUI {
                 
                 // 直接在同一行显示Orderbook Imbalance条形图
                 self.render_menu_bar_orderbook_imbalance(ui);
+                
+                ui.separator();
+                
+                // GPU设置按钮
+                if ui.button("🎮 GPU").clicked() {
+                    self.show_gpu_settings = !self.show_gpu_settings;
+                }
             });
         });
         
@@ -414,6 +430,23 @@ impl eframe::App for TradingGUI {
                 });
         }
 
+        // GPU设置窗口
+        if self.show_gpu_settings {
+            egui::Window::new("🎮 GPU渲染设置")
+                .open(&mut self.show_gpu_settings)
+                .default_width(400.0)
+                .default_height(500.0)
+                .show(ctx, |ui| {
+                    // 渲染设置UI
+                    self.gpu_render_settings.render_settings_ui(ui);
+                    
+                    ui.separator();
+                    
+                    // GPU性能监控
+                    self.gpu_performance_monitor.render_performance_info(ui);
+                });
+        }
+
         // Show debug window
         self.debug_window.show_window(ctx, &self.app);
 
@@ -421,7 +454,7 @@ impl eframe::App for TradingGUI {
         ctx.request_repaint_after(self.update_interval);
     }
     
-    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+    fn on_exit(&mut self) {
         // Clean up resources
         self.app.stop();
     }
