@@ -83,8 +83,8 @@ impl Default for UnifiedOrderBookWidget {
             trading_signal_window_open: false,
             quantitative_backtest_window_open: false,
             price_chart_modal_open: false,
-            price_history: std::collections::VecDeque::with_capacity(20000),
-            max_price_history: 20000,
+            price_history: std::collections::VecDeque::with_capacity(5000),
+            max_price_history: 5000,
             price_chart_height: 200.0, // 默认高度300像素
             tick_pressure_k_value: 5, // 默认5笔
             price_col_width: 80.0,
