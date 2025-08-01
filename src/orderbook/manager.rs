@@ -920,7 +920,7 @@ impl OrderBookManager {
         );
 
         // 播放音效
-        play_tick_pressure_sound(first_is_buy);
+        // play_tick_pressure_sound(first_is_buy);
 
         // 添加到信号窗口
         self.tick_pressure_signals.push_front(signal_text);

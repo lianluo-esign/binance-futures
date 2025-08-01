@@ -28,7 +28,6 @@ impl WebSocketConfig {
             streams: vec![
                 format!("{}@depth", symbol.to_lowercase()),
                 format!("{}@trade", symbol.to_lowercase()),
-                format!("{}@bookTicker", symbol.to_lowercase()),
             ],
             reconnect_attempts: 0,
             max_reconnect_attempts: 5, // 参照backup实现，减少到5次
@@ -43,7 +42,8 @@ impl WebSocketConfig {
 
     pub fn build_url(&self) -> String {
         format!(
-            "wss://stream.binance.com:9443/stream?streams={}",
+            // "wss://stream.binance.com:9443/stream?streams={}", // BTC现货
+            "wss://fstream.binance.com/stream?streams={}",
             self.streams.join("/")
         )
     }

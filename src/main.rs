@@ -160,7 +160,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_logging();
 
     // 获取交易对参数
-    let symbol = env::args().nth(1).unwrap_or_else(|| "BTCFDUSD".to_string());
+    let symbol = env::args().nth(1).unwrap_or_else(|| "BTCUSDC".to_string());
 
     // 创建配置
     let config = Config::new(symbol)
