@@ -4,8 +4,7 @@ use serde_json::Value;
 
 use super::data_structures::*;
 use super::order_flow::OrderFlow;
-use crate::gui::TimeFootprintData;
-use crate::audio::play_tick_pressure_sound;
+use super::time_footprint_data::TimeFootprintData;
 
 /// 订单簿管理器 - 简化版本，专注于核心功能
 pub struct OrderBookManager {
@@ -124,7 +123,7 @@ impl OrderBookManager {
         }
     }
 
-    /// 处理深度更新
+    /// 处理深度更新 - 按照币安增量更新规范实现
     pub fn handle_depth_update(&mut self, data: &Value) {
         let current_time = self.get_current_timestamp();
         self.stats.total_depth_updates += 1;
@@ -132,57 +131,67 @@ impl OrderBookManager {
         let mut bid_count = 0;
         let mut ask_count = 0;
         
-        // 收集本次更新的价格层级
-        let mut updated_prices = HashSet::new();
-        let mut bid_prices = Vec::new();
-        let mut ask_prices = Vec::new();
-
-        // 处理买单
+        // 处理买单 - 增量更新
         if let Some(bids) = data["b"].as_array() {
             for bid in bids {
                 if let (Some(price_str), Some(qty_str)) = (bid[0].as_str(), bid[1].as_str()) {
                     if let (Ok(price), Ok(qty)) = (price_str.parse::<f64>(), qty_str.parse::<f64>()) {
                         let price_ordered = OrderedFloat(price);
-                        updated_prices.insert(price_ordered);
-                        bid_prices.push(price);
                         
-                        let order_flow = self.order_flows.entry(price_ordered).or_insert_with(OrderFlow::new);
-                        order_flow.update_price_level(qty, 0.0, current_time);
-                        bid_count += 1;
+                        if qty == 0.0 {
+                            // 数量为0表示该价格层级被移除
+                            if let Some(order_flow) = self.order_flows.get_mut(&price_ordered) {
+                                order_flow.bid_ask.bid = 0.0;
+                                order_flow.bid_ask.timestamp = current_time;
+                            }
+                        } else {
+                            // 更新或创建价格层级
+                            let order_flow = self.order_flows.entry(price_ordered).or_insert_with(OrderFlow::new);
+                            // 保留原有的ask数量，只更新bid
+                            let existing_ask = order_flow.bid_ask.ask;
+                            order_flow.update_price_level(qty, existing_ask, current_time);
+                            bid_count += 1;
 
-                        // 更新最优买价
-                        if self.best_bid_price.map_or(true, |best| price > best) {
-                            self.best_bid_price = Some(price);
+                            // 更新最优买价
+                            if self.best_bid_price.map_or(true, |best| price > best) {
+                                self.best_bid_price = Some(price);
+                            }
                         }
                     }
                 }
             }
         }
 
-        // 处理卖单
+        // 处理卖单 - 增量更新
         if let Some(asks) = data["a"].as_array() {
             for ask in asks {
                 if let (Some(price_str), Some(qty_str)) = (ask[0].as_str(), ask[1].as_str()) {
                     if let (Ok(price), Ok(qty)) = (price_str.parse::<f64>(), qty_str.parse::<f64>()) {
                         let price_ordered = OrderedFloat(price);
-                        updated_prices.insert(price_ordered);
-                        ask_prices.push(price);
                         
-                        let order_flow = self.order_flows.entry(price_ordered).or_insert_with(OrderFlow::new);
-                        order_flow.update_price_level(0.0, qty, current_time);
-                        ask_count += 1;
+                        if qty == 0.0 {
+                            // 数量为0表示该价格层级被移除
+                            if let Some(order_flow) = self.order_flows.get_mut(&price_ordered) {
+                                order_flow.bid_ask.ask = 0.0;
+                                order_flow.bid_ask.timestamp = current_time;
+                            }
+                        } else {
+                            // 更新或创建价格层级
+                            let order_flow = self.order_flows.entry(price_ordered).or_insert_with(OrderFlow::new);
+                            // 保留原有的bid数量，只更新ask
+                            let existing_bid = order_flow.bid_ask.bid;
+                            order_flow.update_price_level(existing_bid, qty, current_time);
+                            ask_count += 1;
 
-                        // 更新最优卖价
-                        if self.best_ask_price.map_or(true, |best| price < best) {
-                            self.best_ask_price = Some(price);
+                            // 更新最优卖价
+                            if self.best_ask_price.map_or(true, |best| price < best) {
+                                self.best_ask_price = Some(price);
+                            }
                         }
                     }
                 }
             }
         }
-
-        // 立即清除超出20档范围之外的数据
-        self.clean_outside_depth_range(&bid_prices, &ask_prices, current_time);
 
         // 重新计算基于整个订单簿的多空比例
         self.calculate_volume_ratio(0.0, 0.0);
@@ -653,16 +662,17 @@ impl OrderBookManager {
             order_flow.clean_expired_cancels(current_time, 5000); // 5秒
             order_flow.clean_expired_increases(current_time, 5000); // 5秒
 
-            // 新增：清理超过5秒没有更新的挂单数据（1美元精度聚合的深度订单薄数据）
-            order_flow.clean_expired_price_levels(current_time, 500); // 500毫秒 = 0.5秒
+            // 注意：不再自动清理挂单数据，因为币安深度更新是增量的
+            // 只有当接收到数量为0的更新时才应该清除价格层级
         }
 
-        // 清理空的或过期的订单流条目
+        // 清理完全空的订单流条目（只有在没有任何数据且超过5分钟无活动时才删除）
         self.order_flows.retain(|_, order_flow| {
-            // 保留有挂单数据或最近有活动的条目
+            // 保留有挂单数据、交易数据或最近有活动的条目
             order_flow.bid_ask.bid > 0.0 ||
             order_flow.bid_ask.ask > 0.0 ||
-            order_flow.has_recent_activity(current_time, 60000) // 保留60秒内有活动的
+            order_flow.total_history_volume() > 0.0 || // 保留有历史交易数据的
+            order_flow.has_recent_activity(current_time, 300000) // 保留5分钟内有活动的
         });
     }
 
@@ -1075,38 +1085,6 @@ impl OrderBookManager {
         self.momentum_threshold
     }
 
-    /// 清理超出20档范围之外的数据
-    fn clean_outside_depth_range(&mut self, bid_prices: &Vec<f64>, ask_prices: &Vec<f64>, current_time: u64) {
-        let mut bid_fade_started = 0;
-        let mut ask_fade_started = 0;
-        let mut prices_to_remove = Vec::new();
-
-        // 遍历所有价格层级，处理未更新的深度数据
-        for (price, order_flow) in self.order_flows.iter_mut() {
-            if !bid_prices.contains(&price.0) && order_flow.bid_ask.bid > 0.0 {
-                order_flow.bid_ask.bid = 0.0;
-                bid_fade_started += 1;
-            }
-            if !ask_prices.contains(&price.0) && order_flow.bid_ask.ask > 0.0 {
-                order_flow.bid_ask.ask = 0.0;
-                ask_fade_started += 1;
-            }
-            
-            // 如果这个订单流现在完全为空，标记为待删除
-            if order_flow.is_empty() {
-                prices_to_remove.push(*price);
-            }
-        }
-
-        // 删除完全为空的价格层级
-        for price in prices_to_remove {
-            self.order_flows.remove(&price);
-        }
-
-        if bid_fade_started > 0 || ask_fade_started > 0 {
-            log::debug!("启动深度数据淡出动画: {}个bid, {}个ask", bid_fade_started, ask_fade_started);
-        }
-    }
 }
 
 impl Default for OrderBookManager {

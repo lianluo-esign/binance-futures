@@ -9,8 +9,8 @@ pub mod orderbook;
 pub mod websocket;
 pub mod app;
 pub mod monitoring;
+#[cfg(feature = "gui")]
 pub mod gui;
-pub mod audio;
 
 // 重新导出主要类型
 pub use core::RingBuffer;
@@ -18,6 +18,7 @@ pub use events::{Event, EventType, EventBus, EventDispatcher};
 pub use orderbook::{OrderBookManager, OrderFlow, MarketSnapshot};
 pub use websocket::{WebSocketManager, WebSocketConnection};
 pub use app::ReactiveApp;
+#[cfg(feature = "gui")]
 pub use gui::{TradingGUI, GpuConfig, GpuPerformanceMonitor, GpuRenderSettings};
 
 /// 库的版本信息

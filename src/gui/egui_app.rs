@@ -27,14 +27,14 @@ impl TradingGUI {
             log::error!("Application initialization failed: {}", e);
         }
 
-        // Create and configure unified orderbook widget
-        let mut unified_orderbook_widget = UnifiedOrderBookWidget::new();
+        // Create and configure unified orderbook widget with config precision
+        let mut unified_orderbook_widget = UnifiedOrderBookWidget::with_precision(app.get_price_precision());
         unified_orderbook_widget.set_price_chart_height(300.0); // Set price chart height to 300 pixels
 
         Self {
             app,
             last_update: Instant::now(),
-            update_interval: Duration::from_millis(1), // 1ms refresh interval
+            update_interval: Duration::from_millis(16), // 60Hz refresh rate (16.67ms interval)
             show_settings: false,
             show_stats: false,
             show_gpu_settings: false,

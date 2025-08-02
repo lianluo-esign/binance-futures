@@ -1,7 +1,16 @@
+//! GUI主程序 - 只在启用GUI功能时编译
+//! 
+//! 使用 `cargo run --features gui` 运行GUI界面
+//! 或使用 `cargo run --bin test_core --no-default-features` 运行核心功能测试
+
+#[cfg(feature = "gui")]
 use flow_sight::{init_logging, Config, TradingGUI};
+#[cfg(feature = "gui")]
 use std::env;
+#[cfg(feature = "gui")]
 use std::path::Path;
 
+#[cfg(feature = "gui")]
 fn setup_custom_fonts(ctx: &egui::Context) {
     use egui::{FontDefinitions, FontData, FontFamily};
 
@@ -52,6 +61,7 @@ fn setup_custom_fonts(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
+#[cfg(feature = "gui")]
 fn setup_dark_theme(ctx: &egui::Context) {
     use egui::{Color32, Rounding, Stroke, Visuals};
 
@@ -94,6 +104,7 @@ fn setup_dark_theme(ctx: &egui::Context) {
 }
 
 /// 加载应用程序图标
+#[cfg(feature = "gui")]
 fn load_icon() -> egui::IconData {
     let icon_path = "src/image/logo_golden.png";
     if Path::new(icon_path).exists() {
@@ -119,6 +130,7 @@ fn load_icon() -> egui::IconData {
 }
 
 /// 创建默认图标（简单的32x32像素图标）
+#[cfg(feature = "gui")]
 fn create_default_icon() -> egui::IconData {
     let size = 32;
     let mut rgba = Vec::with_capacity(size * size * 4);
@@ -155,19 +167,20 @@ fn create_default_icon() -> egui::IconData {
     }
 }
 
+#[cfg(feature = "gui")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 初始化日志系统
     init_logging();
 
     // 获取交易对参数
-    let symbol = env::args().nth(1).unwrap_or_else(|| "BTCUSDC".to_string());
+    let symbol = env::args().nth(1).unwrap_or_else(|| "BTCUSDT".to_string());
 
     // 创建配置
     let config = Config::new(symbol)
         .with_buffer_size(10000)
         .with_max_reconnects(5)
         .with_max_visible_rows(10000)    // 设置最大可见行数为3000
-        .with_price_precision(0.01);    // 设置价格精度为0.01 USD (1分)
+        .with_price_precision(1.0);    // 设置价格精度为0.01 USD (1分)
 
     // 创建egui应用
     let app = TradingGUI::new(config);
@@ -201,4 +214,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     Ok(())
+}
+
+/// 非GUI模式主函数 - 当GUI功能未启用时运行
+#[cfg(not(feature = "gui"))]
+fn main() {
+    println!("此应用需要GUI功能。请使用以下命令运行:");
+    println!("  cargo run --features gui");
+    println!("");
+    println!("或运行核心功能测试:");
+    println!("  cargo run --bin test_core --no-default-features");
+    std::process::exit(1);
 }

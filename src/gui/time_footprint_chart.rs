@@ -1,6 +1,6 @@
 use eframe::egui;
 use egui_plot::{Plot, PlotPoint, Line, Points, GridMark, GridInput};
-use crate::gui::time_footprint_data::TimeFootprintData;
+use crate::orderbook::TimeFootprintData;
 use crate::app::ReactiveApp;
 use std::collections::HashMap;
 use chrono::{Utc, TimeZone};

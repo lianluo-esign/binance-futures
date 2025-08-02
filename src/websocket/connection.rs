@@ -28,6 +28,7 @@ impl WebSocketConfig {
             streams: vec![
                 format!("{}@depth", symbol.to_lowercase()),
                 format!("{}@trade", symbol.to_lowercase()),
+                format!("{}@bookTicker", symbol.to_lowercase()),
             ],
             reconnect_attempts: 0,
             max_reconnect_attempts: 5, // 参照backup实现，减少到5次

@@ -41,8 +41,14 @@ pub struct UnifiedOrderBookWidget {
     cached_visible_data: Vec<UnifiedOrderBookRow>,
     /// 上次数据更新时间戳
     last_data_timestamp: u64,
+    /// 缓存的best_bid价格（用于检测变化）
+    last_best_bid: Option<f64>,
+    /// 缓存的best_ask价格（用于检测变化）
+    last_best_ask: Option<f64>,
     /// Logo纹理（可选）
     logo_texture: Option<egui::TextureHandle>,
+    /// 价格精度参数 (1.0=1美元聚合, 0.1=原始精度, 0.5=0.5美元聚合)
+    price_precision: f64,
     /// 币安Logo纹理（用于价格图表当前价格标记）
     binance_logo_texture: Option<egui::TextureHandle>,
     /// 交易信号窗口是否打开
@@ -78,7 +84,10 @@ impl Default for UnifiedOrderBookWidget {
             last_update_time: std::time::Instant::now(),
             cached_visible_data: Vec::new(),
             last_data_timestamp: 0,
+            last_best_bid: None,
+            last_best_ask: None,
             logo_texture: None,
+            price_precision: 0.1, // 默认使用0.1精度（原始数据）
             binance_logo_texture: None,
             trading_signal_window_open: false,
             quantitative_backtest_window_open: false,
@@ -99,6 +108,13 @@ impl Default for UnifiedOrderBookWidget {
 impl UnifiedOrderBookWidget {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// 创建新实例并设置价格精度
+    pub fn with_precision(precision: f64) -> Self {
+        let mut widget = Self::default();
+        widget.price_precision = precision;
+        widget
     }
 
     /// 设置价格图表固定高度
@@ -293,8 +309,11 @@ impl UnifiedOrderBookWidget {
                                 .unwrap()
                                 .as_millis() as u64;
 
+                            // 获取best价格用于特殊聚合处理
+                            let (best_bid_price, best_ask_price) = app.get_orderbook_manager().get_best_prices();
+
                             // 使用数据驱动的UI渲染：提取可见范围数据
-                            let visible_data = self.extract_visible_data(&order_flows, current_time, current_price);
+                            let visible_data = self.extract_visible_data(&order_flows, current_time, current_price, best_bid_price, best_ask_price);
 
                             if visible_data.is_empty() {
                                 ui.centered_and_justified(|ui| {
@@ -302,7 +321,7 @@ impl UnifiedOrderBookWidget {
                                 });
                             } else {
                                 // 渲染订单簿表格，占据左侧一半空间
-                                self.render_bounded_table(ui, &visible_data, current_price, content_height);
+                                self.render_bounded_table(ui, &visible_data, current_price, content_height, app);
                             }
                         },
                     );
@@ -346,6 +365,36 @@ impl UnifiedOrderBookWidget {
             ui.add(egui::Slider::new(&mut self.sell_col_width, 50.0..=300.0).text("Sell"));
             ui.add(egui::Slider::new(&mut self.delta_col_width, 50.0..=300.0).text("Delta"));
         });
+
+        // 价格精度控制
+        ui.horizontal(|ui| {
+            ui.label("价格精度：");
+            
+            // 预设精度按钮
+            if ui.button("0.1 (原始)").clicked() {
+                self.price_precision = 0.1;
+            }
+            if ui.button("0.5").clicked() {
+                self.price_precision = 0.5;
+            }
+            if ui.button("1.0").clicked() {
+                self.price_precision = 1.0;
+            }
+            if ui.button("5.0").clicked() {
+                self.price_precision = 5.0;
+            }
+            if ui.button("10.0").clicked() {
+                self.price_precision = 10.0;
+            }
+            
+            // 显示当前精度
+            ui.label(format!("当前: {:.1}", self.price_precision));
+            
+            // 自定义精度滑块
+            ui.add(egui::Slider::new(&mut self.price_precision, 0.1..=10.0)
+                .step_by(0.1)
+                .text("自定义"));
+        });
     }
 
     /// 数据驱动UI：提取当前价格±40层的可见数据（总共最多81行）
@@ -354,18 +403,32 @@ impl UnifiedOrderBookWidget {
         order_flows: &BTreeMap<OrderedFloat<f64>, OrderFlow>,
         current_time: u64,
         current_price: f64,
+        best_bid_price: Option<f64>,
+        best_ask_price: Option<f64>,
     ) -> Vec<UnifiedOrderBookRow> {
         // 性能优化：检查是否需要重新计算
+        // 增加best价格变化的检测
+        let best_price_changed = self.last_best_bid != best_bid_price || 
+                                self.last_best_ask != best_ask_price;
+        
         let should_update = current_time != self.last_data_timestamp ||
-                           (current_price - self.last_price).abs() > 0.1;
+                           (current_price - self.last_price).abs() > 0.1 ||
+                           best_price_changed;
+
+        if best_price_changed {
+            println!("💰 Best价格变化触发更新: bid {:?} -> {:?}, ask {:?} -> {:?}", 
+                     self.last_best_bid, best_bid_price, self.last_best_ask, best_ask_price);
+        }
 
         if !should_update && !self.cached_visible_data.is_empty() {
             return self.cached_visible_data.clone();
         }
 
-        // 更新缓存时间戳
+        // 更新缓存时间戳和价格
         self.last_data_timestamp = current_time;
         self.last_price = current_price;
+        self.last_best_bid = best_bid_price;
+        self.last_best_ask = best_ask_price;
 
         // 首先获取所有有效的价格层级并转换为1美元聚合级别
         let mut existing_price_levels: Vec<i64> = order_flows
@@ -443,7 +506,7 @@ impl UnifiedOrderBookWidget {
         }
 
         // 构建可见数据行
-        let visible_data = self.build_visible_rows(order_flows, &visible_prices, current_time);
+        let visible_data = self.build_visible_rows(order_flows, &visible_prices, current_time, best_bid_price, best_ask_price);
 
         // 缓存结果
         self.cached_visible_data = visible_data.clone();
@@ -451,39 +514,91 @@ impl UnifiedOrderBookWidget {
         visible_data
     }
 
-    /// 构建可见数据行（带价格聚合功能）
+    /// 构建可见数据行（根据精度设置决定是否聚合）
     fn build_visible_rows(
         &self,
         order_flows: &BTreeMap<OrderedFloat<f64>, OrderFlow>,
         visible_prices: &[f64],
         current_time: u64,
+        best_bid_price: Option<f64>,
+        best_ask_price: Option<f64>,
     ) -> Vec<UnifiedOrderBookRow> {
         let time_threshold = current_time.saturating_sub(self.time_window_seconds * 1000);
 
-        // 第一步：将价格聚合到1美元级别
-        let aggregated_data = self.aggregate_prices_to_usd_levels(order_flows, visible_prices, time_threshold);
+        // 根据精度设置决定是否聚合
+        if (self.price_precision - 0.1).abs() < 0.01 {
+            // 精度为0.1时，直接显示原始数据，不聚合
+            let mut rows: Vec<UnifiedOrderBookRow> = visible_prices
+                .iter()
+                .filter_map(|&price_val| {
+                    let price_key = OrderedFloat(price_val);
+                    if let Some(order_flow) = order_flows.get(&price_key) {
+                        Some(UnifiedOrderBookRow {
+                            price: price_val, // 保持原始0.1精度的价格
+                            bid_volume: order_flow.bid_ask.bid,
+                            ask_volume: order_flow.bid_ask.ask,
+                            active_buy_volume_5s: if order_flow.realtime_trade_record.timestamp >= time_threshold {
+                                order_flow.realtime_trade_record.buy_volume
+                            } else {
+                                0.0
+                            },
+                            active_sell_volume_5s: if order_flow.realtime_trade_record.timestamp >= time_threshold {
+                                order_flow.realtime_trade_record.sell_volume
+                            } else {
+                                0.0
+                            },
+                            history_buy_volume: order_flow.history_trade_record.buy_volume,
+                            history_sell_volume: order_flow.history_trade_record.sell_volume,
+                            delta: order_flow.history_trade_record.buy_volume - order_flow.history_trade_record.sell_volume,
+                            bid_fade_alpha: order_flow.get_bid_fade_alpha(self.get_current_timestamp()),
+                            ask_fade_alpha: order_flow.get_ask_fade_alpha(self.get_current_timestamp()),
+                        })
+                    } else {
+                        // 对于没有数据的价格级别，显示空行
+                        Some(UnifiedOrderBookRow {
+                            price: price_val,
+                            bid_volume: 0.0,
+                            ask_volume: 0.0,
+                            active_buy_volume_5s: 0.0,
+                            active_sell_volume_5s: 0.0,
+                            history_buy_volume: 0.0,
+                            history_sell_volume: 0.0,
+                            delta: 0.0,
+                            bid_fade_alpha: 1.0,
+                            ask_fade_alpha: 1.0,
+                        })
+                    }
+                })
+                .collect();
 
-        // 第二步：转换为显示行
-        let mut rows: Vec<UnifiedOrderBookRow> = aggregated_data
-            .into_iter()
-            .map(|(price_level, aggregated_flow)| UnifiedOrderBookRow {
-                price: price_level.0, // 提取OrderedFloat中的f64值
-                bid_volume: aggregated_flow.bid_volume,
-                ask_volume: aggregated_flow.ask_volume,
-                active_buy_volume_5s: aggregated_flow.active_buy_volume_5s,
-                active_sell_volume_5s: aggregated_flow.active_sell_volume_5s,
-                history_buy_volume: aggregated_flow.history_buy_volume,
-                history_sell_volume: aggregated_flow.history_sell_volume,
-                delta: aggregated_flow.history_buy_volume - aggregated_flow.history_sell_volume,
-                bid_fade_alpha: aggregated_flow.bid_fade_alpha,
-                ask_fade_alpha: aggregated_flow.ask_fade_alpha,
-            })
-            .collect();
+            // 按价格从高到低排序
+            rows.sort_by(|a, b| b.price.partial_cmp(&a.price).unwrap());
+            rows
+        } else {
+            // 其他精度时，使用聚合功能
+            let aggregated_data = self.aggregate_prices_by_precision(order_flows, visible_prices, time_threshold, self.price_precision, best_bid_price, best_ask_price);
 
-        // 按价格从高到低排序
-        rows.sort_by(|a, b| b.price.partial_cmp(&a.price).unwrap());
+            // 转换为显示行
+            let mut rows: Vec<UnifiedOrderBookRow> = aggregated_data
+                .into_iter()
+                .map(|(price_level, aggregated_flow)| UnifiedOrderBookRow {
+                    price: price_level.0, // 聚合后的价格级别
+                    bid_volume: aggregated_flow.bid_volume,
+                    ask_volume: aggregated_flow.ask_volume,
+                    active_buy_volume_5s: aggregated_flow.active_buy_volume_5s,
+                    active_sell_volume_5s: aggregated_flow.active_sell_volume_5s,
+                    history_buy_volume: aggregated_flow.history_buy_volume,
+                    history_sell_volume: aggregated_flow.history_sell_volume,
+                    delta: aggregated_flow.history_buy_volume - aggregated_flow.history_sell_volume,
+                    bid_fade_alpha: aggregated_flow.bid_fade_alpha,
+                    ask_fade_alpha: aggregated_flow.ask_fade_alpha,
+                })
+                .collect();
 
-        rows
+            // 按价格从高到低排序
+            rows.sort_by(|a, b| b.price.partial_cmp(&a.price).unwrap());
+            rows
+        }
     }
 
 
@@ -495,8 +610,12 @@ impl UnifiedOrderBookWidget {
         data: &[UnifiedOrderBookRow],
         current_price: f64,
         table_height: f32,
+        app: &ReactiveApp,
     ) {
         use egui_extras::{Column, TableBuilder};
+
+        // 获取最优买价和卖价
+        let (best_bid, best_ask) = app.get_orderbook_manager().get_best_prices();
 
         // 计算各列的最大值用于条形图缩放
         let max_history_buy = data.iter().map(|row| row.history_buy_volume).fold(0.0, f64::max);
@@ -531,7 +650,7 @@ impl UnifiedOrderBookWidget {
                     .max_scroll_height(table_height - 30.0)
                     .scroll_to_row(self.calculate_center_row_index(data, current_price), None);
 
-                table.header(25.0, |mut header| {
+                table.header(18.0, |mut header| {
                         header.col(|ui| { ui.strong("Price"); });
                         header.col(|ui| { ui.strong("Bids & Asks"); });
                         header.col(|ui| { ui.strong("Buy"); });
@@ -540,8 +659,8 @@ impl UnifiedOrderBookWidget {
                     }).body(|mut body| {
                         // 渲染所有可见数据行（最多81行）
                         for row in data {
-                            body.row(25.0, |mut row_ui| {
-                                self.render_table_row(&mut row_ui, row, current_price);
+                            body.row(18.0, |mut row_ui| {
+                                self.render_table_row(&mut row_ui, row, current_price, app);
                             });
                         }
                     });
@@ -596,8 +715,8 @@ impl UnifiedOrderBookWidget {
         current_price: f64,
         table_height: f32,
     ) -> SmartScrollInfo {
-        let row_height = 25.0;
-        let header_height = 25.0;
+        let row_height = 18.0;
+        let header_height = 18.0;
         let effective_table_height = table_height - header_height;
         let visible_rows = (effective_table_height / row_height) as usize;
 
@@ -685,6 +804,7 @@ impl UnifiedOrderBookWidget {
         data: &[UnifiedOrderBookRow],
         current_price: f64,
         table_height: f32,
+        app: &ReactiveApp,
     ) {
         // 计算智能滚动位置
         let scroll_info = self.calculate_smart_scroll_position(data, current_price, table_height);
@@ -709,7 +829,7 @@ impl UnifiedOrderBookWidget {
             .scroll_offset(egui::Vec2::new(0.0, scroll_info.scroll_offset))
             .max_height(table_height)
             .show(ui, |ui| {
-                self.render_unified_table_content(ui, data, current_price, scroll_info);
+                self.render_unified_table_content(ui, data, current_price, scroll_info, app);
             });
     }
 
@@ -720,6 +840,7 @@ impl UnifiedOrderBookWidget {
         data: &[UnifiedOrderBookRow],
         current_price: f64,
         scroll_info: SmartScrollInfo,
+        app: &ReactiveApp,
     ) {
         use egui_extras::{Column, TableBuilder};
 
@@ -767,8 +888,8 @@ impl UnifiedOrderBookWidget {
                 .body(|mut body| {
                     // 渲染所有数据行
                     for row in data {
-                        body.row(25.0, |mut row_ui| {
-                            self.render_table_row(&mut row_ui, row, current_price);
+                        body.row(18.0, |mut row_ui| {
+                            self.render_table_row(&mut row_ui, row, current_price, app);
                         });
                     }
                 });
@@ -782,6 +903,7 @@ impl UnifiedOrderBookWidget {
         data: &[UnifiedOrderBookRow],
         current_price: f64,
         table_height: f32,
+        app: &ReactiveApp,
     ) {
         use egui_extras::{Column, TableBuilder};
 
@@ -844,8 +966,8 @@ impl UnifiedOrderBookWidget {
                 .body(|mut body| {
                     // 渲染所有数据行，表格内置滚动会自动处理
                     for row in data {
-                        body.row(25.0, |mut row_ui| {
-                            self.render_table_row(&mut row_ui, row, current_price);
+                        body.row(18.0, |mut row_ui| {
+                            self.render_table_row(&mut row_ui, row, current_price, app);
                         });
                     }
                 });
@@ -859,9 +981,13 @@ impl UnifiedOrderBookWidget {
         data: &[UnifiedOrderBookRow],
         current_price: f64,
         _table_height: f32,
+        app: &ReactiveApp,
     ) {
         use egui_extras::{Column, TableBuilder};
 
+        // 获取最优买价和卖价
+        let (best_bid, best_ask) = app.get_orderbook_manager().get_best_prices();
+        
         // 计算各列的最大值用于条形图缩放
         let max_bid_volume = data.iter().map(|row| row.bid_volume).fold(0.0, f64::max);
         let max_ask_volume = data.iter().map(|row| row.ask_volume).fold(0.0, f64::max);
@@ -905,12 +1031,12 @@ impl UnifiedOrderBookWidget {
                     // 直接渲染所有行，滚动由外部ScrollArea控制
 
                     for row in data {
-                        body.row(25.0, |mut row_ui| {
+                        body.row(18.0, |mut row_ui| {
                             // 第1列：价格 - 精确的当前价格高亮（只有一个价格层级被高亮）
                             row_ui.col(|ui| {
                                 let is_current_price_row = self.is_current_price_row(row.price, current_price);
-                                // 格式化价格为整数美元显示（1美元聚合级别）
-                                let price_display = format!("{:.0}", row.price);
+                                // 格式化价格显示（根据精度动态调整）
+                                let price_display = self.format_price_by_precision(row.price);
 
                                 if is_current_price_row {
                                     // 当前价格行 - 使用强烈高亮和背景
@@ -945,10 +1071,11 @@ impl UnifiedOrderBookWidget {
                                     .map(|r| r.bid_volume.max(r.ask_volume))
                                     .fold(0.0, f64::max);
                                 
-                                // 如果同时有bid和ask，显示两行
+                                // 如果同时有bid和ask，使用标准订单薄显示：ask（红色）在上，bid（蓝色）在下
                                 if row.bid_volume > 0.0 && row.ask_volume > 0.0 {
                                     let half_height = cell_height / 2.0;
                                     
+                                    // 标准订单薄显示：ask（红色）始终在上半部分，bid（蓝色）始终在下半部分
                                     // 上半部分：ask（红色）
                                     let ask_width = if max_value > 0.0 { 
                                         (cell_width * (row.ask_volume / max_value) as f32).min(cell_width) 
@@ -966,7 +1093,7 @@ impl UnifiedOrderBookWidget {
                                         );
                                     }
                                     
-                                    // ask数值显示
+                                    // ask数值显示在上半部分
                                     let ask_text_rect = egui::Rect::from_min_size(
                                         cell_rect.min,
                                         egui::Vec2::new(cell_width, half_height)
@@ -997,7 +1124,7 @@ impl UnifiedOrderBookWidget {
                                         );
                                     }
                                     
-                                    // bid数值显示
+                                    // bid数值显示在下半部分
                                     let bid_text_rect = egui::Rect::from_min_size(
                                         cell_rect.min + egui::Vec2::new(0.0, half_height),
                                         egui::Vec2::new(cell_width, half_height)
@@ -1182,7 +1309,11 @@ impl UnifiedOrderBookWidget {
         row_ui: &mut egui_extras::TableRow,
         row: &UnifiedOrderBookRow,
         current_price: f64,
+        app: &ReactiveApp,
     ) {
+        // 获取最优买价和卖价
+        let (best_bid, best_ask) = app.get_orderbook_manager().get_best_prices();
+        
         // 计算买单和卖单深度的最大值用于条形图缩放
         let max_bid_volume = self.cached_visible_data.iter().map(|r| r.bid_volume).fold(0.0, f64::max);
         let max_ask_volume = self.cached_visible_data.iter().map(|r| r.ask_volume).fold(0.0, f64::max);
@@ -1192,8 +1323,8 @@ impl UnifiedOrderBookWidget {
         
         // 第1列：价格 - 精确的当前价格高亮（只有一个价格层级被高亮）
         row_ui.col(|ui| {
-            // 格式化价格为整数美元显示（1美元聚合级别）
-            let price_display = format!("{:.0}", row.price);
+            // 格式化价格显示（根据精度动态调整）
+            let price_display = self.format_price_by_precision(row.price);
 
             if is_current_price_row {
                 // 当前价格行 - 使用强烈高亮和背景
@@ -1228,10 +1359,11 @@ impl UnifiedOrderBookWidget {
                 .map(|r| r.bid_volume.max(r.ask_volume))
                 .fold(0.0, f64::max);
             
-            // 如果同时有bid和ask，显示两行
+            // 如果同时有bid和ask，根据价格位置决定显示顺序
             if row.bid_volume > 0.0 && row.ask_volume > 0.0 {
                 let half_height = cell_height / 2.0;
                 
+                // 标准订单薄显示：ask（红色）始终在上半部分，bid（蓝色）始终在下半部分
                 // 上半部分：ask（红色）
                 let ask_width = if max_value > 0.0 { 
                     (cell_width * (row.ask_volume / max_value) as f32).min(cell_width) 
@@ -1251,7 +1383,7 @@ impl UnifiedOrderBookWidget {
                     );
                 }
                 
-                // ask数值显示
+                // ask数值显示在上半部分
                 let ask_text_rect = egui::Rect::from_min_size(
                     cell_rect.min,
                     egui::Vec2::new(cell_width, half_height)
@@ -1286,7 +1418,7 @@ impl UnifiedOrderBookWidget {
                     );
                 }
                 
-                // bid数值显示
+                // bid数值显示在下半部分
                 let bid_text_rect = egui::Rect::from_min_size(
                     cell_rect.min + egui::Vec2::new(0.0, half_height),
                     egui::Vec2::new(cell_width, half_height)
@@ -1517,7 +1649,7 @@ impl UnifiedOrderBookWidget {
                 .default_size(egui::Vec2::new(1000.0, 600.0))
                 .resizable(true)
                 .show(ctx, |ui| {
-                    Self::render_price_chart_modal_static(ui, &price_history, max_price_history);
+                    Self::render_price_chart_modal_static(ui, &price_history, max_price_history, self.price_precision);
                 });
         }
     }
@@ -1554,7 +1686,8 @@ impl UnifiedOrderBookWidget {
     fn render_price_chart_modal_static(
         ui: &mut egui::Ui,
         price_history: &std::collections::VecDeque<(f64, f64, f64, String)>,
-        max_price_history: usize
+        max_price_history: usize,
+        price_precision: f64
     ) {
         ui.vertical(|ui| {
             // 顶部状态栏
@@ -1630,6 +1763,7 @@ impl UnifiedOrderBookWidget {
                 let y_max = max_price + y_margin;
 
                 // 创建图表 - 添加固定1美元Y轴刻度
+                let precision = price_precision; // 捕获精度值
                 let plot = Plot::new("price_chart_modal")
                     .view_aspect(2.0)
                     .show_axes([true, true])
@@ -1642,8 +1776,8 @@ impl UnifiedOrderBookWidget {
                     .include_y(y_min)
                     .include_y(y_max)
                     .y_grid_spacer(Self::price_grid_spacer_1_dollar) // 设置1美元固定间距
-                    .y_axis_formatter(|y, _range, _ctx| {
-                        format!("{:.0}", y.value) // 格式化Y轴为整数
+                    .y_axis_formatter(move |y, _range, _ctx| {
+                        Self::format_price_by_precision_static(y.value, precision) // 根据精度动态格式化Y轴
                     });
 
                 plot.show(ui, |plot_ui| {
@@ -1851,6 +1985,7 @@ impl UnifiedOrderBookWidget {
                     };
                     let x_max = data_len.max(display_window_size); // 确保X轴范围至少为1000
 
+                    let precision = self.price_precision; // 捕获精度值
                     let plot = Plot::new("embedded_price_chart")
                         .width(ui.available_width()) // 明确设置图表宽度占满可用宽度
                         .height(chart_height) // 明确设置图表高度
@@ -1863,8 +1998,8 @@ impl UnifiedOrderBookWidget {
                         .include_x(x_max) // 使用固定窗口的结束位置
                         .include_y(y_min)
                         .include_y(y_max)
-                        .y_axis_formatter(|y, _range, _ctx| {
-                            format!("{:.0}", y.value) // 格式化Y轴为整数
+                        .y_axis_formatter(move |y, _range, _ctx| {
+                            Self::format_price_by_precision_static(y.value, precision) // 根据精度动态格式化Y轴
                         });
 
                     plot.show(ui, |plot_ui| {
@@ -2127,56 +2262,141 @@ impl UnifiedOrderBookWidget {
             });
     }
 
-    /// 将价格聚合到1美元级别（使用向下取整策略）
-    fn aggregate_prices_to_usd_levels(
+    /// 根据指定精度聚合价格数据（使用向下取整策略）
+    /// precision: 1.0=1美元聚合, 0.1=原始精度, 0.5=0.5美元聚合
+    fn aggregate_prices_by_precision(
         &self,
         order_flows: &BTreeMap<OrderedFloat<f64>, OrderFlow>,
         visible_prices: &[f64],
         time_threshold: u64,
+        precision: f64,
+        best_bid_price: Option<f64>,
+        best_ask_price: Option<f64>,
     ) -> BTreeMap<OrderedFloat<f64>, AggregatedOrderFlow> {
         use std::collections::HashMap;
 
         let mut aggregated_map: HashMap<i64, AggregatedOrderFlow> = HashMap::new();
 
+        // 计算精度乘数（用于聚合计算）
+        let precision_multiplier = 1.0 / precision;
+        
+        // 计算best价格的聚合层级
+        let best_bid_level = best_bid_price.map(|price| (price * precision_multiplier).floor() as i64);
+        let best_ask_level = best_ask_price.map(|price| (price * precision_multiplier).floor() as i64);
+        
+        // 检查是否存在best_ask和best_bid在同一聚合层级的冲突
+        // 只在精度>=0.5时才启用特殊处理（较粗精度时才有意义）
+        let has_conflict = if precision >= 0.5 {
+            match (best_bid_level, best_ask_level) {
+                (Some(bid_level), Some(ask_level)) => {
+                    let conflict_detected = bid_level == ask_level;
+                    if conflict_detected {
+                        println!("🔄 检测到冲突: precision={}, best_bid_level={}, best_ask_level={}, best_bid_price={:?}, best_ask_price={:?}", 
+                                 precision, bid_level, ask_level, best_bid_price, best_ask_price);
+                    }
+                    conflict_detected
+                },
+                _ => false,
+            }
+        } else {
+            false
+        };
+        
         // 遍历所有可见价格，进行聚合
         for &price_val in visible_prices {
-            // 使用向下取整策略：floor(price) 聚合到1美元级别
-            let price_level_int = price_val.floor() as i64;
+            // 使用向下取整策略：floor(price * multiplier) 聚合到指定精度级别
+            let price_level_int = (price_val * precision_multiplier).floor() as i64;
             let price_key = OrderedFloat(price_val);
 
+            // 特殊处理：如果存在冲突，调整bid的聚合策略
+            let adjusted_price_level = if has_conflict && Some(price_level_int) == best_ask_level {
+                // 如果当前价格会聚合到best_ask层级，检查是否需要特殊处理
+                if let Some(order_flow) = order_flows.get(&price_key) {
+                    if order_flow.bid_ask.bid > 0.0 && price_val <= best_bid_price.unwrap_or(0.0) {
+                        // 这是bid数据且价格<=best_bid_price，将其聚合到下一层级 (best_bid_level - 1)
+                        best_bid_level.unwrap_or(price_level_int) - 1
+                    } else {
+                        // ask数据或价格>best_bid，保持原层级
+                        price_level_int
+                    }
+                } else {
+                    price_level_int
+                }
+            } else {
+                price_level_int
+            };
+
             // 确保每个价格级别都有一个条目（即使没有数据也显示空行）
-            let entry = aggregated_map.entry(price_level_int).or_insert_with(|| AggregatedOrderFlow::new());
+            let entry = aggregated_map.entry(adjusted_price_level).or_insert_with(|| AggregatedOrderFlow::new());
 
             // 获取该价格的订单流数据（如果存在）
             if let Some(order_flow) = order_flows.get(&price_key) {
-                // 聚合订单簿深度数据
-                entry.bid_volume += order_flow.bid_ask.bid;
-                entry.ask_volume += order_flow.bid_ask.ask;
+                // 根据冲突情况分别处理bid和ask
+                if has_conflict && Some(price_level_int) == best_ask_level {
+                    if order_flow.bid_ask.bid > 0.0 && price_val <= best_bid_price.unwrap_or(0.0) {
+                        // bid数据聚合到下层级，只聚合bid相关数据
+                        entry.bid_volume += order_flow.bid_ask.bid;
+                        entry.history_buy_volume += order_flow.history_trade_record.buy_volume;
+                        if order_flow.realtime_trade_record.timestamp >= time_threshold {
+                            entry.active_buy_volume_5s += order_flow.realtime_trade_record.buy_volume;
+                        }
+                        let bid_alpha = order_flow.get_bid_fade_alpha(self.get_current_timestamp());
+                        entry.bid_fade_alpha = entry.bid_fade_alpha.min(bid_alpha);
+                    } else {
+                        // ask数据保留在原层级，只聚合ask相关数据
+                        entry.ask_volume += order_flow.bid_ask.ask;
+                        entry.history_sell_volume += order_flow.history_trade_record.sell_volume;
+                        if order_flow.realtime_trade_record.timestamp >= time_threshold {
+                            entry.active_sell_volume_5s += order_flow.realtime_trade_record.sell_volume;
+                        }
+                        let ask_alpha = order_flow.get_ask_fade_alpha(self.get_current_timestamp());
+                        entry.ask_fade_alpha = entry.ask_fade_alpha.min(ask_alpha);
+                    }
+                } else {
+                    // 正常聚合：没有冲突的情况
+                    entry.bid_volume += order_flow.bid_ask.bid;
+                    entry.ask_volume += order_flow.bid_ask.ask;
+                    entry.history_buy_volume += order_flow.history_trade_record.buy_volume;
+                    entry.history_sell_volume += order_flow.history_trade_record.sell_volume;
+                    
+                    if order_flow.realtime_trade_record.timestamp >= time_threshold {
+                        entry.active_buy_volume_5s += order_flow.realtime_trade_record.buy_volume;
+                        entry.active_sell_volume_5s += order_flow.realtime_trade_record.sell_volume;
+                    }
 
-                // 聚合历史累计数据（用于delta计算）
-                entry.history_buy_volume += order_flow.history_trade_record.buy_volume;
-                entry.history_sell_volume += order_flow.history_trade_record.sell_volume;
-
-                // 聚合5秒内主动交易数据（时间窗口过滤）
-                if order_flow.realtime_trade_record.timestamp >= time_threshold {
-                    entry.active_buy_volume_5s += order_flow.realtime_trade_record.buy_volume;
-                    entry.active_sell_volume_5s += order_flow.realtime_trade_record.sell_volume;
+                    let bid_alpha = order_flow.get_bid_fade_alpha(self.get_current_timestamp());
+                    let ask_alpha = order_flow.get_ask_fade_alpha(self.get_current_timestamp());
+                    entry.bid_fade_alpha = entry.bid_fade_alpha.min(bid_alpha);
+                    entry.ask_fade_alpha = entry.ask_fade_alpha.min(ask_alpha);
                 }
-
-                // 计算淡出透明度（取所有价格层级的最小透明度）
-                let bid_alpha = order_flow.get_bid_fade_alpha(self.get_current_timestamp());
-                let ask_alpha = order_flow.get_ask_fade_alpha(self.get_current_timestamp());
-                entry.bid_fade_alpha = entry.bid_fade_alpha.min(bid_alpha);
-                entry.ask_fade_alpha = entry.ask_fade_alpha.min(ask_alpha);
             }
         }
 
         // 转换为BTreeMap以保持排序
         aggregated_map.into_iter()
             .map(|(price_level_int, aggregated_flow)| {
-                (OrderedFloat(price_level_int as f64), aggregated_flow)
+                (OrderedFloat(price_level_int as f64 * precision), aggregated_flow)
             })
             .collect()
+    }
+
+    /// 根据精度设置格式化价格显示
+    fn format_price_by_precision(&self, price: f64) -> String {
+        Self::format_price_by_precision_static(price, self.price_precision)
+    }
+
+    /// 根据精度设置格式化价格显示（静态版本）
+    fn format_price_by_precision_static(price: f64, precision: f64) -> String {
+        if precision >= 1.0 {
+            // 精度>=1时，显示为整数
+            format!("{:.0}", price)
+        } else if precision == 0.5 {
+            // 精度=0.5时，显示1位小数
+            format!("{:.1}", price)
+        } else {
+            // 精度<0.5时，显示1位小数（包括0.1原始精度）
+            format!("{:.1}", price)
+        }
     }
 
     /// 获取当前时间戳
