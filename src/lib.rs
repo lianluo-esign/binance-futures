@@ -9,17 +9,19 @@ pub mod orderbook;
 pub mod websocket;
 pub mod app;
 pub mod monitoring;
+pub mod services;
 #[cfg(feature = "gui")]
 pub mod gui;
 
 // 重新导出主要类型
-pub use core::RingBuffer;
+pub use core::{RingBuffer, PerformanceConfig, PerformanceMetrics, AdaptiveRingBuffer};
 pub use events::{Event, EventType, EventBus, EventDispatcher};
 pub use orderbook::{OrderBookManager, OrderFlow, MarketSnapshot};
 pub use websocket::{WebSocketManager, WebSocketConnection};
 pub use app::ReactiveApp;
+pub use services::{ServiceManager, Service, ServiceError, ServiceHealth};
 #[cfg(feature = "gui")]
-pub use gui::{TradingGUI, GpuConfig, GpuPerformanceMonitor, GpuRenderSettings};
+pub use gui::{ThreadedTradingGUI, GUIState, OrderBookUIData, MarketStats, PerformanceInfo};
 
 /// 库的版本信息
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

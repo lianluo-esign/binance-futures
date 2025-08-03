@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(rm:*)",
+      "Bash(cargo check:*)",
+      "Bash(mkdir:*)",
+      "Bash(cp:*)",
+      "Bash(timeout 30s cargo check --features gui)"
+    ],
+    "deny": []
+  }
+}

@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use ordered_float::OrderedFloat;
 use serde_json::Value;
 
@@ -943,7 +943,7 @@ impl OrderBookManager {
 
     /// 格式化时间戳为可读格式
     fn format_timestamp(&self, timestamp: u64) -> String {
-        use std::time::{SystemTime, UNIX_EPOCH, Duration};
+        use std::time::{UNIX_EPOCH, Duration};
 
         let system_time = UNIX_EPOCH + Duration::from_millis(timestamp);
         let datetime = chrono::DateTime::<chrono::Utc>::from(system_time);
