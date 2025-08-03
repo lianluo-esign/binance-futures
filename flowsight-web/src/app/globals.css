@@ -1,0 +1,128 @@
+@import "tailwindcss";
+
+:root {
+  /* Trading theme colors */
+  --background: #111827;
+  --foreground: #f9fafb;
+  --surface: #1f2937;
+  --border: #374151;
+  
+  /* Trading colors */
+  --buy-color: #10b981;
+  --sell-color: #ef4444;
+  --neutral-color: #6b7280;
+  
+  /* Chart colors */
+  --grid-color: #374151;
+  --axis-color: #9ca3af;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-surface: var(--surface);
+  --color-border: var(--border);
+  --color-buy: var(--buy-color);
+  --color-sell: var(--sell-color);
+  --color-neutral: var(--neutral-color);
+  --color-grid: var(--grid-color);
+  --color-axis: var(--axis-color);
+  
+  /* Custom breakpoints for trading interface */
+  --breakpoint-mobile: 768px;
+  --breakpoint-tablet: 1024px;
+  --breakpoint-desktop: 1280px;
+  
+  /* Panel proportions */
+  --panel-left-width: 50%;
+  --panel-right-upper-height: 45%;
+  --panel-right-lower-height: 55%;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html, body {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow: hidden; /* Prevent scrollbars in trading interface */
+}
+
+/* Custom scrollbar for trading interface */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--surface);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--neutral-color);
+}
+
+/* Trading-specific utility classes */
+.buy-color {
+  color: var(--buy-color);
+}
+
+.sell-color {
+  color: var(--sell-color);
+}
+
+.surface-bg {
+  background-color: var(--surface);
+}
+
+.border-color {
+  border-color: var(--border);
+}
+
+/* Animation classes for real-time updates */
+@keyframes flash-buy {
+  0% { background-color: var(--buy-color); opacity: 0.3; }
+  100% { background-color: transparent; opacity: 1; }
+}
+
+@keyframes flash-sell {
+  0% { background-color: var(--sell-color); opacity: 0.3; }
+  100% { background-color: transparent; opacity: 1; }
+}
+
+.flash-buy {
+  animation: flash-buy 0.5s ease-out;
+}
+
+.flash-sell {
+  animation: flash-sell 0.5s ease-out;
+}
+
+/* High contrast mode support */
+@media (prefers-contrast: high) {
+  :root {
+    --background: #000000;
+    --foreground: #ffffff;
+    --surface: #1a1a1a;
+    --border: #ffffff;
+    --buy-color: #00ff00;
+    --sell-color: #ff0000;
+  }
+}

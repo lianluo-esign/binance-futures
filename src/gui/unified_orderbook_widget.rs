@@ -415,10 +415,10 @@ impl UnifiedOrderBookWidget {
                            (current_price - self.last_price).abs() > 0.1 ||
                            best_price_changed;
 
-        if best_price_changed {
-            println!("💰 Best价格变化触发更新: bid {:?} -> {:?}, ask {:?} -> {:?}", 
-                     self.last_best_bid, best_bid_price, self.last_best_ask, best_ask_price);
-        }
+        // if best_price_changed {
+        //     println!("💰 Best价格变化触发更新: bid {:?} -> {:?}, ask {:?} -> {:?}", 
+        //              self.last_best_bid, best_bid_price, self.last_best_ask, best_ask_price);
+        // }
 
         if !should_update && !self.cached_visible_data.is_empty() {
             return self.cached_visible_data.clone();
@@ -2290,10 +2290,10 @@ impl UnifiedOrderBookWidget {
             match (best_bid_level, best_ask_level) {
                 (Some(bid_level), Some(ask_level)) => {
                     let conflict_detected = bid_level == ask_level;
-                    if conflict_detected {
-                        println!("🔄 检测到冲突: precision={}, best_bid_level={}, best_ask_level={}, best_bid_price={:?}, best_ask_price={:?}", 
-                                 precision, bid_level, ask_level, best_bid_price, best_ask_price);
-                    }
+                    // if conflict_detected {
+                    //     println!("🔄 检测到冲突: precision={}, best_bid_level={}, best_ask_level={}, best_bid_price={:?}, best_ask_price={:?}", 
+                    //              precision, bid_level, ask_level, best_bid_price, best_ask_price);
+                    // }
                     conflict_detected
                 },
                 _ => false,
