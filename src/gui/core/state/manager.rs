@@ -127,6 +127,7 @@ impl StateManager {
         states: HashMap<ComponentId, serde_json::Value>,
         reason: String,
     ) -> ComponentResult<()> {
+        let states_count = states.len();
         for (component_id, state) in states {
             self.set_state(component_id, state, reason.clone()).await?;
         }
@@ -136,7 +137,7 @@ impl StateManager {
             component_id: ComponentId::new("__batch__"),
             change_type: StateChangeType::BatchUpdate,
             old_state: None,
-            new_state: serde_json::json!({"count": states.len()}),
+            new_state: serde_json::json!({"count": states_count}),
             timestamp: std::time::SystemTime::now(),
             reason,
         };
@@ -333,7 +334,8 @@ impl StateManager {
         
         // 限制历史记录大小
         if history.len() > self.config.max_history_size {
-            history.drain(0..history.len() - self.config.max_history_size);
+            let drain_count = history.len() - self.config.max_history_size;
+            history.drain(0..drain_count);
         }
     }
 }

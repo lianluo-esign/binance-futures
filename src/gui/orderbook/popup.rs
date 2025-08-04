@@ -3,7 +3,7 @@
 use eframe::egui;
 
 /// 弹出窗口类型
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum PopupType {
     TradingSignal,
     QuantitativeBacktest,
@@ -122,9 +122,10 @@ impl PopupManager {
     
     /// 打开弹出窗口
     pub fn open_popup(&mut self, popup_type: PopupType) {
-        let state = self.popup_states.entry(popup_type.clone()).or_insert_with(|| {
+        let default_size = self.get_default_size(&popup_type);
+        let state = self.popup_states.entry(popup_type).or_insert_with(|| {
             PopupState {
-                size: self.get_default_size(&popup_type),
+                size: default_size,
                 ..Default::default()
             }
         });
@@ -164,15 +165,27 @@ impl PopupManager {
     
     /// 渲染单个弹出窗口
     fn render_popup(&mut self, ctx: &egui::Context, popup_type: PopupType) {
-        let state = self.popup_states.get_mut(&popup_type).unwrap();
+        // Get window title before borrowing state
+        let window_title = self.get_window_title(&popup_type);
         
-        let mut window = egui::Window::new(self.get_window_title(&popup_type))
-            .open(&mut state.is_open)
-            .default_size(state.size)
-            .resizable(state.resizable)
-            .movable(state.movable);
+        // Check if state exists, if not skip rendering
+        if !self.popup_states.contains_key(&popup_type) {
+            return;
+        }
         
-        if let Some(pos) = state.position {
+        let mut is_open = self.popup_states[&popup_type].is_open;
+        let size = self.popup_states[&popup_type].size;
+        let resizable = self.popup_states[&popup_type].resizable;
+        let movable = self.popup_states[&popup_type].movable;
+        let position = self.popup_states[&popup_type].position;
+        
+        let mut window = egui::Window::new(window_title)
+            .open(&mut is_open)
+            .default_size(size)
+            .resizable(resizable)
+            .movable(movable);
+        
+        if let Some(pos) = position {
             window = window.default_pos(pos);
         }
         
@@ -185,6 +198,11 @@ impl PopupManager {
                 PopupType::Help => self.render_help_window(ui),
             }
         });
+        
+        // Update the is_open state after rendering
+        if let Some(state) = self.popup_states.get_mut(&popup_type) {
+            state.is_open = is_open;
+        }
     }
     
     /// 渲染交易信号窗口

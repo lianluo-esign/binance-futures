@@ -1,5 +1,5 @@
 use super::{Service, ServiceError, ServiceHealth, ServiceStats};
-use crate::events::{Event, EventType, LockFreeEventDispatcher};
+use crate::events::{Event, LockFreeEventDispatcher};
 use std::sync::{Arc, atomic::{AtomicBool, AtomicU64, Ordering}};
 use std::time::Instant;
 

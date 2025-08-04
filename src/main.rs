@@ -39,6 +39,56 @@ use flow_sight::gui::ThreadedTradingGUI;
 use std::env;
 
 #[cfg(feature = "gui")]
+#[derive(Default)]
+struct SimpleFlowSightApp {
+    symbol: String,
+    counter: u32,
+    status: String,
+}
+
+#[cfg(feature = "gui")]
+impl SimpleFlowSightApp {
+    fn new(symbol: String) -> Self {
+        Self {
+            symbol,
+            counter: 0,
+            status: "系统初始化完成".to_string(),
+        }
+    }
+}
+
+#[cfg(feature = "gui")]
+impl eframe::App for SimpleFlowSightApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.heading("FlowSight - 高性能币安期货交易分析系统");
+            ui.separator();
+            
+            ui.horizontal(|ui| {
+                ui.label("交易对:");
+                ui.strong(&self.symbol);
+            });
+            
+            ui.horizontal(|ui| {
+                ui.label("系统状态:");
+                ui.colored_label(egui::Color32::GREEN, &self.status);
+            });
+            
+            ui.separator();
+            
+            if ui.button("刷新数据").clicked() {
+                self.counter += 1;
+                self.status = format!("数据已刷新 {} 次", self.counter);
+            }
+            
+            ui.separator();
+            ui.label("注意：这是简化的GUI测试版本");
+            ui.label("完整版本需要修复GUI模块的编译错误");
+        });
+    }
+}
+
+#[cfg(feature = "gui")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 初始化日志系统
     init_logging();
@@ -63,22 +113,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // 启动应用程序
     log::info!("启动多线程架构...");
-    app.start()?;
 
     // 创建高性能GPU渲染配置
     let options = create_gpu_render_options();
 
     // 运行GUI应用
     log::info!("启动GPU硬件加速渲染循环 (WGPU)");
+    // 启动应用程序的后台线程
+    if let Err(e) = app.start() {
+        log::error!("启动ThreadedTradingGUI失败: {}", e);
+        return Err(e.into());
+    }
+
     let result = eframe::run_native(
         "FlowSight - 高性能交易分析系统",
         options,
-        Box::new(|cc| {
+        Box::new(move |cc| {
             // 配置egui上下文以获得最佳性能
-            setup_egui_context(&cc.egui_ctx, &performance_config);
+            setup_egui_context(&cc.egui_ctx);
             
             // 显示启动信息
-            log::info!("GPU渲染器: {:?}", cc.integration_info.web_info);
+            log::info!("系统主题: {:?}", cc.integration_info.system_theme);
             log::info!("系统信息: CPU核心={}, 可用内存={}MB", 
                       num_cpus::get(),
                       get_available_memory_mb());
@@ -103,7 +158,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// 创建优化的性能配置
 #[cfg(feature = "gui")]
 fn create_optimized_performance_config() -> PerformanceConfig {
-    use flow_sight::core::{GUIPerformanceConfig, BufferConfig, DataProcessingConfig, MonitoringConfig};
+    use flow_sight::core::performance_config::{GUIPerformanceConfig, BufferConfig, DataProcessingConfig, MonitoringConfig};
     
     PerformanceConfig {
         gui: GUIPerformanceConfig {
@@ -156,17 +211,6 @@ fn create_gpu_render_options() -> eframe::NativeOptions {
         
         // 性能优化设置
         vsync: false,                    // 禁用垂直同步
-        multisampling: 0,                // 禁用抗锯齿以提高性能
-        depth_buffer: 0,                 // 不需要深度缓冲区
-        stencil_buffer: 0,               // 不需要模板缓冲区
-        
-        // 窗口设置
-        transparent: false,              // 不透明以提高性能
-        decorations: true,               // 保留窗口装饰
-        fullsize_content: false,         // 标准内容大小
-        titlebar_shown: true,            // 显示标题栏
-        titlebar_buttons_shown: true,    // 显示窗口按钮
-        always_on_top: false,            // 不总是置顶
         
         ..Default::default()
     }
@@ -276,7 +320,7 @@ fn setup_services(service_manager: &mut ServiceManager, symbol: &str) -> Result<
         memory_monitoring_enabled: true,                             // 内存监控
         cpu_monitoring_enabled: true,                                // CPU监控
         network_monitoring_enabled: false,                           // 网络监控(暂时禁用)
-        metrics_retention: std::time::Duration::from_hours(2),       // 2小时指标保留
+        metrics_retention: std::time::Duration::from_secs(2 * 3600), // 2小时指标保留
         performance_thresholds: Default::default(),
     };
     let performance_service = Box::new(PerformanceService::new(PerformanceConfig::default()));
@@ -294,17 +338,15 @@ fn setup_services(service_manager: &mut ServiceManager, symbol: &str) -> Result<
 
 /// 设置egui上下文
 #[cfg(feature = "gui")]
-fn setup_egui_context(ctx: &egui::Context, config: &PerformanceConfig) {
+fn setup_egui_context(ctx: &egui::Context) {
     // 高性能渲染选项
     ctx.options_mut(|o| {
         // 禁用辅助功能以提高性能
         o.screen_reader = false;
         o.preload_font_glyphs = false;
         
-        // 优化交互响应
-        o.input_options.scroll_zoom_speed = 0.3;
-        o.input_options.zoom_speed = 0.8;
-        o.input_options.zoom_with_mouse_wheel = true;
+        // 优化交互响应 - 使用新的API
+        // 注意：某些选项在新版本中已移动或更改
         
         // 设置合理的缩放
         o.zoom_factor = 1.0;

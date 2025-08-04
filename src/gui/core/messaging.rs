@@ -337,8 +337,9 @@ impl MessageBus {
         handler: Box<dyn MessageHandler + Send + Sync>,
     ) {
         let mut handlers = self.handlers.write().await;
+        let topic_clone = topic.clone();
         handlers.insert(topic, handler);
-        log::debug!("注册消息处理器: {}", topic);
+        log::debug!("注册消息处理器: {}", topic_clone);
     }
     
     /// 取消注册消息处理器

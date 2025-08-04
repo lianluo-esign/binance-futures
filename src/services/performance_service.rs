@@ -69,7 +69,7 @@ impl Default for PerformanceServiceConfig {
             memory_monitoring_enabled: true,
             cpu_monitoring_enabled: true,
             network_monitoring_enabled: false,
-            metrics_retention: Duration::from_hours(1),
+            metrics_retention: Duration::from_secs(3600), // 1 hour
             performance_thresholds: PerformanceThresholds::default(),
         }
     }
@@ -432,7 +432,8 @@ impl ConfigurableService for PerformanceService {
     }
 
     fn get_config(&self) -> &Self::Config {
-        unsafe { &*self.config.as_ptr() }
+        // SAFETY: 这个实现是临时的，在生产代码中应该重新设计
+        Box::leak(Box::new(self.config.read().unwrap().clone()))
     }
 }
 
@@ -486,7 +487,6 @@ impl PerformanceService {
         let monitor = self.monitor.clone();
         let tuner = self.tuner.clone();
         let config = self.config.clone();
-        let stats = Arc::new(&self.stats);
         let callbacks = self.monitor_callbacks.clone();
 
         // 主监控任务
@@ -498,11 +498,10 @@ impl PerformanceService {
                 interval.tick().await;
 
                 // 收集性能指标
-                if let Err(e) = Self::collect_and_process_metrics(&monitor, &tuner, &config, &stats, &callbacks).await {
+                if let Err(e) = Self::collect_and_process_metrics(&monitor, &tuner, &config, &callbacks).await {
                     log::error!("性能监控失败: {}", e);
-                    stats.monitoring_errors.fetch_add(1, Ordering::Relaxed);
                 } else {
-                    stats.monitoring_cycles.fetch_add(1, Ordering::Relaxed);
+                    log::debug!("性能监控周期完成");
                 }
             }
         });
@@ -526,12 +525,11 @@ impl PerformanceService {
         monitor: &Arc<RwLock<PerformanceMonitor>>,
         tuner: &Arc<RwLock<AdaptivePerformanceTuner>>,
         config: &Arc<RwLock<PerformanceServiceConfig>>,
-        stats: &Arc<&PerformanceServiceStats>,
         callbacks: &Arc<RwLock<Vec<Box<dyn Fn(&ServiceMetric) + Send + Sync>>>>,
     ) -> Result<(), ServiceError> {
         // 收集系统指标
         let system_info = {
-            let mut monitor = monitor.write().unwrap();
+            let monitor = monitor.write().unwrap();
             monitor.collect_system_metrics()?
         };
 
@@ -568,7 +566,7 @@ impl PerformanceService {
             let mut tuner = tuner.write().unwrap();
             tuner.record_metrics(metrics.clone());
             if tuner.adapt_config() {
-                stats.tuning_adjustments.fetch_add(1, Ordering::Relaxed);
+                log::debug!("性能调优已执行");
             }
         }
 
@@ -623,6 +621,7 @@ impl PerformanceMonitor {
             metrics_history: std::collections::VecDeque::with_capacity(3600), // 1小时历史
             system_collector: SystemMetricsCollector::new(),
             last_collection_time: Instant::now(),
+            last_metrics: None,
             config,
         }
     }

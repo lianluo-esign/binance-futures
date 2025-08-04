@@ -53,6 +53,33 @@ impl TableRenderer {
         scroll_position: f32,
         visible_rows: usize,
     ) {
+        // 添加调试信息 - 减少日志频率
+        static mut LAST_RENDER_LOG_TIME: Option<std::time::Instant> = None;
+        let now = std::time::Instant::now();
+        unsafe {
+            if LAST_RENDER_LOG_TIME.map_or(true, |last| now.duration_since(last) > std::time::Duration::from_secs(10)) {
+                log::info!("渲染表格: {} 行数据, 滚动位置: {}, 可见行: {}", data.len(), scroll_position, visible_rows);
+                LAST_RENDER_LOG_TIME = Some(now);
+            }
+        }
+        
+        // 如果没有数据，显示提示信息
+        if data.is_empty() {
+            ui.centered_and_justified(|ui| {
+                ui.heading("📊 订单簿数据");
+                ui.label("正在加载数据...");
+            });
+            return;
+        }
+        
+        // 简单的数据显示作为备用方案
+        if data.len() > 0 {
+            ui.separator();
+            ui.heading(format!("📈 当前价格: {:.2}", current_price));
+            ui.label(format!("📊 数据行数: {}", data.len()));
+            ui.separator();
+        }
+        
         use egui_extras::{Column, TableBuilder};
         
         let table = TableBuilder::new(ui)
@@ -303,10 +330,10 @@ impl BarRenderer {
         
         // 简化的渐变效果（使用中间色）
         let mid_color = egui::Color32::from_rgba_premultiplied(
-            (start_color.r() as u16 + end_color.r() as u16) / 2,
-            (start_color.g() as u16 + end_color.g() as u16) / 2,
-            (start_color.b() as u16 + end_color.b() as u16) / 2,
-            (start_color.a() as u16 + end_color.a() as u16) / 2,
+            ((start_color.r() as u16 + end_color.r() as u16) / 2) as u8,
+            ((start_color.g() as u16 + end_color.g() as u16) / 2) as u8,
+            ((start_color.b() as u16 + end_color.b() as u16) / 2) as u8,
+            ((start_color.a() as u16 + end_color.a() as u16) / 2) as u8,
         );
         
         ui.painter().rect_filled(bar_rect, egui::Rounding::same(2.0), mid_color);

@@ -2,6 +2,12 @@
 name = "flow_sight"
 version = "0.1.0"
 edition = "2021"
+default-run = "flow_sight"
+
+[[bin]]
+name = "flow_sight_simple"
+path = "src/main_simple.rs"
+required-features = ["gui"]
 
 [dependencies]
 once_cell = "1.19"

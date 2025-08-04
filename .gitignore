@@ -7,3 +7,4 @@ footprint_history.json
 
 /target
 *.log
+nul

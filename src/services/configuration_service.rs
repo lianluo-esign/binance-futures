@@ -1,5 +1,4 @@
 use super::{Service, ServiceError, ServiceHealth, ServiceStats};
-use crate::core::PerformanceConfig;
 use std::sync::{Arc, RwLock, atomic::{AtomicBool, AtomicU64, Ordering}};
 use std::time::Instant;
 use std::collections::HashMap;

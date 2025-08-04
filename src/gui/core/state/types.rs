@@ -103,11 +103,10 @@ impl ComponentStateSnapshot {
             return Err("字段路径不能为空".to_string());
         }
         
-        self.set_field_recursive(&mut self.state_data, &parts, 0, value)
+        Self::set_field_recursive(&mut self.state_data, &parts, 0, value)
     }
     
     fn set_field_recursive(
-        &self,
         current: &mut serde_json::Value,
         parts: &[&str],
         index: usize,
@@ -145,12 +144,12 @@ impl ComponentStateSnapshot {
             match current {
                 serde_json::Value::Object(ref mut map) => {
                     let next_value = map.entry(part.to_string()).or_insert(serde_json::json!({}));
-                    self.set_field_recursive(next_value, parts, index + 1, value)
+                    Self::set_field_recursive(next_value, parts, index + 1, value)
                 }
                 serde_json::Value::Array(ref mut arr) => {
                     if let Ok(arr_index) = part.parse::<usize>() {
                         if arr_index < arr.len() {
-                            self.set_field_recursive(&mut arr[arr_index], parts, index + 1, value)
+                            Self::set_field_recursive(&mut arr[arr_index], parts, index + 1, value)
                         } else {
                             Err(format!("数组索引 {} 超出范围", arr_index))
                         }

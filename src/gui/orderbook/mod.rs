@@ -14,6 +14,7 @@ pub mod rendering;
 pub mod chart;
 pub mod popup;
 pub mod utils;
+pub mod aggregated_depth;
 
 // 重新导出主要类型
 pub use types::{UnifiedOrderBookRow, AggregatedOrderFlow, SmartScrollInfo};
@@ -22,3 +23,4 @@ pub use rendering::{TableRenderer, BarRenderer};
 pub use chart::{PriceChart, ChartConfig};
 pub use popup::{PopupManager, PopupType};
 pub use utils::{ScrollCalculator, DataExtractor};
+pub use aggregated_depth::{AggregatedDepthManager, AggregatedPriceLevel};

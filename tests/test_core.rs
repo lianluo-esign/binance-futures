@@ -3,7 +3,12 @@
 use flow_sight::orderbook::OrderBookManager;
 use serde_json::json;
 
-fn main() {
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_core_functionality() {
     println!("🧪 Testing core order book functionality (no audio, no GUI)...");
     
     let mut manager = OrderBookManager::new();
@@ -58,4 +63,5 @@ fn main() {
     println!("\n🎉 SUCCESS: All core functionality works without audio/GUI dependencies!");
     println!("🔇 ALSA audio dependency successfully removed");
     println!("📊 Order book incremental updates working correctly");
+    }
 }

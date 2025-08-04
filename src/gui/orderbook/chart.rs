@@ -46,9 +46,10 @@ pub struct PriceChart {
 
 impl PriceChart {
     pub fn new(config: ChartConfig) -> Self {
+        let max_data_points = config.max_data_points;
         Self {
             config,
-            price_history: VecDeque::with_capacity(config.max_data_points),
+            price_history: VecDeque::with_capacity(max_data_points),
             modal_open: false,
             logo_texture: None,
         }
@@ -131,7 +132,7 @@ impl PriceChart {
     fn render_price_line(&self, plot_ui: &mut egui_plot::PlotUi) {
         let points: PlotPoints = self.price_history
             .iter()
-            .map(|point| PlotPoint::new(point.timestamp, point.price))
+            .map(|point| [point.timestamp, point.price])
             .collect();
         
         let line = Line::new(points)
@@ -154,8 +155,8 @@ impl PriceChart {
             
             // 创建简单的成交量指示
             let volume_points = vec![
-                PlotPoint::new(point.timestamp, point.price - point.volume * 0.1),
-                PlotPoint::new(point.timestamp, point.price + point.volume * 0.1),
+                [point.timestamp, point.price - point.volume * 0.1],
+                [point.timestamp, point.price + point.volume * 0.1],
             ];
             
             let volume_line = Line::new(PlotPoints::from(volume_points))
@@ -170,7 +171,7 @@ impl PriceChart {
     fn render_current_price_marker(&self, plot_ui: &mut egui_plot::PlotUi) {
         if let Some(latest_point) = self.price_history.back() {
             let marker_points = vec![
-                PlotPoint::new(latest_point.timestamp, latest_point.price)
+                [latest_point.timestamp, latest_point.price]
             ];
             
             let marker = egui_plot::Points::new(PlotPoints::from(marker_points))
@@ -241,9 +242,9 @@ impl PriceChart {
         for point in &self.price_history {
             if point.volume > 1000.0 { // 大额交易阈值
                 if point.is_buy() {
-                    buy_signals.push(PlotPoint::new(point.timestamp, point.price));
+                    buy_signals.push([point.timestamp, point.price]);
                 } else {
-                    sell_signals.push(PlotPoint::new(point.timestamp, point.price));
+                    sell_signals.push([point.timestamp, point.price]);
                 }
             }
         }

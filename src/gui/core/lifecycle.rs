@@ -81,7 +81,7 @@ pub enum DependencyType {
 }
 
 /// 组件注册信息
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ComponentRegistration {
     /// 组件配置
     pub config: ComponentConfig,

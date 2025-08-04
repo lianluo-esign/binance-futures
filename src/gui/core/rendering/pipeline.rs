@@ -32,7 +32,7 @@ impl Default for RenderState {
 }
 
 /// 渲染统计
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct RenderStats {
     /// 渲染的命令总数
     pub commands_processed: u64,
@@ -50,6 +50,21 @@ pub struct RenderStats {
     pub fps: f32,
     /// 上次更新时间
     pub last_update: std::time::Instant,
+}
+
+impl Default for RenderStats {
+    fn default() -> Self {
+        Self {
+            commands_processed: 0,
+            components_rendered: 0,
+            batches_processed: 0,
+            render_time_us: 0,
+            gpu_usage_percent: 0.0,
+            vram_usage_bytes: 0,
+            fps: 0.0,
+            last_update: std::time::Instant::now(),
+        }
+    }
 }
 
 /// 渲染管道配置

@@ -171,7 +171,8 @@ impl MessageRouter {
         match &message.receiver {
             Some(receiver_id) => {
                 // 点对点消息
-                if let Some(sender) = channels.get(receiver_id) {
+                let receiver_id = receiver_id.clone();
+                if let Some(sender) = channels.get(&receiver_id) {
                     if let Err(_) = sender.send(message) {
                         return Err(ComponentError::CommunicationError(
                             format!("发送消息到服务 {} 失败", receiver_id)

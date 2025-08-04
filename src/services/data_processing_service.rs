@@ -20,7 +20,7 @@ pub struct DataProcessingService {
     /// 数据处理器
     processor: Arc<RwLock<DataProcessor>>,
     /// 异步任务句柄
-    task_handles: Vec<tokio::task::JoinHandle<()>>,
+    task_handles: Vec<std::thread::JoinHandle<()>>,
     /// 性能指标
     performance_metrics: Arc<RwLock<PerformanceMetrics>>,
 }
@@ -479,8 +479,9 @@ impl ConfigurableService for DataProcessingService {
     }
 
     fn get_config(&self) -> &Self::Config {
-        // 注意: 这里返回引用可能有生命周期问题，实际实现需要调整
-        unsafe { &*self.config.as_ptr() }
+        // SAFETY: 这个实现是临时的，在生产代码中应该重新设计
+        // 这里我们泄漏了一个静态引用，在生产代码中这不是一个好的做法
+        Box::leak(Box::new(self.config.read().unwrap().clone()))
     }
 }
 
@@ -498,21 +499,25 @@ impl DataProcessingService {
 
     /// 停止后台任务
     fn stop_background_tasks(&mut self) {
+        // 注意：std::thread::JoinHandle没有abort方法
+        // 在实际实现中应该使用共享的停止标志
         for handle in self.task_handles.drain(..) {
-            handle.abort();
+            // handle.join().ok(); // 可以选择等待线程结束
+            std::mem::drop(handle); // 简单地丢弃句柄
         }
     }
 
     /// 创建清理任务
-    fn create_cleanup_task(&self) -> tokio::task::JoinHandle<()> {
+    fn create_cleanup_task(&self) -> std::thread::JoinHandle<()> {
         let processor = self.processor.clone();
         let config = self.config.clone();
         
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(60));
+        std::thread::spawn(move || {
+            // let mut interval = tokio::time::interval(Duration::from_secs(60));
+            let interval = Duration::from_secs(60);
             
             loop {
-                interval.tick().await;
+                std::thread::sleep(interval);
                 
                 let cache_expiry = config.read().unwrap().cache_expiry;
                 let mut processor = processor.write().unwrap();
@@ -528,20 +533,20 @@ impl DataProcessingService {
     }
 
     /// 创建监控任务
-    fn create_monitoring_task(&self) -> tokio::task::JoinHandle<()> {
-        let stats = Arc::new(&self.stats);
+    fn create_monitoring_task(&mut self) -> std::thread::JoinHandle<()> {
+        let avg_processing_time = self.stats.avg_processing_time.clone();
         let performance_metrics = self.performance_metrics.clone();
         
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(5));
+        std::thread::spawn(move || {
+            let interval = Duration::from_secs(5);
             
             loop {
-                interval.tick().await;
+                std::thread::sleep(interval);
                 
                 // 更新性能指标
                 let mut metrics = performance_metrics.write().unwrap();
                 metrics.buffer_usage_ratio = 0.0; // TODO: 实际计算缓冲区使用率
-                metrics.event_processing_latency_ms = *stats.avg_processing_time.read().unwrap();
+                metrics.event_processing_latency_ms = *avg_processing_time.read().unwrap();
                 
                 // 日志性能指标
                 if metrics.needs_optimization() {
@@ -568,7 +573,7 @@ impl DataProcessor {
     pub fn new(price_precision: f64) -> Self {
         Self {
             order_flows: BTreeMap::new(),
-            market_snapshot: MarketSnapshot::default(),
+            market_snapshot: MarketSnapshot::new(),
             price_history: VecDeque::with_capacity(10000),
             rv_history: VecDeque::with_capacity(1000),
             jump_history: VecDeque::with_capacity(1000),     

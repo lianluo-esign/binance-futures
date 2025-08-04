@@ -5,7 +5,11 @@
       "Bash(cargo check:*)",
       "Bash(mkdir:*)",
       "Bash(cp:*)",
-      "Bash(timeout 30s cargo check --features gui)"
+      "Bash(timeout 30s cargo check --features gui)",
+      "Bash(cargo:*)",
+      "Bash(rustc --version)",
+      "Bash(timeout 15s cargo run --features gui)",
+      "Bash(timeout 20s cargo run --features gui)"
     ],
     "deny": []
   }

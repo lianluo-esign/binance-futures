@@ -215,9 +215,9 @@ impl ServiceRegistry {
     pub fn create_service<T: Service + 'static>(
         &self,
         service_type: &str,
-        config: &dyn std::any::Any,
+        _config: &dyn std::any::Any,
     ) -> Result<Box<T>, ServiceError> {
-        let factory = self.factories.get(service_type)
+        let _factory = self.factories.get(service_type)
             .ok_or_else(|| ServiceError::ConfigurationError(
                 format!("未找到服务类型: {}", service_type)
             ))?;

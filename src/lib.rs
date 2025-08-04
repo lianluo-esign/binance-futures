@@ -21,7 +21,7 @@ pub use websocket::{WebSocketManager, WebSocketConnection};
 pub use app::ReactiveApp;
 pub use services::{ServiceManager, Service, ServiceError, ServiceHealth};
 #[cfg(feature = "gui")]
-pub use gui::{ThreadedTradingGUI, GUIState, OrderBookUIData, MarketStats, PerformanceInfo};
+pub use gui::{ThreadedTradingGUI};
 
 /// 库的版本信息
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
