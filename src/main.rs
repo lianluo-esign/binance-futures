@@ -163,8 +163,8 @@ fn ui(f: &mut Frame, app: &ReactiveApp, volume_profile_widget: &VolumeProfileWid
     let horizontal_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Percentage(40), // 订单薄占40%
-            Constraint::Percentage(40), // Volume Profile占40%
+            Constraint::Percentage(30), // 订单薄占40%
+            Constraint::Percentage(50), // Volume Profile占40%
             Constraint::Percentage(20), // 市场信号占20%
         ])
         .split(size);
@@ -211,39 +211,23 @@ fn render_volume_profile(
     volume_profile_widget: &VolumeProfileWidget, 
     area: ratatui::layout::Rect
 ) {
-    // 获取当前可见的价格范围（与orderbook同步）
-    let visible_price_range = get_visible_price_range(app);
+    // 根据实际widget区域高度计算可见行数
+    let actual_visible_rows = calculate_visible_rows_from_area(area);
+    
+    // 获取当前可见的价格范围（基于实际widget高度）
+    let visible_price_range = get_visible_price_range_for_area(app, actual_visible_rows);
+    
+    // 获取最新交易价格用于高亮显示
+    let latest_trade_price = app.get_market_snapshot().current_price;
     
     // 渲染Volume Profile widget
-    volume_profile_widget.render(f, area, &visible_price_range);
+    volume_profile_widget.render(f, area, &visible_price_range, latest_trade_price);
 }
 
-/// 获取当前可见的价格范围（与orderbook完全同步）
+/// 获取当前可见的价格范围（为Volume Profile动态生成价格层级）
+/// 修复：动态扩展100个层级上下，跟随当前价格变化
 fn get_visible_price_range(app: &ReactiveApp) -> Vec<f64> {
-    // 直接复制orderbook_renderer.rs中prepare_render_data的逻辑
     let snapshot = app.get_market_snapshot();
-    let order_flows = app.get_orderbook_manager().get_order_flows();
-    let price_precision = app.get_price_precision();
-
-    // 应用价格精度聚合，处理bid/ask冲突 - 与orderbook完全相同
-    let aggregated_order_flows = binance_futures::orderbook::display_formatter::aggregate_price_levels_with_conflict_resolution(
-        &order_flows, 
-        snapshot.best_bid_price,
-        snapshot.best_ask_price,
-        price_precision
-    );
-
-    // 构建价格层级列表 - 与orderbook完全相同
-    let mut price_levels: Vec<_> = aggregated_order_flows.keys().collect();
-    price_levels.sort_by(|a, b| b.cmp(a)); // 从高价到低价排序
-
-    let max_levels = app.get_max_visible_rows().min(price_levels.len());
-    let all_price_levels: Vec<f64> = price_levels.iter()
-        .take(max_levels)
-        .map(|k| k.0)
-        .collect();
-
-    // 计算可见范围 - 复制orderbook_renderer.rs中calculate_visible_range的逻辑
     let visible_rows = get_actual_visible_rows();
     
     // 优先使用当前交易价格，如果没有则使用best_bid，最后使用best_ask
@@ -251,12 +235,84 @@ fn get_visible_price_range(app: &ReactiveApp) -> Vec<f64> {
         .or(snapshot.best_bid_price)
         .or(snapshot.best_ask_price);
         
-    if let Some(price) = reference_price {
-        let center_offset = calculate_center_offset(price, &all_price_levels, visible_rows);
-        let end_offset = (center_offset + visible_rows).min(all_price_levels.len());
-        all_price_levels[center_offset..end_offset].to_vec()
+    if let Some(center_price) = reference_price {
+        // 动态生成价格层级：以当前价格为中心，上下各扩展100个层级
+        // 使用1美元精度（与VolumeProfileManager的price_precision保持一致）
+        let price_precision = 1.0;
+        
+        // 计算中心价格的聚合值（向下取整到最近的美元）
+        let center_aggregated = (center_price / price_precision).floor() * price_precision;
+        
+        // 动态扩展：上下各100个层级，总共201个层级（包含中心价格）
+        let levels_above = 100;
+        let levels_below = 100;
+        let total_levels = levels_above + levels_below + 1;
+        
+        let mut price_levels = Vec::with_capacity(total_levels);
+        
+        // 从高价到低价生成价格层级
+        // 上方100个层级
+        for i in (1..=levels_above).rev() {
+            let price = center_aggregated + (i as f64) * price_precision;
+            price_levels.push(price);
+        }
+        
+        // 中心价格
+        price_levels.push(center_aggregated);
+        
+        // 下方100个层级
+        for i in 1..=levels_below {
+            let price = center_aggregated - (i as f64) * price_precision;
+            price_levels.push(price);
+        }
+        
+        // 计算可见范围：显示所有生成的价格层级，或者根据可见行数截取
+        if visible_rows >= total_levels {
+            // 如果可见行数足够，显示所有层级
+            price_levels
+        } else {
+            // 如果可见行数不够，以中心价格为基准截取可见范围
+            let center_index = levels_above; // 中心价格在数组中的索引
+            let half_visible = visible_rows / 2;
+            
+            let start_index = center_index.saturating_sub(half_visible);
+            let end_index = (start_index + visible_rows).min(price_levels.len());
+            
+            price_levels[start_index..end_index].to_vec()
+        }
     } else {
-        all_price_levels.into_iter().take(visible_rows).collect()
+        // 如果没有参考价格，生成一个默认的价格范围（以110000为中心）
+        let default_center = 110000.0;
+        let price_precision = 1.0;
+        let levels_above = 100;
+        let levels_below = 100;
+        let total_levels = levels_above + levels_below + 1;
+        
+        let mut price_levels = Vec::with_capacity(total_levels);
+        
+        // 从高价到低价生成价格层级
+        for i in (1..=levels_above).rev() {
+            let price = default_center + (i as f64) * price_precision;
+            price_levels.push(price);
+        }
+        
+        price_levels.push(default_center);
+        
+        for i in 1..=levels_below {
+            let price = default_center - (i as f64) * price_precision;
+            price_levels.push(price);
+        }
+        
+        if visible_rows >= total_levels {
+            price_levels
+        } else {
+            let center_index = levels_above;
+            let half_visible = visible_rows / 2;
+            let start_index = center_index.saturating_sub(half_visible);
+            let end_index = (start_index + visible_rows).min(price_levels.len());
+            
+            price_levels[start_index..end_index].to_vec()
+        }
     }
 }
 
@@ -310,6 +366,92 @@ fn find_price_center_offset(target_price: f64, price_levels: &[f64], visible_row
     let center_offset = closest_index.saturating_sub(visible_rows / 2);
     let max_offset = price_levels.len().saturating_sub(visible_rows);
     center_offset.min(max_offset)
+}
+
+/// 根据widget区域计算实际可见行数
+fn calculate_visible_rows_from_area(area: ratatui::layout::Rect) -> usize {
+    // 减去边框（上下各1行）和表头（1行）
+    let available_height = area.height.saturating_sub(3); // 边框2行 + 表头1行
+    available_height as usize
+}
+
+/// 获取基于实际widget区域的价格范围
+fn get_visible_price_range_for_area(app: &ReactiveApp, visible_rows: usize) -> Vec<f64> {
+    let snapshot = app.get_market_snapshot();
+    
+    // 优先使用当前交易价格，如果没有则使用best_bid，最后使用best_ask
+    let reference_price = snapshot.current_price
+        .or(snapshot.best_bid_price)
+        .or(snapshot.best_ask_price);
+        
+    if let Some(center_price) = reference_price {
+        // 动态生成价格层级：以当前价格为中心，上下各扩展足够的层级
+        // 使用1美元精度（与VolumeProfileManager的price_precision保持一致）
+        let price_precision = 1.0;
+        
+        // 计算中心价格的聚合值（向下取整到最近的美元）
+        let center_aggregated = (center_price / price_precision).floor() * price_precision;
+        
+        // 根据可见行数动态计算需要的层级数
+        // 确保有足够的层级来填满整个widget
+        let half_visible = visible_rows / 2;
+        let levels_above = half_visible + 50; // 额外50层级作为缓冲
+        let levels_below = half_visible + 50;
+        let total_levels = levels_above + levels_below + 1;
+        
+        let mut price_levels = Vec::with_capacity(total_levels);
+        
+        // 从高价到低价生成价格层级
+        // 上方层级
+        for i in (1..=levels_above).rev() {
+            let price = center_aggregated + (i as f64) * price_precision;
+            price_levels.push(price);
+        }
+        
+        // 中心价格
+        price_levels.push(center_aggregated);
+        
+        // 下方层级
+        for i in 1..=levels_below {
+            let price = center_aggregated - (i as f64) * price_precision;
+            price_levels.push(price);
+        }
+        
+        // 截取可见范围：以中心价格为基准
+        let center_index = levels_above; // 中心价格在数组中的索引
+        let start_index = center_index.saturating_sub(half_visible);
+        let end_index = (start_index + visible_rows).min(price_levels.len());
+        
+        price_levels[start_index..end_index].to_vec()
+    } else {
+        // 如果没有参考价格，生成一个默认的价格范围（以110000为中心）
+        let default_center = 110000.0;
+        let price_precision = 1.0;
+        let half_visible = visible_rows / 2;
+        let levels_above = half_visible + 50;
+        let levels_below = half_visible + 50;
+        
+        let mut price_levels = Vec::with_capacity(levels_above + levels_below + 1);
+        
+        // 从高价到低价生成价格层级
+        for i in (1..=levels_above).rev() {
+            let price = default_center + (i as f64) * price_precision;
+            price_levels.push(price);
+        }
+        
+        price_levels.push(default_center);
+        
+        for i in 1..=levels_below {
+            let price = default_center - (i as f64) * price_precision;
+            price_levels.push(price);
+        }
+        
+        let center_index = levels_above;
+        let start_index = center_index.saturating_sub(half_visible);
+        let end_index = (start_index + visible_rows).min(price_levels.len());
+        
+        price_levels[start_index..end_index].to_vec()
+    }
 }
 
 

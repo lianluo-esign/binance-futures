@@ -187,7 +187,7 @@ impl VolumeProfileWidget {
     }
 
     /// 渲染Volume Profile widget
-    pub fn render(&self, f: &mut ratatui::Frame, area: ratatui::layout::Rect, visible_price_range: &[f64]) {
+    pub fn render(&self, f: &mut ratatui::Frame, area: ratatui::layout::Rect, visible_price_range: &[f64], latest_trade_price: Option<f64>) {
         use ratatui::{
             layout::Constraint,
             style::{Color, Modifier, Style},
@@ -209,9 +209,8 @@ impl VolumeProfileWidget {
         for &price in visible_price_range {
             let price_key = ordered_float::OrderedFloat(price);
             
-            // 价格列
-            let price_cell = Cell::from(format!("{:.0}", price))
-                .style(Style::default().fg(Color::White));
+            // 价格列 - 检查是否为最新交易价格，如果是则显示黄色高亮
+            let price_cell = self.create_price_cell_with_highlight(price, latest_trade_price);
             
             // Volume Profile柱状图列
             let volume_cell = if let Some(volume_level) = volume_data.price_volumes.get(&price_key) {
@@ -257,16 +256,16 @@ impl VolumeProfileWidget {
             return Cell::from("");
         }
 
-        // 计算色块数量：每个色块代表1 BTC，最大100个色块
+        // 计算竖杠数量：每个竖杠代表0.1 BTC，最大500个竖杠（对应50 BTC）
         let btc_volume = volume_level.total_volume; // 假设成交量单位就是BTC
-        let block_count = (btc_volume.round() as u16).min(100).max(1); // 最小1个，最大100个色块
+        let block_count = ((btc_volume / 0.1).round() as u16).min(500).max(1); // 每个竖杠代表0.1 BTC，最大500个
         
-        // 创建蓝色色块bar
-        let bar_chars = "█".repeat(block_count as usize);
+        // 创建蓝色竖杠bar
+        let bar_chars = "|".repeat(block_count as usize);
         
         // 计算剩余空间用于填充
-        let remaining_space = if block_count < 100 {
-            100 - block_count
+        let remaining_space = if block_count < 500 {
+            500 - block_count
         } else {
             0
         };
@@ -283,7 +282,7 @@ impl VolumeProfileWidget {
             format!("{:.2}", btc_volume)
         };
 
-        // 组合显示：色块bar + 填充空间 + 成交量数值
+        // 组合显示：竖杠bar + 填充空间 + 成交量数值
         let display_text = format!("{}{} {}", bar_chars, padding, volume_text);
         
         Cell::from(display_text)
@@ -293,6 +292,28 @@ impl VolumeProfileWidget {
     /// 创建空的成交量单元格
     fn create_empty_volume_cell(&self) -> Cell {
         Cell::from(" ".repeat(self.bar_width as usize + 10))
+    }
+
+    /// 创建带高亮的价格单元格
+    fn create_price_cell_with_highlight(&self, price: f64, latest_trade_price: Option<f64>) -> Cell {
+        let price_text = format!("{:.0}", price);
+        
+        // 检查是否为最新交易价格（使用1美元精度聚合匹配）
+        if let Some(trade_price) = latest_trade_price {
+            // 聚合到1美元精度进行比较
+            let aggregated_current_price = (price / 1.0).floor() * 1.0;
+            let aggregated_trade_price = (trade_price / 1.0).floor() * 1.0;
+            
+            if (aggregated_current_price - aggregated_trade_price).abs() < 0.001 {
+                // 最新交易价格，显示黄色高亮
+                return Cell::from(price_text)
+                    .style(Style::default().fg(Color::Yellow).add_modifier(ratatui::style::Modifier::BOLD));
+            }
+        }
+        
+        // 普通价格，显示白色
+        Cell::from(price_text)
+            .style(Style::default().fg(Color::White))
     }
 }
 
@@ -325,16 +346,16 @@ impl VolumeProfileRenderer {
             return Cell::from("");
         }
 
-        // 计算色块数量：每个色块代表1 BTC，最大100个色块
+        // 计算竖杠数量：每个竖杠代表0.1 BTC，最大500个竖杠（对应50 BTC）
         let btc_volume = volume_level.total_volume; // 假设成交量单位就是BTC
-        let block_count = (btc_volume.round() as u16).min(100).max(1); // 最小1个，最大100个色块
+        let block_count = ((btc_volume / 0.1).round() as u16).min(500).max(1); // 每个竖杠代表0.1 BTC，最大500个
         
-        // 创建蓝色色块bar
-        let bar_chars = "█".repeat(block_count as usize);
+        // 创建蓝色竖杠bar
+        let bar_chars = "|".repeat(block_count as usize);
         
         // 计算剩余空间用于填充
-        let remaining_space = if block_count < 100 {
-            100 - block_count
+        let remaining_space = if block_count < 500 {
+            500 - block_count
         } else {
             0
         };
@@ -351,7 +372,7 @@ impl VolumeProfileRenderer {
             format!("{:.2}", btc_volume)
         };
 
-        // 组合显示：色块bar + 填充空间 + 成交量数值
+        // 组合显示：竖杠bar + 填充空间 + 成交量数值
         let display_text = format!("{}{} {}", bar_chars, padding, volume_text);
         
         Cell::from(display_text)
