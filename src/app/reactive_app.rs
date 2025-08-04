@@ -6,6 +6,7 @@ use crate::events::{Event, EventType, EventBus, EventDispatcher, LockFreeEventDi
 use crate::orderbook::{OrderBookManager, MarketSnapshot};
 use crate::websocket::{WebSocketManager, WebSocketConfig};
 use crate::monitoring::InternalMonitor;
+use crate::gui::volume_profile::VolumeProfileManager;
 use crate::Config;
 
 /// 响应式应用主结构（基于EventBus架构）
@@ -16,6 +17,7 @@ pub struct ReactiveApp {
     // 业务组件
     orderbook_manager: OrderBookManager,
     websocket_manager: WebSocketManager,
+    volume_profile_manager: VolumeProfileManager,
     
     // 应用状态
     config: Config,
@@ -74,6 +76,7 @@ impl ReactiveApp {
             event_dispatcher,
             orderbook_manager,
             websocket_manager,
+            volume_profile_manager: VolumeProfileManager::new(),
             config,
             running: false,
             last_update: now,
@@ -247,6 +250,10 @@ impl ReactiveApp {
             }
             // 同时更新订单簿管理器
             self.orderbook_manager.handle_trade(&event_data);
+            
+            // 更新Volume Profile数据
+            self.update_volume_profile_from_trade(&event_data);
+            
             EventType::Trade(event_data)
         } else if stream.contains("bookTicker") {
             if start_time.elapsed() > Duration::from_millis(100) {
@@ -555,6 +562,27 @@ impl ReactiveApp {
         &self.orderbook_manager
     }
 
+    /// 获取Volume Profile管理器
+    pub fn get_volume_profile_manager(&self) -> &VolumeProfileManager {
+        &self.volume_profile_manager
+    }
+
+    /// 从交易数据更新Volume Profile
+    fn update_volume_profile_from_trade(&mut self, data: &serde_json::Value) {
+        if let (Some(price_str), Some(qty_str), Some(is_buyer_maker)) = (
+            data["p"].as_str(),
+            data["q"].as_str(),
+            data["m"].as_bool(),
+        ) {
+            if let (Ok(price), Ok(qty)) = (price_str.parse::<f64>(), qty_str.parse::<f64>()) {
+                let side = if is_buyer_maker { "sell" } else { "buy" };
+                
+                // 更新Volume Profile数据
+                self.volume_profile_manager.handle_trade(price, qty, side);
+            }
+        }
+    }
+
     pub fn get_max_visible_rows(&self) -> usize {
         self.config.max_visible_rows
     }
@@ -849,38 +877,6 @@ impl ReactiveApp {
         }
     }
 
-    /// 更新价格跟踪逻辑（主动跟随当前交易价格）
-    fn update_price_tracking(&mut self) {
-        if !self.price_tracking_enabled {
-            return; // 如果禁用价格跟踪，直接返回
-        }
-
-        // 获取当前交易价格
-        let market_snapshot = self.orderbook_manager.get_market_snapshot();
-        let current_trade_price = market_snapshot.current_price;
-
-        if let Some(current_price) = current_trade_price {
-            // 检查价格是否发生了显著变化
-            let should_recenter = match self.last_tracked_price {
-                Some(last_price) => {
-                    let price_change = (current_price - last_price).abs();
-                    price_change >= self.price_change_threshold
-                }
-                None => true, // 第一次设置价格
-            };
-
-            if should_recenter {
-                // 更新跟踪的价格
-                self.last_tracked_price = Some(current_price);
-
-                // 触发窗口重新居中
-                self.center_window_on_price(current_price);
-
-                log::debug!("价格跟踪: 当前价格 {:.2} 触发窗口重新居中", current_price);
-            }
-        }
-    }
-
     /// 将窗口居中到指定价格
     fn center_window_on_price(&mut self, target_price: f64) {
         // 应用价格精度聚合到目标价格
@@ -954,6 +950,48 @@ impl ReactiveApp {
 
             log::debug!("窗口居中: 目标价格 {:.2} 位于索引 {}, 新滚动偏移 {}",
                        aggregated_target_price, index, new_scroll);
+        }
+    }
+
+    /// 更新价格跟踪逻辑（主动跟随当前交易价格）- 改进版本
+    fn update_price_tracking(&mut self) {
+        if !self.price_tracking_enabled {
+            return; // 如果禁用价格跟踪，直接返回
+        }
+
+        // 获取市场快照
+        let market_snapshot = self.orderbook_manager.get_market_snapshot();
+        
+        // 优先使用当前交易价格，如果没有则使用最优买价
+        let reference_price = market_snapshot.current_price
+            .or(market_snapshot.best_bid_price)
+            .or(market_snapshot.best_ask_price);
+
+        if let Some(current_price) = reference_price {
+            // 检查价格是否发生了显著变化
+            let should_recenter = match self.last_tracked_price {
+                Some(last_price) => {
+                    let price_change = (current_price - last_price).abs();
+                    // 对于价格下跌，使用更敏感的阈值
+                    let threshold = if current_price < last_price {
+                        self.price_change_threshold * 0.5 // 价格下跌时使用更小的阈值
+                    } else {
+                        self.price_change_threshold
+                    };
+                    price_change >= threshold
+                }
+                None => true, // 第一次设置价格
+            };
+
+            if should_recenter {
+                // 更新跟踪的价格
+                self.last_tracked_price = Some(current_price);
+
+                // 触发窗口重新居中
+                self.center_window_on_price(current_price);
+
+                log::debug!("价格跟踪: 参考价格 {:.2} 触发窗口重新居中", current_price);
+            }
         }
     }
 

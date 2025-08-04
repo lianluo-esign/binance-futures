@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo check:*)",
+      "Bash(cargo:*)",
+      "Bash(rustc:*)",
+      "Bash(.test_btc_bars.exe)",
+      "Bash(./test_btc_bars.exe)",
+      "Bash(rm:*)",
+      "Bash(./test_colored_bars.exe)",
+      "Bash(./test_colored_bars.exe)"
+    ],
+    "deny": []
+  }
+}

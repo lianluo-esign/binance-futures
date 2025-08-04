@@ -68,10 +68,13 @@ impl OrderBookManager {
         }
     }
 
-    /// 处理深度更新
+    /// 处理深度更新 - 改进版本，更准确地维护最优价格
     pub fn handle_depth_update(&mut self, data: &Value) {
         let current_time = self.get_current_timestamp();
         self.stats.total_depth_updates += 1;
+        
+        let mut bid_prices_updated = Vec::new();
+        let mut ask_prices_updated = Vec::new();
         
         // 处理买单
         if let Some(bids) = data["b"].as_array() {
@@ -82,9 +85,8 @@ impl OrderBookManager {
                         let order_flow = self.order_flows.entry(price_ordered).or_insert_with(OrderFlow::new);
                         order_flow.update_price_level(qty, 0.0, current_time);
                         
-                        // 更新最优买价
-                        if self.best_bid_price.map_or(true, |best| price > best) {
-                            self.best_bid_price = Some(price);
+                        if qty > 0.0 {
+                            bid_prices_updated.push(price);
                         }
                     }
                 }
@@ -100,14 +102,16 @@ impl OrderBookManager {
                         let order_flow = self.order_flows.entry(price_ordered).or_insert_with(OrderFlow::new);
                         order_flow.update_price_level(0.0, qty, current_time);
                         
-                        // 更新最优卖价
-                        if self.best_ask_price.map_or(true, |best| price < best) {
-                            self.best_ask_price = Some(price);
+                        if qty > 0.0 {
+                            ask_prices_updated.push(price);
                         }
                     }
                 }
             }
         }
+        
+        // 重新计算最优价格，确保准确性
+        self.recalculate_best_prices();
         
         self.update_market_snapshot();
     }
@@ -297,6 +301,61 @@ impl OrderBookManager {
         };
         
         self.stats.last_update_time = self.market_snapshot.timestamp;
+    }
+
+    /// 重新计算最优价格 - 确保价格准确性，特别是在价格下跌时
+    fn recalculate_best_prices(&mut self) {
+        let mut new_best_bid: Option<f64> = None;
+        let mut new_best_ask: Option<f64> = None;
+
+        // 遍历所有订单流，找到真正的最优价格
+        for (price_key, order_flow) in &self.order_flows {
+            let price = price_key.0;
+
+            // 检查买单
+            if order_flow.bid_ask.bid > 0.0 {
+                if new_best_bid.map_or(true, |best| price > best) {
+                    new_best_bid = Some(price);
+                }
+            }
+
+            // 检查卖单
+            if order_flow.bid_ask.ask > 0.0 {
+                if new_best_ask.map_or(true, |best| price < best) {
+                    new_best_ask = Some(price);
+                }
+            }
+        }
+
+        // 更新最优价格，但要确保合理性
+        if let Some(bid) = new_best_bid {
+            if let Some(ask) = new_best_ask {
+                // 确保bid < ask，这是基本的市场规则
+                if bid < ask {
+                    self.best_bid_price = Some(bid);
+                    self.best_ask_price = Some(ask);
+                } else {
+                    // 如果出现bid >= ask的异常情况，保持原有价格或使用当前交易价格
+                    if let Some(current) = self.current_price {
+                        // 使用当前交易价格作为参考，设置合理的bid/ask
+                        self.best_bid_price = Some(current - 0.5);
+                        self.best_ask_price = Some(current + 0.5);
+                    }
+                }
+            } else {
+                self.best_bid_price = Some(bid);
+            }
+        } else if let Some(ask) = new_best_ask {
+            self.best_ask_price = Some(ask);
+        }
+
+        // 如果没有找到任何有效的bid/ask，但有当前交易价格，使用它作为参考
+        if self.best_bid_price.is_none() && self.best_ask_price.is_none() {
+            if let Some(current) = self.current_price {
+                self.best_bid_price = Some(current - 0.5);
+                self.best_ask_price = Some(current + 0.5);
+            }
+        }
     }
 
     /// 获取当前时间戳
