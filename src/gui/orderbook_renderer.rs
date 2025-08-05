@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use ordered_float::OrderedFloat;
 
 use crate::app::ReactiveApp;
-use crate::orderbook::{OrderFlow, MarketSnapshot};
+use crate::orderbook::{OrderFlow, MarketSnapshot, OrderFlowDisplayData};
 use super::bar_chart::BarChartRenderer;
 use super::price_tracker::PriceTracker;
 use super::layout_manager::LayoutManager;
@@ -32,6 +32,9 @@ pub struct OrderBookRenderData {
     pub max_bid_volume: f64,
     pub max_ask_volume: f64,
     pub visible_range: (usize, usize),
+    pub order_flow_data: Vec<OrderFlowDisplayData>,
+    pub max_buy_flow_volume: f64,
+    pub max_sell_flow_volume: f64,
 }
 
 /// 价格层级数据结构
@@ -100,11 +103,24 @@ impl OrderBookRenderer {
         // 准备渲染数据
         let render_data = self.prepare_render_data(app);
 
-        // 更新价格跟踪器 - 使用最准确的参考价格
-        let reference_price = render_data.current_trade_price
-            .or(render_data.best_bid_price)
+        // 更新价格跟踪器 - 使用best_bid作为主要参考价格
+        let reference_price = render_data.best_bid_price
+            .or(render_data.current_trade_price)
             .or(render_data.best_ask_price);
-        self.price_tracker.update_tracking(reference_price);
+        
+        // 确保参考价格在聚合后的价格列表中存在
+        if let Some(price) = reference_price {
+            let price_levels: Vec<f64> = render_data.price_levels.iter().map(|level| level.price).collect();
+            let validated_price = if self.price_tracker.is_price_in_range(price, &price_levels) {
+                Some(price)
+            } else {
+                // 使用聚合后的价格
+                Some((price / 1.0).floor() * 1.0)
+            };
+            self.price_tracker.update_tracking(validated_price);
+        } else {
+            self.price_tracker.update_tracking(reference_price);
+        }
 
         // 计算可见范围
         let visible_rows = inner_area.height.saturating_sub(1) as usize; // 减去表头
@@ -132,12 +148,27 @@ impl OrderBookRenderer {
         let mut price_levels: Vec<_> = aggregated_order_flows.keys().collect();
         price_levels.sort_by(|a, b| b.cmp(a)); // 从高价到低价排序
 
+        // 确保关键价格层级始终被包含
+        let essential_prices = self.get_essential_price_levels(
+            &price_levels,
+            snapshot.best_bid_price,
+            snapshot.best_ask_price,
+            snapshot.current_price
+        );
+
         let max_levels = app.get_max_visible_rows().min(price_levels.len());
         let mut levels = Vec::new();
         let mut max_bid_volume = 0.0;
         let mut max_ask_volume = 0.0;
 
-        for &price_key in price_levels.iter().take(max_levels) {
+        // 使用智能选择的价格层级，确保关键价格不被截断
+        let selected_price_keys = self.select_price_levels_with_essentials(
+            &price_levels,
+            &essential_prices,
+            max_levels
+        );
+
+        for &price_key in selected_price_keys.iter() {
             let price = price_key.0;
             let order_flow = &aggregated_order_flows[price_key];
 
@@ -168,6 +199,12 @@ impl OrderBookRenderer {
             });
         }
 
+        // 获取订单流数据
+        let visible_prices: Vec<f64> = levels.iter().map(|level| level.price).collect();
+        let order_flow_data = app.get_orderbook_manager().get_order_flow_data(&visible_prices);
+        let (max_buy_flow_volume, max_sell_flow_volume) = app.get_orderbook_manager().get_order_flow_max_volumes();
+        
+
         OrderBookRenderData {
             price_levels: levels,
             best_bid_price: snapshot.best_bid_price,
@@ -176,23 +213,145 @@ impl OrderBookRenderer {
             max_bid_volume,
             max_ask_volume,
             visible_range: (0, 0), // 将在后续计算
+            order_flow_data,
+            max_buy_flow_volume,
+            max_sell_flow_volume,
         }
     }
 
     /// 计算可见范围 - 修复价格下跌时的居中问题
     fn calculate_visible_range(&mut self, render_data: &OrderBookRenderData, visible_rows: usize) -> (usize, usize) {
-        // 优先使用当前交易价格，如果没有则使用best_bid，最后使用best_ask
-        let reference_price = render_data.current_trade_price
-            .or(render_data.best_bid_price)
+        // 优先使用best_bid作为参考价格（更稳定），然后是当前交易价格，最后是best_ask
+        let reference_price = render_data.best_bid_price
+            .or(render_data.current_trade_price)
             .or(render_data.best_ask_price);
             
         if let Some(price) = reference_price {
             let price_levels: Vec<f64> = render_data.price_levels.iter().map(|level| level.price).collect();
-            let center_offset = self.price_tracker.calculate_center_offset(price, &price_levels, visible_rows);
+
+            // 确保参考价格在价格列表的有效范围内
+            let center_offset = if self.price_tracker.is_price_in_range(price, &price_levels) {
+                self.price_tracker.calculate_center_offset(price, &price_levels, visible_rows)
+            } else {
+                // 如果参考价格不在范围内，使用best_bid或best_ask的聚合价格
+                let fallback_price = self.find_closest_aggregated_price(
+                    price,
+                    render_data.best_bid_price,
+                    render_data.best_ask_price,
+                    &price_levels
+                );
+                self.price_tracker.calculate_center_offset(fallback_price, &price_levels, visible_rows)
+            };
+            
             let end_offset = (center_offset + visible_rows).min(render_data.price_levels.len());
-            (center_offset, end_offset)
+            
+            // 边界检查：确保关键价格在可见范围内
+            let validated_range = self.validate_visible_range(
+                (center_offset, end_offset),
+                render_data,
+                visible_rows
+            );
+            
+            validated_range
         } else {
             (0, visible_rows.min(render_data.price_levels.len()))
+        }
+    }
+
+    /// 查找最接近的聚合价格
+    fn find_closest_aggregated_price(
+        &self,
+        target_price: f64,
+        best_bid_price: Option<f64>,
+        best_ask_price: Option<f64>,
+        price_levels: &[f64],
+    ) -> f64 {
+        // 首先尝试使用best_bid或best_ask的聚合价格
+        if let Some(bid) = best_bid_price {
+            let aggregated_bid = (bid / 1.0).floor() * 1.0;
+            if price_levels.iter().any(|&p| (p - aggregated_bid).abs() < 0.01) {
+                return aggregated_bid;
+            }
+        }
+        
+        if let Some(ask) = best_ask_price {
+            let aggregated_ask = (ask / 1.0).floor() * 1.0;
+            if price_levels.iter().any(|&p| (p - aggregated_ask).abs() < 0.01) {
+                return aggregated_ask;
+            }
+        }
+        
+        // 如果都找不到，返回最接近的价格层级
+        price_levels.iter()
+            .min_by(|&&a, &&b| {
+                let dist_a = (a - target_price).abs();
+                let dist_b = (b - target_price).abs();
+                dist_a.partial_cmp(&dist_b).unwrap()
+            })
+            .copied()
+            .unwrap_or(target_price)
+    }
+
+    /// 验证可见范围，确保关键价格在范围内
+    fn validate_visible_range(
+        &self,
+        proposed_range: (usize, usize),
+        render_data: &OrderBookRenderData,
+        visible_rows: usize,
+    ) -> (usize, usize) {
+        let (start, end) = proposed_range;
+        let price_levels = &render_data.price_levels;
+        
+        // 检查best_bid和best_ask是否在可见范围内
+        let mut adjustment_needed = false;
+        let mut required_indices = Vec::new();
+        
+        // 查找best_bid在价格列表中的索引
+        if let Some(best_bid) = render_data.best_bid_price {
+            if let Some(index) = price_levels.iter().position(|level| {
+                (level.price - (best_bid / 1.0).floor() * 1.0).abs() < 0.01
+            }) {
+                if index < start || index >= end {
+                    required_indices.push(index);
+                    adjustment_needed = true;
+                }
+            }
+        }
+        
+        // 查找best_ask在价格列表中的索引
+        if let Some(best_ask) = render_data.best_ask_price {
+            if let Some(index) = price_levels.iter().position(|level| {
+                (level.price - (best_ask / 1.0).floor() * 1.0).abs() < 0.01
+            }) {
+                if index < start || index >= end {
+                    required_indices.push(index);
+                    adjustment_needed = true;
+                }
+            }
+        }
+        
+        if !adjustment_needed {
+            return proposed_range;
+        }
+        
+        // 计算调整后的范围以包含所有必需的索引
+        required_indices.sort();
+        let min_required = required_indices.first().copied().unwrap_or(start);
+        let max_required = required_indices.last().copied().unwrap_or(end.saturating_sub(1));
+        
+        let adjusted_start = min_required.min(start);
+        let adjusted_end = (max_required + 1).max(end).min(price_levels.len());
+        
+        // 确保范围不超过visible_rows
+        if adjusted_end - adjusted_start > visible_rows {
+            // 如果范围太大，优先保证包含关键价格，从中间截取
+            let center = (min_required + max_required) / 2;
+            let half_rows = visible_rows / 2;
+            let new_start = center.saturating_sub(half_rows);
+            let new_end = (new_start + visible_rows).min(price_levels.len());
+            (new_start, new_end)
+        } else {
+            (adjusted_start, adjusted_end)
         }
     }
 
@@ -226,17 +385,26 @@ impl OrderBookRenderer {
     fn create_table_rows(&self, levels: &[PriceLevel], render_data: &OrderBookRenderData) -> Vec<Row> {
         let mut rows = Vec::new();
 
-        for level in levels {
-            let row = self.create_price_level_row(level, render_data);
+        for (index, level) in levels.iter().enumerate() {
+            let row = self.create_price_level_row(level, render_data, index);
             rows.push(row);
         }
 
         // 如果没有数据，显示等待状态
         if rows.is_empty() {
-            let empty_row = Row::new(vec![
-                Cell::from("连接正常，等待订单薄数据...").style(Style::default().fg(Color::Yellow)),
-                Cell::from(""),
-            ]);
+            let empty_row = if self.layout_manager.is_order_flow_enabled() {
+                Row::new(vec![
+                    Cell::from("连接正常，等待订单薄数据...").style(Style::default().fg(Color::Yellow)),
+                    Cell::from(""),
+                    Cell::from(""),
+                    Cell::from(""),
+                ])
+            } else {
+                Row::new(vec![
+                    Cell::from("连接正常，等待订单薄数据...").style(Style::default().fg(Color::Yellow)),
+                    Cell::from(""),
+                ])
+            };
             rows.push(empty_row);
         }
 
@@ -244,47 +412,102 @@ impl OrderBookRenderer {
     }
 
     /// 创建单个价格层级的行
-    fn create_price_level_row(&self, level: &PriceLevel, render_data: &OrderBookRenderData) -> Row {
+    fn create_price_level_row(&self, level: &PriceLevel, render_data: &OrderBookRenderData, index: usize) -> Row {
         // 价格单元格 - 移除所有高亮显示，统一使用普通样式
         let price_cell = Cell::from(format!("{:.0}", level.price))
             .style(Style::default().fg(Color::White));
 
-        // 合并的 Bid & Ask 单元格 - 修复best_bid/best_ask为None时的问题
-        let merged_cell = if let (Some(best_bid), Some(best_ask)) = (render_data.best_bid_price, render_data.best_ask_price) {
-            // 只有当best_bid和best_ask都有效时才使用正常逻辑
-            self.layout_manager.format_merged_bid_ask_cell(
-                level.price,
-                level.bid_volume,
-                level.ask_volume,
-                best_bid,
-                best_ask,
-                &self.bar_chart,
-                render_data.max_bid_volume,
-                render_data.max_ask_volume,
-            )
-        } else {
-            // 如果best_bid或best_ask无效，使用简化逻辑：bid显示绿色，ask显示红色
-            if level.bid_volume > 0.0 && level.ask_volume > 0.0 {
-                // 同时有bid和ask，显示组合信息
-                let combined_text = format!("B:{:.0} A:{:.0}", level.bid_volume, level.ask_volume);
-                Cell::from(combined_text).style(Style::default().fg(Color::Yellow))
-            } else if level.bid_volume > 0.0 {
-                // 只有bid，显示绿色
-                self.bar_chart.create_bar_with_text(level.bid_volume, render_data.max_bid_volume, 60, true)
-            } else if level.ask_volume > 0.0 {
-                // 只有ask，显示红色
-                self.bar_chart.create_bar_with_text(level.ask_volume, render_data.max_ask_volume, 60, false)
+        if self.layout_manager.is_order_flow_enabled() {
+            // 4列布局：Price, Quantity, Buy, Sell
+            
+            // 合并的 Bid & Ask 单元格 (Quantity列)
+            let quantity_cell = if let (Some(best_bid), Some(best_ask)) = (render_data.best_bid_price, render_data.best_ask_price) {
+                // 只有当best_bid和best_ask都有效时才使用正常逻辑
+                self.layout_manager.format_merged_bid_ask_cell(
+                    level.price,
+                    level.bid_volume,
+                    level.ask_volume,
+                    best_bid,
+                    best_ask,
+                    &self.bar_chart,
+                    render_data.max_bid_volume,
+                    render_data.max_ask_volume,
+                )
             } else {
-                // 没有数据
-                Cell::from("")
-            }
-        };
+                // 如果best_bid或best_ask无效，使用简化逻辑：bid显示绿色，ask显示红色
+                if level.bid_volume > 0.0 && level.ask_volume > 0.0 {
+                    // 同时有bid和ask，显示组合信息
+                    let combined_text = format!("B:{:.0} A:{:.0}", level.bid_volume, level.ask_volume);
+                    Cell::from(combined_text).style(Style::default().fg(Color::Yellow))
+                } else if level.bid_volume > 0.0 {
+                    // 只有bid，显示绿色
+                    self.bar_chart.create_bar_with_text(level.bid_volume, render_data.max_bid_volume, 30, true)
+                } else if level.ask_volume > 0.0 {
+                    // 只有ask，显示红色
+                    self.bar_chart.create_bar_with_text(level.ask_volume, render_data.max_ask_volume, 30, false)
+                } else {
+                    // 没有数据
+                    Cell::from("")
+                }
+            };
 
-        // 简化为两列布局：Price (左侧) 和 Bid & Ask (右侧)
-        Row::new(vec![
-            price_cell,     // Price - 左侧
-            merged_cell,    // Bid & Ask - 右侧，占满剩余空间
-        ])
+            // 获取对应的订单流数据 - 通过价格匹配而不是索引
+            let (buy_volume, sell_volume) = render_data.order_flow_data.iter()
+                .find(|data| (data.price - level.price).abs() < 0.01)
+                .map(|data| (data.buy_volume, data.sell_volume))
+                .unwrap_or((0.0, 0.0));
+
+            // Buy列单元格
+            let buy_cell = self.layout_manager.create_buy_flow_cell(buy_volume, render_data.max_buy_flow_volume);
+
+            // Sell列单元格
+            let sell_cell = self.layout_manager.create_sell_flow_cell(sell_volume, render_data.max_sell_flow_volume);
+
+            Row::new(vec![
+                price_cell,    // Price - 价格列
+                quantity_cell, // Quantity - 数量列（Bid & Ask）
+                buy_cell,      // Buy - 主动买单列
+                sell_cell,     // Sell - 主动卖单列
+            ])
+        } else {
+            // 2列布局：Price, Bid & Ask
+            
+            // 合并的 Bid & Ask 单元格 - 修复best_bid/best_ask为None时的问题
+            let merged_cell = if let (Some(best_bid), Some(best_ask)) = (render_data.best_bid_price, render_data.best_ask_price) {
+                // 只有当best_bid和best_ask都有效时才使用正常逻辑
+                self.layout_manager.format_merged_bid_ask_cell(
+                    level.price,
+                    level.bid_volume,
+                    level.ask_volume,
+                    best_bid,
+                    best_ask,
+                    &self.bar_chart,
+                    render_data.max_bid_volume,
+                    render_data.max_ask_volume,
+                )
+            } else {
+                // 如果best_bid或best_ask无效，使用简化逻辑：bid显示绿色，ask显示红色
+                if level.bid_volume > 0.0 && level.ask_volume > 0.0 {
+                    // 同时有bid和ask，显示组合信息
+                    let combined_text = format!("B:{:.0} A:{:.0}", level.bid_volume, level.ask_volume);
+                    Cell::from(combined_text).style(Style::default().fg(Color::Yellow))
+                } else if level.bid_volume > 0.0 {
+                    // 只有bid，显示绿色
+                    self.bar_chart.create_bar_with_text(level.bid_volume, render_data.max_bid_volume, 60, true)
+                } else if level.ask_volume > 0.0 {
+                    // 只有ask，显示红色
+                    self.bar_chart.create_bar_with_text(level.ask_volume, render_data.max_ask_volume, 60, false)
+                } else {
+                    // 没有数据
+                    Cell::from("")
+                }
+            };
+
+            Row::new(vec![
+                price_cell,     // Price - 左侧
+                merged_cell,    // Bid & Ask - 右侧，占满剩余空间
+            ])
+        }
     }
 
     /// 聚合价格层级数据，强制使用1美元精度向下取整，处理bid/ask冲突
@@ -302,6 +525,88 @@ impl OrderBookRenderer {
             best_ask_price,
             precision
         )
+    }
+
+    /// 获取关键价格层级 - 确保best_bid、best_ask和当前交易价格始终被包含
+    fn get_essential_price_levels(
+        &self,
+        all_price_levels: &[&OrderedFloat<f64>],
+        best_bid_price: Option<f64>,
+        best_ask_price: Option<f64>,
+        current_trade_price: Option<f64>,
+    ) -> Vec<OrderedFloat<f64>> {
+        let mut essential_prices = Vec::new();
+        
+        // 添加best_bid对应的聚合价格层级
+        if let Some(best_bid) = best_bid_price {
+            let aggregated_bid = OrderedFloat((best_bid / 1.0).floor() * 1.0);
+            if all_price_levels.iter().any(|&&p| p == aggregated_bid) {
+                essential_prices.push(aggregated_bid);
+            }
+        }
+        
+        // 添加best_ask对应的聚合价格层级
+        if let Some(best_ask) = best_ask_price {
+            let aggregated_ask = OrderedFloat((best_ask / 1.0).floor() * 1.0);
+            if all_price_levels.iter().any(|&&p| p == aggregated_ask) {
+                essential_prices.push(aggregated_ask);
+            }
+        }
+        
+        // 添加当前交易价格对应的聚合价格层级
+        if let Some(current_price) = current_trade_price {
+            let aggregated_current = OrderedFloat((current_price / 1.0).floor() * 1.0);
+            if all_price_levels.iter().any(|&&p| p == aggregated_current) {
+                essential_prices.push(aggregated_current);
+            }
+        }
+        
+        // 去重并排序
+        essential_prices.sort_by(|a, b| b.cmp(a));
+        essential_prices.dedup();
+        
+        essential_prices
+    }
+
+    /// 智能选择价格层级，确保关键价格始终被包含
+    fn select_price_levels_with_essentials<'a>(
+        &self,
+        all_price_levels: &'a [&'a OrderedFloat<f64>],
+        essential_prices: &[OrderedFloat<f64>],
+        max_levels: usize,
+    ) -> Vec<&'a OrderedFloat<f64>> {
+        if max_levels >= all_price_levels.len() {
+            return all_price_levels.to_vec();
+        }
+        
+        let mut selected = Vec::new();
+        let mut remaining_slots = max_levels;
+        
+        // 首先确保所有关键价格都被包含
+        for essential_price in essential_prices {
+            if let Some(price_ref) = all_price_levels.iter().find(|&p| **p == *essential_price) {
+                if !selected.contains(price_ref) {
+                    selected.push(*price_ref);
+                    remaining_slots = remaining_slots.saturating_sub(1);
+                }
+            }
+        }
+        
+        // 如果还有剩余槽位，按原始顺序填充其他价格层级
+        for &price_level in all_price_levels.iter() {
+            if remaining_slots == 0 {
+                break;
+            }
+            
+            if !selected.contains(&price_level) {
+                selected.push(price_level);
+                remaining_slots -= 1;
+            }
+        }
+        
+        // 按价格从高到低重新排序
+        selected.sort_by(|a, b| b.cmp(a));
+        selected
     }
 }
 

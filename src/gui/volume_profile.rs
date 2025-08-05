@@ -240,7 +240,7 @@ impl VolumeProfileWidget {
             [
                 Constraint::Length(8),   // 价格列（8个字符宽度）
                 Constraint::Min(0),      // Volume Profile柱状图列（占据剩余所有空间）
-                Constraint::Length(8),   // 数值统计列（8个字符宽度，与价格列相同）
+                Constraint::Length(12),   // 数值统计列（8个字符宽度，与价格列相同）
             ]
         )
         .header(
@@ -422,9 +422,9 @@ impl VolumeProfileWidget {
             let aggregated_trade_price = (trade_price / 1.0).floor() * 1.0;
             
             if (aggregated_current_price - aggregated_trade_price).abs() < 0.001 {
-                // 最新交易价格，显示黄色高亮
+                // 最新交易价格，使用黄色背景高亮，黑色文字确保可读性
                 return Cell::from(price_text)
-                    .style(Style::default().fg(Color::Yellow).add_modifier(ratatui::style::Modifier::BOLD));
+                    .style(Style::default().bg(Color::Yellow).fg(Color::Black));
             }
         }
         

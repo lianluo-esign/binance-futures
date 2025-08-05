@@ -42,13 +42,13 @@ impl BarChartRenderer {
         }
     }
 
-    /// 渲染bid条形图（基于BTC数量的色块显示，绿色背景白色数字）
+    /// 渲染bid条形图（基于BTC数量的unicode块字符显示，绿色背景白色数字）
     pub fn render_bid_bar(&self, volume: f64, max_volume: f64, cell_width: u16) -> String {
         if volume <= 0.0 {
             return String::new();
         }
 
-        // 基于BTC数量计算色块数 - 每0.2BTC一个色块
+        // 基于BTC数量计算unicode块字符单位 - 每0.1BTC一个最小单位
         let block_count = self.calculate_btc_blocks(volume);
         
         // 格式化挂单量显示文本 - 更紧凑的格式
@@ -65,13 +65,13 @@ impl BarChartRenderer {
         self.create_btc_bar_string(block_count, &volume_text, cell_width, true)
     }
 
-    /// 渲染ask条形图（基于BTC数量的色块显示，红色背景白色数字）
+    /// 渲染ask条形图（基于BTC数量的unicode块字符显示，红色背景白色数字）
     pub fn render_ask_bar(&self, volume: f64, max_volume: f64, cell_width: u16) -> String {
         if volume <= 0.0 {
             return String::new();
         }
 
-        // 基于BTC数量计算色块数 - 每0.2BTC一个色块
+        // 基于BTC数量计算unicode块字符单位 - 每0.1BTC一个最小单位
         let block_count = self.calculate_btc_blocks(volume);
         
         // 格式化挂单量显示文本 - 更紧凑的格式
@@ -88,14 +88,14 @@ impl BarChartRenderer {
         self.create_btc_bar_string(block_count, &volume_text, cell_width, false)
     }
 
-    /// 创建带文本的条形图单元格（使用BTC色块显示，数字白色，色块有颜色）
+    /// 创建带文本的条形图单元格（使用unicode块字符显示，数字白色，色块有颜色）
     pub fn create_bar_with_text<'a>(&'a self, volume: f64, max_volume: f64, cell_width: u16, is_bid: bool) -> Cell<'a> {
         if volume <= 0.0 {
             return Cell::from("");
         }
 
-        // 基于BTC数量计算色块数 - 每0.2BTC一个色块
-        let block_count = self.calculate_btc_blocks(volume);
+        // 基于BTC数量计算unicode块字符单位 - 每0.1BTC一个最小单位
+        let units = self.calculate_btc_blocks(volume);
         
         // 格式化挂单量显示文本 - 更紧凑的格式
         let volume_text = if volume >= 1000.0 {
@@ -108,20 +108,26 @@ impl BarChartRenderer {
             format!("{:.1}", volume)
         };
 
-        // 创建色块字符串
+        // 创建unicode块字符串
+        let bar_chars = self.create_unicode_bar_from_units(units);
+        
+        // 确保条形图不超过单元格宽度
         let max_bar_width = cell_width.saturating_sub(volume_text.len() as u16 + 2) as usize;
-        let bar_count = block_count.min(max_bar_width as u16);
-        let bar_chars = "█".repeat(bar_count as usize);
+        let truncated_bar = if bar_chars.chars().count() > max_bar_width {
+            bar_chars.chars().take(max_bar_width).collect()
+        } else {
+            bar_chars
+        };
 
         // 创建包含不同颜色部分的Line
-        let line = if bar_count > 0 {
+        let line = if !truncated_bar.is_empty() {
             Line::from(vec![
                 Span::styled(volume_text, Style::default().fg(Color::White)),     // 数字白色
                 Span::raw(" "),                                                   // 空格分隔
-                Span::styled(bar_chars, Style::default().fg(if is_bid { Color::Green } else { Color::Red })), // 色块有颜色
+                Span::styled(truncated_bar, Style::default().fg(if is_bid { Color::Green } else { Color::Red })), // unicode块字符有颜色
             ])
         } else {
-            // 没有色块时，仍然显示数字（适用于小于0.2BTC的挂单量）
+            // 没有色块时，仍然显示数字（适用于小于0.1BTC的挂单量）
             Line::from(vec![
                 Span::styled(format!("{} ", volume_text), Style::default().fg(Color::White)), // 只有数字时左对齐
             ])
@@ -213,38 +219,75 @@ impl BarChartRenderer {
         }
     }
 
-    /// 基于BTC数量计算色块数 - 每0.2BTC一个色块，最小0个最大100个
+    /// 基于BTC数量计算unicode块字符 - 每0.1BTC一个最小单位，参照volume profile实现
     pub fn calculate_btc_blocks(&self, volume: f64) -> u16 {
         if volume <= 0.0 {
             return 0;
         }
         
-        // 每0.2BTC一个色块，只有达到阈值才显示
-        let block_count = (volume / 0.2).floor() as u16;  // 改用floor，只有完整达到0.2BTC才算1个色块
+        // 每0.1BTC一个最小单位，参照volume profile的实现
+        let units = (volume / 0.1).round() as u16;
         
-        // 最大100个色块 - 满100个色块就是20个BTC，移除强制最小1个的逻辑
-        block_count.min(100)
+        // 不设置上限，让显示更准确反映实际挂单量
+        units
     }
 
-    /// 创建基于BTC的条形图字符串，将数字和色块分开以便不同着色
-    fn create_btc_bar_string(&self, block_count: u16, text: &str, cell_width: u16, _is_bid: bool) -> String {
-        if block_count == 0 {
+    /// 创建基于BTC的条形图字符串，使用unicode块字符，参照volume profile实现
+    fn create_btc_bar_string(&self, units: u16, text: &str, cell_width: u16, _is_bid: bool) -> String {
+        if units == 0 {
             return String::new(); // 没有色块时返回空字符串，不显示任何内容
         }
 
-        // 创建色块字符串
-        let bar_chars = "█".repeat(block_count as usize);
+        // 使用unicode块字符创建更精细的bar显示，参照volume profile实现
+        let bar_chars = self.create_unicode_bar_from_units(units);
         
         // 确保条形图不超过单元格宽度 - 按字符数而不是字节数截断
         let max_bar_width = cell_width.saturating_sub(text.len() as u16 + 2) as usize; // 为数字和边距预留空间
-        let truncated_bar = if block_count as usize > max_bar_width {
-            "█".repeat(max_bar_width)
+        let truncated_bar = if bar_chars.chars().count() > max_bar_width {
+            bar_chars.chars().take(max_bar_width).collect()
         } else {
             bar_chars
         };
         
         // 数字在前，色块在后，这样数字可以用默认颜色，色块用指定颜色
         format!("{} {}", text, truncated_bar)
+    }
+
+    /// 创建Unicode块字符填充的bar，参照volume profile实现
+    /// 每个部分字符（▏▎▍▌▋▊▉）代表0.1 BTC，每个完整字符█代表0.8 BTC
+    fn create_unicode_bar_from_units(&self, units: u16) -> String {
+        if units == 0 {
+            return String::new();
+        }
+
+        // 计算完整字符数（每个█代表8个0.1 BTC单位，即0.8 BTC）
+        let full_chars = units / 8;
+        // 计算剩余的0.1 BTC单位数
+        let remaining_units = units % 8;
+        
+        let mut bar = String::new();
+        
+        // 添加完整填充的字符
+        for _ in 0..full_chars {
+            bar.push('█');
+        }
+        
+        // 添加部分填充的字符（如果有剩余）
+        if remaining_units > 0 {
+            let partial_char = match remaining_units {
+                1 => "▏",  // 0.1 BTC
+                2 => "▎",  // 0.2 BTC
+                3 => "▍",  // 0.3 BTC
+                4 => "▌",  // 0.4 BTC
+                5 => "▋",  // 0.5 BTC
+                6 => "▊",  // 0.6 BTC
+                7 => "▉",  // 0.7 BTC
+                _ => " ",  // 不应该到达这里
+            };
+            bar.push_str(partial_char);
+        }
+        
+        bar
     }
 
     /// 设置最大条形图宽度
@@ -383,11 +426,11 @@ mod tests {
         let cell = renderer.create_bar_with_text(0.0, 100.0, 20, true);
         // 这里我们不能直接比较Cell的内容，但至少确保不会panic
         
-        // 测试修复后的色块计算：只有达到0.2BTC才显示色块
-        assert_eq!(renderer.calculate_btc_blocks(0.1), 0);   // 小于0.2BTC，不显示色块
-        assert_eq!(renderer.calculate_btc_blocks(0.19), 0);  // 小于0.2BTC，不显示色块
-        assert_eq!(renderer.calculate_btc_blocks(0.2), 1);   // 正好0.2BTC，显示1个色块
-        assert_eq!(renderer.calculate_btc_blocks(0.21), 1);  // 0.21BTC，显示1个色块
-        assert_eq!(renderer.calculate_btc_blocks(0.4), 2);   // 0.4BTC，显示2个色块
+        // 测试修复后的unicode块字符计算：每0.1BTC一个最小单位
+        assert_eq!(renderer.calculate_btc_blocks(0.1), 1);   // 0.1BTC，显示1个单位
+        assert_eq!(renderer.calculate_btc_blocks(0.19), 2);  // 0.19BTC，四舍五入显示2个单位
+        assert_eq!(renderer.calculate_btc_blocks(0.2), 2);   // 0.2BTC，显示2个单位
+        assert_eq!(renderer.calculate_btc_blocks(0.21), 2);  // 0.21BTC，四舍五入显示2个单位
+        assert_eq!(renderer.calculate_btc_blocks(0.4), 4);   // 0.4BTC，显示4个单位
     }
 }

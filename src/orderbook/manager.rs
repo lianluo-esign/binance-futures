@@ -4,6 +4,7 @@ use serde_json::Value;
 
 use super::data_structures::*;
 use super::order_flow::OrderFlow;
+use super::flow_manager::{OrderFlowManager, OrderFlowDisplayData};
 
 /// 订单簿管理器 - 简化版本，专注于核心功能
 pub struct OrderBookManager {
@@ -36,6 +37,9 @@ pub struct OrderBookManager {
     last_trade_price: Option<f64>,
     last_trade_side: Option<String>, // "buy" or "sell"
     last_trade_timestamp: Option<u64>,
+    
+    // 实时订单流管理器
+    order_flow_manager: OrderFlowManager,
 }
 
 impl OrderBookManager {
@@ -65,6 +69,8 @@ impl OrderBookManager {
             last_trade_price: None,
             last_trade_side: None,
             last_trade_timestamp: None,
+            
+            order_flow_manager: OrderFlowManager::new(),
         }
     }
 
@@ -141,6 +147,12 @@ impl OrderBookManager {
                 let price_ordered = OrderedFloat(price);
                 let order_flow = self.order_flows.entry(price_ordered).or_insert_with(OrderFlow::new);
                 order_flow.add_trade(side, qty, current_time);
+                
+                // 处理实时订单流数据
+                if let Err(e) = self.order_flow_manager.process_trade_data(data) {
+                    // 记录错误但不中断处理流程
+                    eprintln!("Order flow processing error: {}", e);
+                }
                 
                 // 计算价格速度和波动率
                 self.calculate_price_speed(current_time);
@@ -408,6 +420,31 @@ impl OrderBookManager {
 
 
 
+    /// 获取实时订单流数据
+    pub fn get_order_flow_data(&self, prices: &[f64]) -> Vec<OrderFlowDisplayData> {
+        self.order_flow_manager.get_flow_for_prices(prices)
+    }
+
+    /// 获取订单流统计信息
+    pub fn get_order_flow_statistics(&self) -> super::realtime_flow::OrderFlowStatistics {
+        self.order_flow_manager.get_statistics()
+    }
+
+    /// 获取订单流在特定价格的数据
+    pub fn get_order_flow_at_price(&self, price: f64) -> Option<(f64, f64)> {
+        self.order_flow_manager.get_flow_at_price(price)
+    }
+
+    /// 检查是否有活跃的订单流数据
+    pub fn has_active_order_flow(&self) -> bool {
+        self.order_flow_manager.has_active_data()
+    }
+
+    /// 获取订单流最大音量用于缩放显示
+    pub fn get_order_flow_max_volumes(&self) -> (f64, f64) {
+        self.order_flow_manager.get_max_volumes()
+    }
+
     pub fn clear(&mut self) {
         self.order_flows.clear();
         self.best_bid_price = None;
@@ -415,6 +452,7 @@ impl OrderBookManager {
         self.current_price = None;
         self.bookticker_snapshot = None;
         self.market_snapshot = MarketSnapshot::new();
+        self.order_flow_manager.clear();
     }
 }
 

@@ -10,6 +10,7 @@ use super::bar_chart::BarChartRenderer;
 pub struct LayoutManager {
     column_widths: Vec<Constraint>,
     show_merged_column: bool,
+    show_order_flow: bool,
     cell_width: u16,
 }
 
@@ -18,23 +19,39 @@ impl LayoutManager {
     pub fn new() -> Self {
         Self {
             column_widths: vec![
-                Constraint::Length(8), // Price - 左侧价格列，缩小宽度模拟字体缩小
-                Constraint::Percentage(100), // Bid & Ask - 占满剩余全部空间
+                Constraint::Length(8),  // Price - 价格列
+                Constraint::Percentage(60), // Quantity - 数量列（Bid & Ask）- 增加宽度
+                Constraint::Length(8), // Buy - 主动买单列 - 固定8字符宽度
+                Constraint::Length(8), // Sell - 主动卖单列 - 固定8字符宽度
             ],
             show_merged_column: true,
+            show_order_flow: true,
             cell_width: 60, // 合并列的宽度 - 减小以模拟字体缩小效果
         }
     }
 
     /// 创建带自定义配置的布局管理器
-    pub fn with_config(cell_width: u16, show_merged_column: bool) -> Self {
+    pub fn with_config(cell_width: u16, show_merged_column: bool, show_order_flow: bool) -> Self {
         let mut manager = Self::new();
         manager.cell_width = cell_width;
         manager.show_merged_column = show_merged_column;
+        manager.show_order_flow = show_order_flow;
         
-        // 更新合并列的宽度约束
-        if show_merged_column {
-            manager.column_widths[1] = Constraint::Percentage(100);
+        // 根据配置调整列宽
+        if show_order_flow {
+            // 4列布局：Price, Quantity, Buy, Sell
+            manager.column_widths = vec![
+                Constraint::Length(8),      // Price - 价格列
+                Constraint::Percentage(60), // Quantity - 数量列（Bid & Ask）- 增加宽度
+                Constraint::Length(8),      // Buy - 主动买单列 - 固定8字符宽度
+                Constraint::Length(8),      // Sell - 主动卖单列 - 固定8字符宽度
+            ];
+        } else if show_merged_column {
+            // 2列布局：Price, Bid & Ask
+            manager.column_widths = vec![
+                Constraint::Length(8),        // Price - 价格列
+                Constraint::Percentage(100),  // Bid & Ask - 占满剩余全部空间
+            ];
         }
         
         manager
@@ -47,10 +64,21 @@ impl LayoutManager {
 
     /// 创建表头行
     pub fn create_header_row(&self) -> Row {
-        Row::new(vec![
-            Cell::from("Price").style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-            Cell::from("Bid & Ask").style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)), // 合并列
-        ])
+        if self.show_order_flow {
+            // 4列布局的表头
+            Row::new(vec![
+                Cell::from("Price").style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+                Cell::from("Quantity").style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Cell::from("Buy").style(Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+                Cell::from("Sell").style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+            ])
+        } else {
+            // 2列布局的表头
+            Row::new(vec![
+                Cell::from("Price").style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+                Cell::from("Bid & Ask").style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            ])
+        }
     }
 
     /// 格式化合并的Bid & Ask单元格（增强版，支持1美元精度聚合）
@@ -169,6 +197,61 @@ impl LayoutManager {
         self.show_merged_column = show;
     }
 
+    /// 启用/禁用订单流显示
+    pub fn set_show_order_flow(&mut self, show: bool) {
+        self.show_order_flow = show;
+        
+        // 更新列宽配置
+        if show {
+            // 4列布局：Price, Quantity, Buy, Sell
+            self.column_widths = vec![
+                Constraint::Length(8),      // Price - 价格列
+                Constraint::Percentage(60), // Quantity - 数量列（Bid & Ask）- 增加宽度
+                Constraint::Length(8),      // Buy - 主动买单列 - 固定8字符宽度
+                Constraint::Length(8),      // Sell - 主动卖单列 - 固定8字符宽度
+            ];
+        } else if self.show_merged_column {
+            // 2列布局：Price, Bid & Ask
+            self.column_widths = vec![
+                Constraint::Length(8),        // Price - 价格列
+                Constraint::Percentage(100),  // Bid & Ask - 占满剩余全部空间
+            ];
+        }
+    }
+
+    /// 检查是否显示订单流
+    pub fn is_order_flow_enabled(&self) -> bool {
+        self.show_order_flow
+    }
+
+    /// 创建订单流单元格（Buy列）
+    pub fn create_buy_flow_cell(&self, volume: f64, max_volume: f64) -> Cell {
+        if volume == 0.0 {
+            Cell::from("")
+        } else {
+            // 格式化数字，保留3位小数
+            let formatted_volume = format!("{:.3}", volume);
+            
+            // 使用绿色前景色，无背景色
+            Cell::from(formatted_volume)
+                .style(Style::default().fg(Color::Green))
+        }
+    }
+
+    /// 创建订单流单元格（Sell列）
+    pub fn create_sell_flow_cell(&self, volume: f64, max_volume: f64) -> Cell {
+        if volume == 0.0 {
+            Cell::from("")
+        } else {
+            // 格式化数字，保留3位小数
+            let formatted_volume = format!("{:.3}", volume);
+            
+            // 使用红色前景色，无背景色
+            Cell::from(formatted_volume)
+                .style(Style::default().fg(Color::Red))
+        }
+    }
+
     /// 获取合并列宽度
     pub fn get_merged_column_width(&self) -> u16 {
         self.cell_width
@@ -181,18 +264,36 @@ impl LayoutManager {
 
     /// 创建空行（用于数据加载时的占位）
     pub fn create_empty_row(&self, message: &str) -> Row<'static> {
-        Row::new(vec![
-            Cell::from(message.to_string()).style(Style::default().fg(Color::Yellow)), // Price列显示消息
-            Cell::from(""), // Bid & Ask列
-        ])
+        if self.show_order_flow {
+            Row::new(vec![
+                Cell::from(message.to_string()).style(Style::default().fg(Color::Yellow)), // Price列显示消息
+                Cell::from(""), // Quantity列
+                Cell::from(""), // Buy列
+                Cell::from(""), // Sell列
+            ])
+        } else {
+            Row::new(vec![
+                Cell::from(message.to_string()).style(Style::default().fg(Color::Yellow)), // Price列显示消息
+                Cell::from(""), // Bid & Ask列
+            ])
+        }
     }
 
     /// 创建分隔行
     pub fn create_separator_row(&self) -> Row {
-        Row::new(vec![
-            Cell::from("─".repeat(6)).style(Style::default().fg(Color::Gray)), // Price列分隔符，缩小
-            Cell::from("─".repeat(30)).style(Style::default().fg(Color::Gray)), // Bid & Ask列分隔符，缩小
-        ])
+        if self.show_order_flow {
+            Row::new(vec![
+                Cell::from("─".repeat(6)).style(Style::default().fg(Color::Gray)), // Price列分隔符
+                Cell::from("─".repeat(15)).style(Style::default().fg(Color::Gray)), // Quantity列分隔符
+                Cell::from("─".repeat(10)).style(Style::default().fg(Color::Gray)), // Buy列分隔符
+                Cell::from("─".repeat(10)).style(Style::default().fg(Color::Gray)), // Sell列分隔符
+            ])
+        } else {
+            Row::new(vec![
+                Cell::from("─".repeat(6)).style(Style::default().fg(Color::Gray)), // Price列分隔符，缩小
+                Cell::from("─".repeat(30)).style(Style::default().fg(Color::Gray)), // Bid & Ask列分隔符，缩小
+            ])
+        }
     }
 
     /// 验证价格区间逻辑
@@ -213,19 +314,39 @@ impl LayoutManager {
 
     /// 计算最优的列宽分配
     pub fn calculate_optimal_widths(&self, total_width: u16) -> Vec<Constraint> {
-        if total_width < 80 {
-            // 窗口太小，使用紧凑宽度
-            return vec![
-                Constraint::Length(6), // Price - 更紧凑
-                Constraint::Percentage(100), // Bid & Ask - 占满剩余空间
-            ];
+        if self.show_order_flow {
+            if total_width < 120 {
+                // 窗口太小，使用更紧凑的4列布局
+                vec![
+                    Constraint::Length(6),      // Price - 更紧凑
+                    Constraint::Percentage(35), // Quantity - 减小
+                    Constraint::Percentage(32), // Buy - 调整
+                    Constraint::Percentage(33), // Sell - 调整
+                ]
+            } else {
+                // 标准4列布局
+                vec![
+                    Constraint::Length(8),      // Price - 价格列
+                    Constraint::Percentage(60), // Quantity - 数量列（Bid & Ask）- 增加宽度
+                    Constraint::Length(8),      // Buy - 主动买单列 - 固定8字符宽度
+                    Constraint::Length(8),      // Sell - 主动卖单列 - 固定8字符宽度
+                ]
+            }
+        } else {
+            if total_width < 80 {
+                // 窗口太小，使用紧凑宽度
+                vec![
+                    Constraint::Length(6), // Price - 更紧凑
+                    Constraint::Percentage(100), // Bid & Ask - 占满剩余空间
+                ]
+            } else {
+                // 简化的两列布局 - 缩小宽度模拟字体缩小
+                vec![
+                    Constraint::Length(8), // Price - 固定宽度，从12减到8
+                    Constraint::Percentage(100), // Bid & Ask - 占满剩余全部空间
+                ]
+            }
         }
-
-        // 简化的两列布局 - 缩小宽度模拟字体缩小
-        vec![
-            Constraint::Length(8), // Price - 固定宽度，从12减到8
-            Constraint::Percentage(100), // Bid & Ask - 占满剩余全部空间
-        ]
     }
 
     /// 获取布局统计信息
@@ -241,7 +362,7 @@ impl LayoutManager {
             .sum();
 
         LayoutStats {
-            total_columns: 2, // 只有Price和Bid & Ask两列
+            total_columns: if self.show_order_flow { 4 } else { 2 }, // 4列或2列布局
             total_fixed_width,
             merged_column_width: self.cell_width,
             merged_column_enabled: self.show_merged_column,

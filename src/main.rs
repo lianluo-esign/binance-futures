@@ -1,5 +1,5 @@
 use binance_futures::{init_logging, Config, ReactiveApp};
-use binance_futures::gui::{render_signals, VolumeProfileWidget};
+use binance_futures::gui::{render_signals, VolumeProfileWidget, PriceChartRenderer};
 use binance_futures::orderbook::render_orderbook;
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind},
@@ -77,6 +77,9 @@ fn run_app(
     // 创建Volume Profile widget
     let mut volume_profile_widget = VolumeProfileWidget::new();
     
+    // 创建价格图表渲染器，默认10000个数据点的滑动窗口
+    let mut price_chart_renderer = PriceChartRenderer::new(10000);
+    
     // 主事件循环 - 集成WebSocket处理和UI刷新，与备份版本保持一致
     loop {
         // 处理事件循环
@@ -84,9 +87,12 @@ fn run_app(
 
         // 更新Volume Profile数据
         update_volume_profile(&mut volume_profile_widget, app);
+        
+        // 更新价格图表数据
+        update_price_chart(&mut price_chart_renderer, app);
 
         // 刷新UI
-        terminal.draw(|f| ui(f, app, &volume_profile_widget))?;
+        terminal.draw(|f| ui(f, app, &volume_profile_widget, &price_chart_renderer))?;
 
         // 处理UI事件（非阻塞）- 与备份版本完全一致
         if crossterm::event::poll(Duration::from_millis(0))? {
@@ -155,24 +161,26 @@ fn run_app(
     Ok(())
 }
 
-/// UI渲染函数 - 三列布局版本
-fn ui(f: &mut Frame, app: &ReactiveApp, volume_profile_widget: &VolumeProfileWidget) {
+/// UI渲染函数 - 四列布局版本
+fn ui(f: &mut Frame, app: &ReactiveApp, volume_profile_widget: &VolumeProfileWidget, price_chart_renderer: &PriceChartRenderer) {
     let size = f.area();
 
-    // 创建三列布局：订单薄(30%)、Volume Profile(50%)、信号(20%)
+    // 创建四列布局：订单薄(20%)、Volume Profile(30%)、信号(10%)、价格图表(剩余宽度)
     // 直接使用整个屏幕区域，不保留边距
     let horizontal_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Percentage(30), // 订单薄占30%
-            Constraint::Percentage(50), // Volume Profile占50%
-            Constraint::Percentage(20), // 市场信号占20%
+            Constraint::Percentage(20), // 订单薄占20%
+            Constraint::Percentage(30), // Volume Profile占30%
+            Constraint::Percentage(10), // 市场信号占10%
+            Constraint::Percentage(40), // 价格图表占剩余40%
         ])
         .split(size);
 
     let orderbook_area = horizontal_chunks[0];
     let volume_profile_area = horizontal_chunks[1];
     let signal_area = horizontal_chunks[2];
+    let price_chart_area = horizontal_chunks[3];
 
     // 渲染各个组件
     render_orderbook(f, app, orderbook_area);
@@ -181,6 +189,9 @@ fn ui(f: &mut Frame, app: &ReactiveApp, volume_profile_widget: &VolumeProfileWid
     render_volume_profile(f, app, volume_profile_widget, volume_profile_area);
     
     render_signals(f, app, signal_area);
+    
+    // 渲染价格图表
+    render_price_chart(f, price_chart_renderer, price_chart_area);
 }
 
 /// 更新Volume Profile数据
@@ -453,6 +464,22 @@ fn get_visible_price_range_for_area(app: &ReactiveApp, visible_rows: usize) -> V
         
         price_levels[start_index..end_index].to_vec()
     }
+}
+
+/// 更新价格图表数据
+fn update_price_chart(price_chart_renderer: &mut PriceChartRenderer, app: &ReactiveApp) {
+    // 获取当前市场快照
+    let market_snapshot = app.get_market_snapshot();
+    
+    // 如果有当前交易价格，添加到价格图表
+    if let Some(current_price) = market_snapshot.current_price {
+        price_chart_renderer.add_price_point(current_price);
+    }
+}
+
+/// 渲染价格图表
+fn render_price_chart(f: &mut Frame, price_chart_renderer: &PriceChartRenderer, area: Rect) {
+    price_chart_renderer.render(f, area);
 }
 
 

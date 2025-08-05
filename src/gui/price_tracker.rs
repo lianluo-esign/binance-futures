@@ -144,18 +144,34 @@ impl PriceTracker {
         }
     }
 
-    /// 在价格列表中查找指定价格的索引
+    /// 在价格列表中查找指定价格的索引 - 改进版本，支持聚合价格匹配
     fn find_price_index(&self, target_price: f64, price_levels: &[f64]) -> Option<usize> {
+        // 首先尝试精确匹配或容差范围内匹配
+        if let Some(index) = price_levels.iter()
+            .position(|&price| (price - target_price).abs() < self.price_tolerance) {
+            return Some(index);
+        }
+        
+        // 如果找不到，尝试匹配聚合后的价格（1美元精度）
+        let aggregated_target = (target_price / 1.0).floor() * 1.0;
         price_levels.iter()
-            .position(|&price| (price - target_price).abs() < self.price_tolerance)
+            .position(|&price| (price - aggregated_target).abs() < 0.01)
     }
 
-    /// 找到最接近目标价格的索引 - 改进版本，优化价格下跌时的匹配
+    /// 找到最接近目标价格的索引 - 改进版本，优先匹配聚合价格
     fn find_closest_price_index(&self, target_price: f64, price_levels: &[f64]) -> usize {
         if price_levels.is_empty() {
             return 0;
         }
 
+        // 首先尝试找到聚合价格的精确匹配
+        let aggregated_target = (target_price / 1.0).floor() * 1.0;
+        if let Some(exact_index) = price_levels.iter()
+            .position(|&price| (price - aggregated_target).abs() < 0.01) {
+            return exact_index;
+        }
+
+        // 如果没有精确匹配，找最接近的价格
         let mut closest_index = 0;
         let mut closest_distance = (price_levels[0] - target_price).abs();
 
@@ -167,21 +183,24 @@ impl PriceTracker {
             }
         }
 
-        // 对于价格下跌的情况，如果目标价格在两个价格层级之间，
-        // 优先选择较低的价格层级（更接近实际的bid价格）
+        // 对于价格在两个层级之间的情况，应用智能选择逻辑
         if closest_index > 0 && closest_index < price_levels.len() - 1 {
             let current_price = price_levels[closest_index];
+            
+            // 检查是否有更好的聚合价格匹配
+            let upper_price = price_levels[closest_index - 1];
             let lower_price = price_levels[closest_index + 1];
             
-            // 如果目标价格在当前价格和下一个价格之间，且更接近下一个价格
-            if target_price < current_price && target_price > lower_price {
-                let distance_to_current = (current_price - target_price).abs();
-                let distance_to_lower = (lower_price - target_price).abs();
-                
-                // 如果距离相近，优先选择较低的价格（对bid更友好）
-                if distance_to_lower <= distance_to_current * 1.2 {
-                    closest_index += 1;
-                }
+            // 计算到聚合价格的距离
+            let distance_to_current_agg = (current_price - aggregated_target).abs();
+            let distance_to_upper_agg = (upper_price - aggregated_target).abs();
+            let distance_to_lower_agg = (lower_price - aggregated_target).abs();
+            
+            // 选择最接近聚合价格的层级
+            if distance_to_upper_agg < distance_to_current_agg && distance_to_upper_agg <= distance_to_lower_agg {
+                closest_index -= 1;
+            } else if distance_to_lower_agg < distance_to_current_agg && distance_to_lower_agg < distance_to_upper_agg {
+                closest_index += 1;
             }
         }
 
@@ -211,12 +230,24 @@ impl PriceTracker {
         scroll_steps
     }
 
-    /// 检查价格是否在有效范围内
+    /// 检查价格是否在有效范围内 - 改进版本，支持聚合价格匹配
     pub fn is_price_in_range(&self, price: f64, price_levels: &[f64]) -> bool {
         if price_levels.is_empty() {
             return false;
         }
 
+        // 首先检查是否有直接匹配或容差范围内的匹配
+        if price_levels.iter().any(|&p| (p - price).abs() < self.price_tolerance) {
+            return true;
+        }
+
+        // 检查聚合价格是否存在
+        let aggregated_price = (price / 1.0).floor() * 1.0;
+        if price_levels.iter().any(|&p| (p - aggregated_price).abs() < 0.01) {
+            return true;
+        }
+
+        // 最后检查价格是否在范围内
         let min_price = price_levels.iter().fold(f64::INFINITY, |a, &b| a.min(b));
         let max_price = price_levels.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
 
