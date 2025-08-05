@@ -212,20 +212,23 @@ impl VolumeProfileWidget {
             // 价格列 - 检查是否为最新交易价格，如果是则显示黄色高亮
             let price_cell = self.create_price_cell_with_highlight(price, latest_trade_price);
             
-            // Volume Profile柱状图列
-            let volume_cell = if let Some(volume_level) = volume_data.price_volumes.get(&price_key) {
-                self.create_volume_bar_cell(volume_level, volume_data.max_volume)
+            // Volume Profile柱状图列和数值列
+            let (volume_cell, stats_cell) = if let Some(volume_level) = volume_data.price_volumes.get(&price_key) {
+                let bar_cell = self.create_volume_bar_cell_without_text(volume_level, volume_data.max_volume);
+                let stats_cell = self.create_volume_stats_cell(volume_level);
+                (bar_cell, stats_cell)
             } else {
-                self.create_empty_volume_cell()
+                (self.create_empty_volume_cell(), Cell::from(""))
             };
 
-            rows.push(Row::new(vec![price_cell, volume_cell]));
+            rows.push(Row::new(vec![price_cell, volume_cell, stats_cell]));
         }
 
         // 如果没有数据，显示等待状态
         if rows.is_empty() {
             let empty_row = Row::new(vec![
                 Cell::from("等待成交数据...").style(Style::default().fg(Color::Yellow)),
+                Cell::from(""),
                 Cell::from(""),
             ]);
             rows.push(empty_row);
@@ -235,14 +238,16 @@ impl VolumeProfileWidget {
         let table = Table::new(
             rows,
             [
-                Constraint::Length(8),  // 价格列
-                Constraint::Percentage(100), // Volume Profile柱状图列
+                Constraint::Length(8),   // 价格列（8个字符宽度）
+                Constraint::Min(0),      // Volume Profile柱状图列（占据剩余所有空间）
+                Constraint::Length(8),   // 数值统计列（8个字符宽度，与价格列相同）
             ]
         )
         .header(
             Row::new(vec![
                 Cell::from("Price").style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
                 Cell::from("Volume").style(Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD)),
+                Cell::from("Vol/Delta").style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
             ])
         )
         .block(block);
@@ -250,28 +255,40 @@ impl VolumeProfileWidget {
         f.render_widget(table, area);
     }
 
-    /// 创建成交量柱状图单元格
-    fn create_volume_bar_cell(&self, volume_level: &VolumeLevel, max_volume: f64) -> Cell {
+    /// 创建成交量柱状图单元格（不带文本）
+    fn create_volume_bar_cell_without_text(&self, volume_level: &VolumeLevel, max_volume: f64) -> Cell {
         if volume_level.total_volume <= 0.0 {
             return Cell::from("");
         }
 
-        // 计算竖杠数量：每个竖杠代表0.1 BTC，最大500个竖杠（对应50 BTC）
+        // 计算Unicode块字符填充：0.1BTC对应最小填充字符单位
         let btc_volume = volume_level.total_volume; // 假设成交量单位就是BTC
-        let block_count = ((btc_volume / 0.1).round() as u16).min(500).max(1); // 每个竖杠代表0.1 BTC，最大500个
         
-        // 创建蓝色竖杠bar
-        let bar_chars = "|".repeat(block_count as usize);
+        // 计算delta（买单-卖单）
+        let delta = volume_level.buy_volume - volume_level.sell_volume;
         
-        // 计算剩余空间用于填充
-        let remaining_space = if block_count < 500 {
-            500 - block_count
+        // 根据delta决定颜色
+        let color = if delta > 10.0 {
+            Color::Green  // delta > 10BTC 显示绿色
+        } else if delta < -10.0 {
+            Color::Red    // delta < -10BTC 显示红色
         } else {
-            0
+            Color::Blue   // 默认蓝色
         };
-        let padding = " ".repeat(remaining_space as usize);
         
-        // 格式化总成交量显示（在bar右边末尾）
+        // 使用Unicode块字符创建更精细的bar显示（不限制长度）
+        let bar_chars = self.create_unicode_bar_unlimited(btc_volume);
+        
+        Cell::from(bar_chars)
+            .style(Style::default().fg(color))
+    }
+
+    /// 创建成交量统计信息单元格
+    fn create_volume_stats_cell(&self, volume_level: &VolumeLevel) -> Cell {
+        let btc_volume = volume_level.total_volume;
+        let delta = volume_level.buy_volume - volume_level.sell_volume;
+        
+        // 格式化总成交量显示
         let volume_text = if btc_volume >= 1000.0 {
             format!("{:.1}K", btc_volume / 1000.0)
         } else if btc_volume >= 100.0 {
@@ -282,16 +299,116 @@ impl VolumeProfileWidget {
             format!("{:.2}", btc_volume)
         };
 
-        // 组合显示：竖杠bar + 填充空间 + 成交量数值
-        let display_text = format!("{}{} {}", bar_chars, padding, volume_text);
+        // 格式化delta显示
+        let delta_text = if delta >= 0.0 {
+            format!("+{:.0}", delta)
+        } else {
+            format!("{:.0}", delta)  // 负号已经包含在delta中
+        };
+
+        // 组合显示：成交量数值 + delta数值
+        let display_text = format!("{} {}", volume_text, delta_text);
+        
+        // 根据delta决定颜色
+        let color = if delta > 10.0 {
+            Color::Green  // delta > 10BTC 显示绿色
+        } else if delta < -10.0 {
+            Color::Red    // delta < -10BTC 显示红色
+        } else {
+            Color::White  // 默认白色（统计信息用白色更清晰）
+        };
         
         Cell::from(display_text)
-            .style(Style::default().fg(Color::Blue))
+            .style(Style::default().fg(color))
+    }
+
+    /// 创建成交量柱状图单元格（保持向后兼容）
+    fn create_volume_bar_cell(&self, volume_level: &VolumeLevel, max_volume: f64) -> Cell {
+        // 为了向后兼容，保留原有函数但现在调用新的分离函数
+        self.create_volume_bar_cell_without_text(volume_level, max_volume)
     }
 
     /// 创建空的成交量单元格
     fn create_empty_volume_cell(&self) -> Cell {
         Cell::from(" ".repeat(self.bar_width as usize + 10))
+    }
+
+    /// 创建Unicode块字符填充的bar（不限制长度）
+    fn create_unicode_bar_unlimited(&self, btc_volume: f64) -> String {
+        if btc_volume <= 0.0 {
+            return String::new();
+        }
+
+        // 计算需要多少个0.1 BTC单位
+        let units = (btc_volume / 0.1).round() as usize;
+        
+        // 计算完整字符数（每个█代表8个0.1 BTC单位，即0.8 BTC）
+        let full_chars = units / 8;
+        // 计算剩余的0.1 BTC单位数
+        let remaining_units = units % 8;
+        
+        let mut bar = String::new();
+        
+        // 添加完整填充的字符（不限制数量）
+        for _ in 0..full_chars {
+            bar.push('█');
+        }
+        
+        // 添加部分填充的字符（如果有剩余）
+        if remaining_units > 0 {
+            let partial_char = match remaining_units {
+                1 => "▏",  // 0.1 BTC
+                2 => "▎",  // 0.2 BTC
+                3 => "▍",  // 0.3 BTC
+                4 => "▌",  // 0.4 BTC
+                5 => "▋",  // 0.5 BTC
+                6 => "▊",  // 0.6 BTC
+                7 => "▉",  // 0.7 BTC
+                _ => " ",  // 不应该到达这里
+            };
+            bar.push_str(partial_char);
+        }
+        
+        bar
+    }
+
+    /// 创建Unicode块字符填充的bar（保持向后兼容）
+    fn create_unicode_bar(&self, btc_volume: f64, max_width: usize) -> String {
+        if btc_volume <= 0.0 {
+            return String::new();
+        }
+
+        // 计算需要多少个0.1 BTC单位
+        let units = (btc_volume / 0.1).round() as usize;
+        
+        // 计算完整字符数（每个█代表8个0.1 BTC单位，即0.8 BTC）
+        let full_chars = units / 8;
+        // 计算剩余的0.1 BTC单位数
+        let remaining_units = units % 8;
+        
+        let mut bar = String::new();
+        
+        // 添加完整填充的字符
+        for _ in 0..full_chars.min(max_width) {
+            bar.push('█');
+        }
+        
+        // 添加部分填充的字符（如果还有空间且有剩余）
+        if bar.chars().count() < max_width && remaining_units > 0 {
+            let partial_char = match remaining_units {
+                1 => "▏",  // 0.1 BTC
+                2 => "▎",  // 0.2 BTC
+                3 => "▍",  // 0.3 BTC
+                4 => "▌",  // 0.4 BTC
+                5 => "▋",  // 0.5 BTC
+                6 => "▊",  // 0.6 BTC
+                7 => "▉",  // 0.7 BTC
+                _ => " ",  // 不应该到达这里
+            };
+            bar.push_str(partial_char);
+        }
+        
+        bar
     }
 
     /// 创建带高亮的价格单元格
@@ -340,28 +457,40 @@ impl VolumeProfileRenderer {
             .style(Style::default().fg(Color::White))
     }
 
-    /// 创建成交量柱状图单元格
-    pub fn create_volume_bar_cell(&self, volume_level: &VolumeLevel, max_volume: f64) -> Cell {
+    /// 创建成交量柱状图单元格（不带文本）
+    pub fn create_volume_bar_cell_without_text(&self, volume_level: &VolumeLevel, max_volume: f64) -> Cell {
         if volume_level.total_volume <= 0.0 {
             return Cell::from("");
         }
 
-        // 计算竖杠数量：每个竖杠代表0.1 BTC，最大500个竖杠（对应50 BTC）
+        // 计算Unicode块字符填充：0.1BTC对应最小填充字符单位
         let btc_volume = volume_level.total_volume; // 假设成交量单位就是BTC
-        let block_count = ((btc_volume / 0.1).round() as u16).min(500).max(1); // 每个竖杠代表0.1 BTC，最大500个
         
-        // 创建蓝色竖杠bar
-        let bar_chars = "|".repeat(block_count as usize);
+        // 计算delta（买单-卖单）
+        let delta = volume_level.buy_volume - volume_level.sell_volume;
         
-        // 计算剩余空间用于填充
-        let remaining_space = if block_count < 500 {
-            500 - block_count
+        // 根据delta决定颜色
+        let color = if delta > 10.0 {
+            Color::Green  // delta > 10BTC 显示绿色
+        } else if delta < -10.0 {
+            Color::Red    // delta < -10BTC 显示红色
         } else {
-            0
+            Color::Blue   // 默认蓝色
         };
-        let padding = " ".repeat(remaining_space as usize);
         
-        // 格式化总成交量显示（在bar右边末尾）
+        // 使用Unicode块字符创建更精细的bar显示（不限制长度）
+        let bar_chars = VolumeProfileRenderer::create_unicode_bar_unlimited(btc_volume);
+        
+        Cell::from(bar_chars)
+            .style(Style::default().fg(color))
+    }
+
+    /// 创建成交量统计信息单元格
+    pub fn create_volume_stats_cell(&self, volume_level: &VolumeLevel) -> Cell {
+        let btc_volume = volume_level.total_volume;
+        let delta = volume_level.buy_volume - volume_level.sell_volume;
+        
+        // 格式化总成交量显示
         let volume_text = if btc_volume >= 1000.0 {
             format!("{:.1}K", btc_volume / 1000.0)
         } else if btc_volume >= 100.0 {
@@ -372,16 +501,118 @@ impl VolumeProfileRenderer {
             format!("{:.2}", btc_volume)
         };
 
-        // 组合显示：竖杠bar + 填充空间 + 成交量数值
-        let display_text = format!("{}{} {}", bar_chars, padding, volume_text);
+        // 格式化delta显示
+        let delta_text = if delta >= 0.0 {
+            format!("+{:.0}", delta)
+        } else {
+            format!("{:.0}", delta)  // 负号已经包含在delta中
+        };
+
+        // 组合显示：成交量数值 + delta数值
+        let display_text = format!("{} {}", volume_text, delta_text);
+        
+        // 根据delta决定颜色
+        let color = if delta > 10.0 {
+            Color::Green  // delta > 10BTC 显示绿色
+        } else if delta < -10.0 {
+            Color::Red    // delta < -10BTC 显示红色
+        } else {
+            Color::White  // 默认白色（统计信息用白色更清晰）
+        };
         
         Cell::from(display_text)
-            .style(Style::default().fg(Color::Blue))
+            .style(Style::default().fg(color))
+    }
+
+    /// 创建成交量柱状图单元格（保持向后兼容）
+    pub fn create_volume_bar_cell(&self, volume_level: &VolumeLevel, max_volume: f64) -> Cell {
+        // 为了向后兼容，保留原有函数但现在调用新的分离函数
+        self.create_volume_bar_cell_without_text(volume_level, max_volume)
     }
 
     /// 创建空的成交量单元格
     pub fn create_empty_volume_cell(&self) -> Cell {
         Cell::from(" ".repeat(self.bar_width as usize + 10))
+    }
+
+    /// 创建Unicode块字符填充的bar（不限制长度，静态方法）
+    /// 新逻辑：每个部分字符（▏▎▍▌▋▊▉）直接代表0.1 BTC，每个完整字符█代表0.8 BTC
+    pub fn create_unicode_bar_unlimited(btc_volume: f64) -> String {
+        if btc_volume <= 0.0 {
+            return String::new();
+        }
+
+        // 计算需要多少个0.1 BTC单位
+        let units = (btc_volume / 0.1).round() as usize;
+        
+        // 计算完整字符数（每个█代表8个0.1 BTC单位，即0.8 BTC）
+        let full_chars = units / 8;
+        // 计算剩余的0.1 BTC单位数
+        let remaining_units = units % 8;
+        
+        let mut bar = String::new();
+        
+        // 添加完整填充的字符（不限制数量）
+        for _ in 0..full_chars {
+            bar.push('█');
+        }
+        
+        // 添加部分填充的字符（如果有剩余）
+        if remaining_units > 0 {
+            let partial_char = match remaining_units {
+                1 => "▏",  // 0.1 BTC
+                2 => "▎",  // 0.2 BTC
+                3 => "▍",  // 0.3 BTC
+                4 => "▌",  // 0.4 BTC
+                5 => "▋",  // 0.5 BTC
+                6 => "▊",  // 0.6 BTC
+                7 => "▉",  // 0.7 BTC
+                _ => " ",  // 不应该到达这里
+            };
+            bar.push_str(partial_char);
+        }
+        
+        bar
+    }
+
+    /// 创建Unicode块字符填充的bar（限制长度，静态方法，保持向后兼容）
+    /// 新逻辑：每个部分字符（▏▎▍▌▋▊▉）直接代表0.1 BTC，每个完整字符█代表0.8 BTC
+    pub fn create_unicode_bar(btc_volume: f64, max_width: usize) -> String {
+        if btc_volume <= 0.0 {
+            return String::new();
+        }
+
+        // 计算需要多少个0.1 BTC单位
+        let units = (btc_volume / 0.1).round() as usize;
+        
+        // 计算完整字符数（每个█代表8个0.1 BTC单位，即0.8 BTC）
+        let full_chars = units / 8;
+        // 计算剩余的0.1 BTC单位数
+        let remaining_units = units % 8;
+        
+        let mut bar = String::new();
+        
+        // 添加完整填充的字符
+        for _ in 0..full_chars.min(max_width) {
+            bar.push('█');
+        }
+        
+        // 添加部分填充的字符（如果还有空间且有剩余）
+        if bar.chars().count() < max_width && remaining_units > 0 {
+            let partial_char = match remaining_units {
+                1 => "▏",  // 0.1 BTC
+                2 => "▎",  // 0.2 BTC
+                3 => "▍",  // 0.3 BTC
+                4 => "▌",  // 0.4 BTC
+                5 => "▋",  // 0.5 BTC
+                6 => "▊",  // 0.6 BTC
+                7 => "▉",  // 0.7 BTC
+                _ => " ",  // 不应该到达这里
+            };
+            bar.push_str(partial_char);
+        }
+        
+        bar
     }
 }
 
@@ -441,5 +672,50 @@ mod tests {
         
         let cell = renderer.create_volume_bar_cell(&level, 100.0);
         // 验证单元格创建成功（具体内容验证在集成测试中进行）
+    }
+
+    #[test]
+    fn test_unicode_bar_new_logic() {
+        // 测试新的Unicode字符计算逻辑
+        
+        // 测试0.1 BTC = 1个部分字符
+        let bar = VolumeProfileRenderer::create_unicode_bar_unlimited(0.1);
+        assert_eq!(bar, "▏", "0.1 BTC应该显示为▏");
+        
+        // 测试0.5 BTC = 5个部分字符单位 = ▋
+        let bar = VolumeProfileRenderer::create_unicode_bar_unlimited(0.5);
+        assert_eq!(bar, "▋", "0.5 BTC应该显示为▋");
+        
+        // 测试0.8 BTC = 8个部分字符单位 = 1个完整字符
+        let bar = VolumeProfileRenderer::create_unicode_bar_unlimited(0.8);
+        assert_eq!(bar, "█", "0.8 BTC应该显示为█");
+        
+        // 测试1.0 BTC = 10个部分字符单位 = 1个完整字符 + 2个部分字符单位
+        let bar = VolumeProfileRenderer::create_unicode_bar_unlimited(1.0);
+        assert_eq!(bar, "█▎", "1.0 BTC应该显示为█▎");
+        
+        // 测试1.6 BTC = 16个部分字符单位 = 2个完整字符
+        let bar = VolumeProfileRenderer::create_unicode_bar_unlimited(1.6);
+        assert_eq!(bar, "██", "1.6 BTC应该显示为██");
+        
+        // 测试大数值 10.0 BTC
+        let bar = VolumeProfileRenderer::create_unicode_bar_unlimited(10.0);
+        let expected_full_chars = 10.0 / 0.8; // 12.5个完整字符，取整为12个
+        let expected_chars = 12; // 实际应该是12个完整字符 + 部分字符
+        assert!(bar.chars().any(|c| c == '█'), "10.0 BTC应该包含完整字符█");
+        assert!(bar.len() > 10, "10.0 BTC应该有足够长的显示");
+    }
+
+    #[test]
+    fn test_unicode_bar_widget_logic() {
+        let widget = VolumeProfileWidget::new();
+        
+        // 测试0.3 BTC
+        let bar = widget.create_unicode_bar_unlimited(0.3);
+        assert_eq!(bar, "▍", "0.3 BTC应该显示为▍");
+        
+        // 测试2.4 BTC = 24个部分字符单位 = 3个完整字符
+        let bar = widget.create_unicode_bar_unlimited(2.4);
+        assert_eq!(bar, "███", "2.4 BTC应该显示为███");
     }
 }

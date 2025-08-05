@@ -8,7 +8,7 @@ use crossterm::{
 };
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout},
+    layout::{Constraint, Direction, Layout, Rect},
     Frame, Terminal,
 };
 use std::{
@@ -159,12 +159,13 @@ fn run_app(
 fn ui(f: &mut Frame, app: &ReactiveApp, volume_profile_widget: &VolumeProfileWidget) {
     let size = f.area();
 
-    // 创建三列布局：订单薄(40%)、Volume Profile(40%)、信号(20%)
+    // 创建三列布局：订单薄(30%)、Volume Profile(50%)、信号(20%)
+    // 直接使用整个屏幕区域，不保留边距
     let horizontal_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Percentage(30), // 订单薄占40%
-            Constraint::Percentage(50), // Volume Profile占40%
+            Constraint::Percentage(30), // 订单薄占30%
+            Constraint::Percentage(50), // Volume Profile占50%
             Constraint::Percentage(20), // 市场信号占20%
         ])
         .split(size);
