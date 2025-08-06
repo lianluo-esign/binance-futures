@@ -51,16 +51,8 @@ impl BarChartRenderer {
         // 基于BTC数量计算unicode块字符单位 - 每0.1BTC一个最小单位
         let block_count = self.calculate_btc_blocks(volume);
         
-        // 格式化挂单量显示文本 - 更紧凑的格式
-        let volume_text = if volume >= 1000.0 {
-            format!("{:.0}K", volume / 1000.0)
-        } else if volume >= 100.0 {
-            format!("{:.0}", volume)
-        } else if volume >= 10.0 {
-            format!("{:.1}", volume)
-        } else {
-            format!("{:.1}", volume)
-        };
+        // 格式化挂单量显示文本 - 保留小数点后5位
+        let volume_text = format!("{:.5}", volume);
 
         self.create_btc_bar_string(block_count, &volume_text, cell_width, true)
     }
@@ -74,16 +66,8 @@ impl BarChartRenderer {
         // 基于BTC数量计算unicode块字符单位 - 每0.1BTC一个最小单位
         let block_count = self.calculate_btc_blocks(volume);
         
-        // 格式化挂单量显示文本 - 更紧凑的格式
-        let volume_text = if volume >= 1000.0 {
-            format!("{:.0}K", volume / 1000.0)
-        } else if volume >= 100.0 {
-            format!("{:.0}", volume)
-        } else if volume >= 10.0 {
-            format!("{:.1}", volume)
-        } else {
-            format!("{:.1}", volume)
-        };
+        // 格式化挂单量显示文本 - 保留小数点后5位
+        let volume_text = format!("{:.5}", volume);
 
         self.create_btc_bar_string(block_count, &volume_text, cell_width, false)
     }
@@ -97,16 +81,8 @@ impl BarChartRenderer {
         // 基于BTC数量计算unicode块字符单位 - 每0.1BTC一个最小单位
         let units = self.calculate_btc_blocks(volume);
         
-        // 格式化挂单量显示文本 - 更紧凑的格式
-        let volume_text = if volume >= 1000.0 {
-            format!("{:.0}K", volume / 1000.0)
-        } else if volume >= 100.0 {
-            format!("{:.0}", volume)
-        } else if volume >= 10.0 {
-            format!("{:.1}", volume)
-        } else {
-            format!("{:.1}", volume)
-        };
+        // 格式化挂单量显示文本 - 保留小数点后5位
+        let volume_text = format!("{:.5}", volume);
 
         // 创建unicode块字符串
         let bar_chars = self.create_unicode_bar_from_units(units);
@@ -219,14 +195,18 @@ impl BarChartRenderer {
         }
     }
 
-    /// 基于BTC数量计算unicode块字符 - 每0.1BTC一个最小单位，参照volume profile实现
+    /// 基于BTC数量计算unicode块字符 - 每0.001BTC一个最小单位
     pub fn calculate_btc_blocks(&self, volume: f64) -> u16 {
         if volume <= 0.0 {
             return 0;
         }
         
-        // 每0.1BTC一个最小单位，参照volume profile的实现
-        let units = (volume / 0.1).round() as u16;
+        // 每0.001BTC一个最小单位，如果挂单量低于0.001BTC则显示一个最小的字符块
+        let units = if volume < 0.001 {
+            1  // 低于0.001BTC时显示一个最小字符块
+        } else {
+            (volume / 0.005).round() as u16
+        };
         
         // 不设置上限，让显示更准确反映实际挂单量
         units
@@ -253,16 +233,16 @@ impl BarChartRenderer {
         format!("{} {}", text, truncated_bar)
     }
 
-    /// 创建Unicode块字符填充的bar，参照volume profile实现
-    /// 每个部分字符（▏▎▍▌▋▊▉）代表0.1 BTC，每个完整字符█代表0.8 BTC
+    /// 创建Unicode块字符填充的bar，每个字符块代表0.001 BTC的最小单位
+    /// 每个部分字符（▏▎▍▌▋▊▉）代表不同数量的0.001 BTC单位，每个完整字符█代表8个0.001 BTC单位
     fn create_unicode_bar_from_units(&self, units: u16) -> String {
         if units == 0 {
             return String::new();
         }
 
-        // 计算完整字符数（每个█代表8个0.1 BTC单位，即0.8 BTC）
+        // 计算完整字符数（每个█代表8个0.001 BTC单位）
         let full_chars = units / 8;
-        // 计算剩余的0.1 BTC单位数
+        // 计算剩余的0.001 BTC单位数
         let remaining_units = units % 8;
         
         let mut bar = String::new();
@@ -275,13 +255,13 @@ impl BarChartRenderer {
         // 添加部分填充的字符（如果有剩余）
         if remaining_units > 0 {
             let partial_char = match remaining_units {
-                1 => "▏",  // 0.1 BTC
-                2 => "▎",  // 0.2 BTC
-                3 => "▍",  // 0.3 BTC
-                4 => "▌",  // 0.4 BTC
-                5 => "▋",  // 0.5 BTC
-                6 => "▊",  // 0.6 BTC
-                7 => "▉",  // 0.7 BTC
+                1 => "▏",  // 1个0.001 BTC单位
+                2 => "▎",  // 2个0.001 BTC单位
+                3 => "▍",  // 3个0.001 BTC单位
+                4 => "▌",  // 4个0.001 BTC单位
+                5 => "▋",  // 5个0.001 BTC单位
+                6 => "▊",  // 6个0.001 BTC单位
+                7 => "▉",  // 7个0.001 BTC单位
                 _ => " ",  // 不应该到达这里
             };
             bar.push_str(partial_char);
@@ -426,11 +406,11 @@ mod tests {
         let cell = renderer.create_bar_with_text(0.0, 100.0, 20, true);
         // 这里我们不能直接比较Cell的内容，但至少确保不会panic
         
-        // 测试修复后的unicode块字符计算：每0.1BTC一个最小单位
-        assert_eq!(renderer.calculate_btc_blocks(0.1), 1);   // 0.1BTC，显示1个单位
-        assert_eq!(renderer.calculate_btc_blocks(0.19), 2);  // 0.19BTC，四舍五入显示2个单位
-        assert_eq!(renderer.calculate_btc_blocks(0.2), 2);   // 0.2BTC，显示2个单位
-        assert_eq!(renderer.calculate_btc_blocks(0.21), 2);  // 0.21BTC，四舍五入显示2个单位
-        assert_eq!(renderer.calculate_btc_blocks(0.4), 4);   // 0.4BTC，显示4个单位
+        // 测试修复后的unicode块字符计算：每0.001BTC一个最小单位
+        assert_eq!(renderer.calculate_btc_blocks(0.001), 1);   // 0.001BTC，显示1个单位
+        assert_eq!(renderer.calculate_btc_blocks(0.0005), 1);  // 0.0005BTC，低于0.001BTC显示1个最小字符块
+        assert_eq!(renderer.calculate_btc_blocks(0.002), 2);   // 0.002BTC，显示2个单位
+        assert_eq!(renderer.calculate_btc_blocks(0.0015), 2);  // 0.0015BTC，四舍五入显示2个单位
+        assert_eq!(renderer.calculate_btc_blocks(0.004), 4);   // 0.004BTC，显示4个单位
     }
 }

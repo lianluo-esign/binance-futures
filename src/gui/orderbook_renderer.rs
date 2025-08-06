@@ -103,19 +103,31 @@ impl OrderBookRenderer {
         // 准备渲染数据
         let render_data = self.prepare_render_data(app);
 
-        // 更新价格跟踪器 - 使用best_bid作为主要参考价格
+        // 更新价格跟踪器 - 使用bookticker的best bid price作为主要基准进行追踪
         let reference_price = render_data.best_bid_price
             .or(render_data.current_trade_price)
             .or(render_data.best_ask_price);
         
-        // 确保参考价格在聚合后的价格列表中存在
+        // 确保参考价格在聚合后的价格列表中存在，使用更精确的价格验证
         if let Some(price) = reference_price {
             let price_levels: Vec<f64> = render_data.price_levels.iter().map(|level| level.price).collect();
             let validated_price = if self.price_tracker.is_price_in_range(price, &price_levels) {
                 Some(price)
             } else {
-                // 使用聚合后的价格
-                Some((price / 1.0).floor() * 1.0)
+                // 使用聚合后的价格，确保精度匹配
+                let aggregated_price = (price / 1.0).floor() * 1.0;
+                if price_levels.iter().any(|&p| (p - aggregated_price).abs() < 0.01) {
+                    Some(aggregated_price)
+                } else {
+                    // 如果聚合价格也不存在，使用最接近的价格层级
+                    price_levels.iter()
+                        .min_by(|&&a, &&b| {
+                            let dist_a = (a - price).abs();
+                            let dist_b = (b - price).abs();
+                            dist_a.partial_cmp(&dist_b).unwrap()
+                        })
+                        .copied()
+                }
             };
             self.price_tracker.update_tracking(validated_price);
         } else {
@@ -219,9 +231,9 @@ impl OrderBookRenderer {
         }
     }
 
-    /// 计算可见范围 - 修复价格下跌时的居中问题
+    /// 计算可见范围 - 使用bookticker的best bid price作为基准进行居中追踪
     fn calculate_visible_range(&mut self, render_data: &OrderBookRenderData, visible_rows: usize) -> (usize, usize) {
-        // 优先使用best_bid作为参考价格（更稳定），然后是当前交易价格，最后是best_ask
+        // 使用bookticker的best bid price作为主要基准，备用current_trade_price和best_ask
         let reference_price = render_data.best_bid_price
             .or(render_data.current_trade_price)
             .or(render_data.best_ask_price);

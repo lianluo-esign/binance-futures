@@ -56,6 +56,9 @@ pub struct ReactiveApp {
     circuit_breaker_failures: u32,
     circuit_breaker_open: bool,
     circuit_breaker_last_failure: Option<Instant>,
+    
+    // 最新交易数据（用于价格图表）
+    last_trade_volume: Option<f64>,
 }
 
 impl ReactiveApp {
@@ -99,6 +102,7 @@ impl ReactiveApp {
             circuit_breaker_failures: 0,
             circuit_breaker_open: false,
             circuit_breaker_last_failure: None,
+            last_trade_volume: None,
         }
     }
 
@@ -248,6 +252,14 @@ impl ReactiveApp {
                 log::warn!("交易更新处理超时，跳过");
                 return None;
             }
+            
+            // 存储交易成交量信息（用于价格图表）
+            if let Some(qty_str) = event_data["q"].as_str() {
+                if let Ok(qty) = qty_str.parse::<f64>() {
+                    self.last_trade_volume = Some(qty);
+                }
+            }
+            
             // 同时更新订单簿管理器
             self.orderbook_manager.handle_trade(&event_data);
             
@@ -565,6 +577,11 @@ impl ReactiveApp {
     /// 获取Volume Profile管理器
     pub fn get_volume_profile_manager(&self) -> &VolumeProfileManager {
         &self.volume_profile_manager
+    }
+    
+    /// 获取最新交易的成交量
+    pub fn get_last_trade_volume(&self) -> Option<f64> {
+        self.last_trade_volume
     }
 
     /// 从交易数据更新Volume Profile

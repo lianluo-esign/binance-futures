@@ -37,7 +37,8 @@ impl WebSocketConfig {
 
     pub fn build_url(&self) -> String {
         format!(
-            "wss://fstream.binance.com/stream?streams={}",
+            // "wss://fstream.binance.com/stream?streams={}",
+            "wss://stream.binance.com:9443/stream?streams={}",
             self.streams.join("/")
         )
     }

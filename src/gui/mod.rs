@@ -8,6 +8,7 @@ pub mod signal_renderer;
 pub mod signal_functions;
 pub mod volume_profile;
 pub mod price_chart;
+pub mod volume_bar_chart;
 
 pub use egui_app::TradingGUI;
 pub use orderbook_renderer::{OrderBookRenderer, OrderBookRenderData, PriceLevel};
@@ -18,3 +19,4 @@ pub use signal_renderer::SignalRenderer;
 pub use signal_functions::render_signals;
 pub use volume_profile::{VolumeProfileManager, VolumeProfileRenderer, VolumeProfileData, VolumeLevel, VolumeProfileWidget};
 pub use price_chart::{PriceChartRenderer, PricePoint, PriceChartStats};
+pub use volume_bar_chart::{VolumeBarChartRenderer, VolumeMinuteData, VolumeBarChartStats};

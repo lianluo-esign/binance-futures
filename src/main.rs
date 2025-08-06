@@ -1,5 +1,5 @@
 use binance_futures::{init_logging, Config, ReactiveApp};
-use binance_futures::gui::{render_signals, VolumeProfileWidget, PriceChartRenderer};
+use binance_futures::gui::{render_signals, VolumeProfileWidget, PriceChartRenderer, VolumeBarChartRenderer};
 use binance_futures::orderbook::render_orderbook;
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind},
@@ -24,7 +24,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_logging();
 
     // 获取交易对参数
-    let symbol = env::args().nth(1).unwrap_or_else(|| "BTCUSDT".to_string());
+    let symbol = env::args().nth(1).unwrap_or_else(|| "BTCFDUSD".to_string());
 
     // 创建配置
     let config = Config::new(symbol)
@@ -77,8 +77,11 @@ fn run_app(
     // 创建Volume Profile widget
     let mut volume_profile_widget = VolumeProfileWidget::new();
     
-    // 创建价格图表渲染器，默认10000个数据点的滑动窗口
-    let mut price_chart_renderer = PriceChartRenderer::new(10000);
+    // 创建价格图表渲染器，使用20000个数据点的滑动窗口
+    let mut price_chart_renderer = PriceChartRenderer::new(20000);
+    
+    // 创建成交量柱状图渲染器，使用30分钟滑动窗口
+    let mut volume_bar_chart_renderer = VolumeBarChartRenderer::new();
     
     // 主事件循环 - 集成WebSocket处理和UI刷新，与备份版本保持一致
     loop {
@@ -90,9 +93,12 @@ fn run_app(
         
         // 更新价格图表数据
         update_price_chart(&mut price_chart_renderer, app);
+        
+        // 更新成交量柱状图数据
+        update_volume_bar_chart(&mut volume_bar_chart_renderer, &price_chart_renderer);
 
         // 刷新UI
-        terminal.draw(|f| ui(f, app, &volume_profile_widget, &price_chart_renderer))?;
+        terminal.draw(|f| ui(f, app, &volume_profile_widget, &price_chart_renderer, &volume_bar_chart_renderer))?;
 
         // 处理UI事件（非阻塞）- 与备份版本完全一致
         if crossterm::event::poll(Duration::from_millis(0))? {
@@ -161,26 +167,41 @@ fn run_app(
     Ok(())
 }
 
-/// UI渲染函数 - 四列布局版本
-fn ui(f: &mut Frame, app: &ReactiveApp, volume_profile_widget: &VolumeProfileWidget, price_chart_renderer: &PriceChartRenderer) {
+/// UI渲染函数 - 三列布局版本，右侧图表区域分上下两部分
+fn ui(
+    f: &mut Frame, 
+    app: &ReactiveApp, 
+    volume_profile_widget: &VolumeProfileWidget, 
+    price_chart_renderer: &PriceChartRenderer, 
+    volume_bar_chart_renderer: &VolumeBarChartRenderer
+) {
     let size = f.area();
 
-    // 创建四列布局：订单薄(20%)、Volume Profile(30%)、信号(10%)、价格图表(剩余宽度)
-    // 直接使用整个屏幕区域，不保留边距
+    // 创建三列布局：订单薄(20%)、Volume Profile(30%)、图表区域(50%)
     let horizontal_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
             Constraint::Percentage(20), // 订单薄占20%
             Constraint::Percentage(30), // Volume Profile占30%
-            Constraint::Percentage(10), // 市场信号占10%
-            Constraint::Percentage(40), // 价格图表占剩余40%
+            Constraint::Percentage(50), // 图表区域占50%
         ])
         .split(size);
 
     let orderbook_area = horizontal_chunks[0];
     let volume_profile_area = horizontal_chunks[1];
-    let signal_area = horizontal_chunks[2];
-    let price_chart_area = horizontal_chunks[3];
+    let chart_area = horizontal_chunks[2];
+
+    // 将图表区域垂直分割：价格图表(80%) + 成交量柱状图(20%)
+    let chart_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage(80), // 价格图表占80%
+            Constraint::Percentage(20), // 成交量柱状图占20%
+        ])
+        .split(chart_area);
+
+    let price_chart_area = chart_chunks[0];
+    let volume_bar_chart_area = chart_chunks[1];
 
     // 渲染各个组件
     render_orderbook(f, app, orderbook_area);
@@ -188,10 +209,11 @@ fn ui(f: &mut Frame, app: &ReactiveApp, volume_profile_widget: &VolumeProfileWid
     // 渲染Volume Profile widget
     render_volume_profile(f, app, volume_profile_widget, volume_profile_area);
     
-    render_signals(f, app, signal_area);
-    
     // 渲染价格图表
     render_price_chart(f, price_chart_renderer, price_chart_area);
+    
+    // 渲染成交量柱状图
+    render_volume_bar_chart(f, volume_bar_chart_renderer, volume_bar_chart_area);
 }
 
 /// 更新Volume Profile数据
@@ -468,18 +490,55 @@ fn get_visible_price_range_for_area(app: &ReactiveApp, visible_rows: usize) -> V
 
 /// 更新价格图表数据
 fn update_price_chart(price_chart_renderer: &mut PriceChartRenderer, app: &ReactiveApp) {
-    // 获取当前市场快照
-    let market_snapshot = app.get_market_snapshot();
+    // 获取最新交易数据并添加为价格点（现在所有价格点都是交易数据点）
+    let orderbook_manager = app.get_orderbook_manager();
+    let (last_trade_price, last_trade_side, last_trade_timestamp) = orderbook_manager.get_last_trade_highlight();
     
-    // 如果有当前交易价格，添加到价格图表
-    if let Some(current_price) = market_snapshot.current_price {
-        price_chart_renderer.add_price_point(current_price);
+    // 如果有最新交易数据，并且交易时间足够新（3秒内），添加价格点
+    if let (Some(price), Some(side), Some(_timestamp)) = (last_trade_price, last_trade_side, last_trade_timestamp) {
+        if orderbook_manager.should_show_trade_highlight(3000) { // 3秒内的交易
+            // 确定交易方向：buy是买单（绿色），sell是卖单（红色）
+            let is_buyer_maker = side == "sell";
+            
+            // 获取真实的成交量数据
+            let volume = app.get_last_trade_volume().unwrap_or(0.001); // 使用真实成交量，默认0.001
+            
+            // 统一使用add_price_point，现在包含交易信息
+            price_chart_renderer.add_price_point(price, volume, is_buyer_maker);
+        }
+    } else {
+        // 如果没有最新交易数据，使用市场快照中的价格（作为默认的小量买单）
+        let market_snapshot = app.get_market_snapshot();
+        if let Some(current_price) = market_snapshot.current_price {
+            price_chart_renderer.add_price_point(current_price, 0.001, false); // 默认小量买单
+        }
     }
 }
 
 /// 渲染价格图表
 fn render_price_chart(f: &mut Frame, price_chart_renderer: &PriceChartRenderer, area: Rect) {
     price_chart_renderer.render(f, area);
+}
+
+/// 更新成交量柱状图数据
+fn update_volume_bar_chart(
+    volume_bar_chart_renderer: &mut VolumeBarChartRenderer, 
+    price_chart_renderer: &PriceChartRenderer
+) {
+    // 从价格图表中获取所有交易数据点，并同步到成交量柱状图
+    // 使用批量同步方式避免重复计算
+    let trade_data: Vec<(u64, f64, bool)> = price_chart_renderer
+        .get_data_points()
+        .map(|point| (point.timestamp, point.volume, point.is_buyer_maker))
+        .collect();
+    
+    // 批量同步数据到成交量柱状图
+    volume_bar_chart_renderer.sync_from_price_data(trade_data.into_iter());
+}
+
+/// 渲染成交量柱状图
+fn render_volume_bar_chart(f: &mut Frame, volume_bar_chart_renderer: &VolumeBarChartRenderer, area: Rect) {
+    volume_bar_chart_renderer.render(f, area);
 }
 
 

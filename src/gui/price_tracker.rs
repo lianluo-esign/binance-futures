@@ -16,12 +16,12 @@ impl PriceTracker {
     pub fn new() -> Self {
         Self {
             last_best_bid: None,
-            center_threshold: 1.0, // 价格变化1美元时触发重新居中（提高敏感度）
+            center_threshold: 0.5, // 价格变化0.5美元时触发重新居中（提高对best bid的敏感度）
             auto_center_enabled: true,
             smooth_scroll_enabled: true,
-            price_tolerance: 0.5, // 价格匹配容差（放宽以适应聚合）
+            price_tolerance: 0.3, // 价格匹配容差（适应best bid价格的精度要求）
             last_center_time: None,
-            min_center_interval: Duration::from_millis(200), // 最小居中间隔200ms（提高响应速度）
+            min_center_interval: Duration::from_millis(100), // 最小居中间隔100ms（加快对best bid变化的响应）
         }
     }
 

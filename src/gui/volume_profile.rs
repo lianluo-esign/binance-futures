@@ -288,22 +288,14 @@ impl VolumeProfileWidget {
         let btc_volume = volume_level.total_volume;
         let delta = volume_level.buy_volume - volume_level.sell_volume;
         
-        // 格式化总成交量显示
-        let volume_text = if btc_volume >= 1000.0 {
-            format!("{:.1}K", btc_volume / 1000.0)
-        } else if btc_volume >= 100.0 {
-            format!("{:.0}", btc_volume)
-        } else if btc_volume >= 10.0 {
-            format!("{:.1}", btc_volume)
-        } else {
-            format!("{:.2}", btc_volume)
-        };
+        // 格式化总成交量显示 - 保留5位小数
+        let volume_text = format!("{:.5}", btc_volume);
 
-        // 格式化delta显示
+        // 格式化delta显示 - 保留5位小数
         let delta_text = if delta >= 0.0 {
-            format!("+{:.0}", delta)
+            format!("+{:.5}", delta)
         } else {
-            format!("{:.0}", delta)  // 负号已经包含在delta中
+            format!("{:.5}", delta)  // 负号已经包含在delta中
         };
 
         // 组合显示：成交量数值 + delta数值
@@ -339,12 +331,12 @@ impl VolumeProfileWidget {
             return String::new();
         }
 
-        // 计算需要多少个0.1 BTC单位
-        let units = (btc_volume / 0.1).round() as usize;
+        // 计算需要多少个0.01 BTC单位（适合现货精度）
+        let units = (btc_volume / 0.01).round() as usize;
         
-        // 计算完整字符数（每个█代表8个0.1 BTC单位，即0.8 BTC）
+        // 计算完整字符数（每个█代表8个0.01 BTC单位，即0.08 BTC）
         let full_chars = units / 8;
-        // 计算剩余的0.1 BTC单位数
+        // 计算剩余的0.01 BTC单位数
         let remaining_units = units % 8;
         
         let mut bar = String::new();
@@ -357,13 +349,13 @@ impl VolumeProfileWidget {
         // 添加部分填充的字符（如果有剩余）
         if remaining_units > 0 {
             let partial_char = match remaining_units {
-                1 => "▏",  // 0.1 BTC
-                2 => "▎",  // 0.2 BTC
-                3 => "▍",  // 0.3 BTC
-                4 => "▌",  // 0.4 BTC
-                5 => "▋",  // 0.5 BTC
-                6 => "▊",  // 0.6 BTC
-                7 => "▉",  // 0.7 BTC
+                1 => "▏",  // 0.01 BTC
+                2 => "▎",  // 0.02 BTC
+                3 => "▍",  // 0.03 BTC
+                4 => "▌",  // 0.04 BTC
+                5 => "▋",  // 0.05 BTC
+                6 => "▊",  // 0.06 BTC
+                7 => "▉",  // 0.07 BTC
                 _ => " ",  // 不应该到达这里
             };
             bar.push_str(partial_char);
@@ -371,6 +363,7 @@ impl VolumeProfileWidget {
         
         bar
     }
+
 
     /// 创建Unicode块字符填充的bar（保持向后兼容）
     fn create_unicode_bar(&self, btc_volume: f64, max_width: usize) -> String {
@@ -490,22 +483,14 @@ impl VolumeProfileRenderer {
         let btc_volume = volume_level.total_volume;
         let delta = volume_level.buy_volume - volume_level.sell_volume;
         
-        // 格式化总成交量显示
-        let volume_text = if btc_volume >= 1000.0 {
-            format!("{:.1}K", btc_volume / 1000.0)
-        } else if btc_volume >= 100.0 {
-            format!("{:.0}", btc_volume)
-        } else if btc_volume >= 10.0 {
-            format!("{:.1}", btc_volume)
-        } else {
-            format!("{:.2}", btc_volume)
-        };
+        // 格式化总成交量显示 - 保留5位小数
+        let volume_text = format!("{:.5}", btc_volume);
 
-        // 格式化delta显示
+        // 格式化delta显示 - 保留5位小数
         let delta_text = if delta >= 0.0 {
-            format!("+{:.0}", delta)
+            format!("+{:.5}", delta)
         } else {
-            format!("{:.0}", delta)  // 负号已经包含在delta中
+            format!("{:.5}", delta)  // 负号已经包含在delta中
         };
 
         // 组合显示：成交量数值 + delta数值
@@ -536,18 +521,18 @@ impl VolumeProfileRenderer {
     }
 
     /// 创建Unicode块字符填充的bar（不限制长度，静态方法）
-    /// 新逻辑：每个部分字符（▏▎▍▌▋▊▉）直接代表0.1 BTC，每个完整字符█代表0.8 BTC
+    /// 新逻辑：每个部分字符（▏▎▍▌▋▊▉）直接代表0.01 BTC，每个完整字符█代表0.08 BTC
     pub fn create_unicode_bar_unlimited(btc_volume: f64) -> String {
         if btc_volume <= 0.0 {
             return String::new();
         }
 
-        // 计算需要多少个0.1 BTC单位
-        let units = (btc_volume / 0.1).round() as usize;
+        // 计算需要多少个0.01 BTC单位
+        let units = (btc_volume / 0.01).round() as usize;
         
-        // 计算完整字符数（每个█代表8个0.1 BTC单位，即0.8 BTC）
+        // 计算完整字符数（每个█代表8个0.01 BTC单位，即0.08 BTC）
         let full_chars = units / 8;
-        // 计算剩余的0.1 BTC单位数
+        // 计算剩余的0.01 BTC单位数
         let remaining_units = units % 8;
         
         let mut bar = String::new();
@@ -560,13 +545,13 @@ impl VolumeProfileRenderer {
         // 添加部分填充的字符（如果有剩余）
         if remaining_units > 0 {
             let partial_char = match remaining_units {
-                1 => "▏",  // 0.1 BTC
-                2 => "▎",  // 0.2 BTC
-                3 => "▍",  // 0.3 BTC
-                4 => "▌",  // 0.4 BTC
-                5 => "▋",  // 0.5 BTC
-                6 => "▊",  // 0.6 BTC
-                7 => "▉",  // 0.7 BTC
+                1 => "▏",  // 0.01 BTC
+                2 => "▎",  // 0.02 BTC
+                3 => "▍",  // 0.03 BTC
+                4 => "▌",  // 0.04 BTC
+                5 => "▋",  // 0.05 BTC
+                6 => "▊",  // 0.06 BTC
+                7 => "▉",  // 0.07 BTC
                 _ => " ",  // 不应该到达这里
             };
             bar.push_str(partial_char);
@@ -574,6 +559,7 @@ impl VolumeProfileRenderer {
         
         bar
     }
+
 
     /// 创建Unicode块字符填充的bar（限制长度，静态方法，保持向后兼容）
     /// 新逻辑：每个部分字符（▏▎▍▌▋▊▉）直接代表0.1 BTC，每个完整字符█代表0.8 BTC
