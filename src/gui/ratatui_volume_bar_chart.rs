@@ -136,7 +136,7 @@ impl RatatuiVolumeBarChartRenderer {
     }
 
     /// 准备 BarChart 数据 - 修复版本：确保填满整个窗口
-    fn prepare_bar_data(&self) -> Vec<(&'static str, u64)> {
+    pub fn prepare_bar_data(&self) -> Vec<(&'static str, u64)> {
         let labels = ["M1", "M2", "M3", "M4", "M5", "M6", "M7", "M8", "M9", "M10",
                      "M11", "M12", "M13", "M14", "M15", "M16", "M17", "M18", "M19", "M20"];
         
