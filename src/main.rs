@@ -1,5 +1,5 @@
 use binance_futures::{init_logging, Config, ReactiveApp};
-use binance_futures::gui::{render_signals, VolumeProfileWidget, PriceChartRenderer, VolumeBarChartRenderer};
+use binance_futures::gui::{render_signals, VolumeProfileWidget, PriceChartRenderer, RatatuiVolumeBarChartRenderer};
 use binance_futures::orderbook::render_orderbook;
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind},
@@ -80,8 +80,8 @@ fn run_app(
     // 创建价格图表渲染器，使用20000个数据点的滑动窗口
     let mut price_chart_renderer = PriceChartRenderer::new(20000);
     
-    // 创建成交量柱状图渲染器，使用30分钟滑动窗口
-    let mut volume_bar_chart_renderer = VolumeBarChartRenderer::new();
+    // 创建成交量柱状图渲染器，使用20分钟滑动窗口
+    let mut volume_bar_chart_renderer = RatatuiVolumeBarChartRenderer::new();
     
     // 主事件循环 - 集成WebSocket处理和UI刷新，与备份版本保持一致
     loop {
@@ -173,7 +173,7 @@ fn ui(
     app: &ReactiveApp, 
     volume_profile_widget: &VolumeProfileWidget, 
     price_chart_renderer: &PriceChartRenderer, 
-    volume_bar_chart_renderer: &VolumeBarChartRenderer
+    volume_bar_chart_renderer: &RatatuiVolumeBarChartRenderer
 ) {
     let size = f.area();
 
@@ -522,7 +522,7 @@ fn render_price_chart(f: &mut Frame, price_chart_renderer: &PriceChartRenderer, 
 
 /// 更新成交量柱状图数据
 fn update_volume_bar_chart(
-    volume_bar_chart_renderer: &mut VolumeBarChartRenderer, 
+    volume_bar_chart_renderer: &mut RatatuiVolumeBarChartRenderer, 
     price_chart_renderer: &PriceChartRenderer
 ) {
     // 从价格图表中获取所有交易数据点，并同步到成交量柱状图
@@ -537,7 +537,7 @@ fn update_volume_bar_chart(
 }
 
 /// 渲染成交量柱状图
-fn render_volume_bar_chart(f: &mut Frame, volume_bar_chart_renderer: &VolumeBarChartRenderer, area: Rect) {
+fn render_volume_bar_chart(f: &mut Frame, volume_bar_chart_renderer: &RatatuiVolumeBarChartRenderer, area: Rect) {
     volume_bar_chart_renderer.render(f, area);
 }
 

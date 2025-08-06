@@ -131,13 +131,41 @@ impl VolumeBarChartRenderer {
     where
         I: Iterator<Item = (u64, f64, bool)>, // (timestamp, volume, is_buyer_maker)
     {
-        // 清空现有数据重新构建
-        self.minute_data.clear();
-        self.max_volume = 0.0;
+        // 为了避免重复累加相同数据，我们需要重新构建数据
+        // 但保留时间结构，只重新计算成交量
         
-        // 添加所有交易数据
+        // 记录同步前的数据量
+        let before_count = self.minute_data.len();
+        
+        // 临时存储新的分钟数据
+        let mut new_minute_data: BTreeMap<u64, VolumeMinuteData> = BTreeMap::new();
+        
+        // 重新聚合所有交易数据
         for (timestamp, volume, is_buyer_maker) in price_points {
-            self.add_trade_data(timestamp, volume, is_buyer_maker);
+            let minute_timestamp = self.get_minute_boundary(timestamp);
+            
+            // 获取或创建该分钟的数据条目
+            let minute_data = new_minute_data
+                .entry(minute_timestamp)
+                .or_insert_with(|| VolumeMinuteData::new(minute_timestamp));
+            
+            // 添加交易数据
+            minute_data.add_trade(volume, is_buyer_maker);
+        }
+        
+        // 用新数据替换旧数据
+        self.minute_data = new_minute_data;
+        
+        // 维护滑动窗口
+        self.maintain_sliding_window();
+        
+        // 重新计算最大成交量
+        self.recalculate_max_volume();
+        
+        // 打印调试信息（可以通过日志查看）
+        let after_count = self.minute_data.len();
+        if after_count != before_count {
+            log::debug!("Volume bar chart: {} -> {} minutes", before_count, after_count);
         }
     }
 
@@ -145,8 +173,9 @@ impl VolumeBarChartRenderer {
     fn get_minute_boundary(&self, timestamp: u64) -> u64 {
         // 将毫秒时间戳转换为分钟边界（归零秒和毫秒）
         let seconds = timestamp / 1000; // 转换为秒
-        let minute_seconds = seconds / 60 * 60; // 归零到分钟边界
-        minute_seconds * 1000 // 转换回毫秒
+        let minutes = seconds / 60; // 转换为分钟
+        let minute_boundary_seconds = minutes * 60; // 归零到分钟边界
+        minute_boundary_seconds * 1000 // 转换回毫秒
     }
 
     /// 维护滑动窗口，删除过期数据
@@ -189,8 +218,8 @@ impl VolumeBarChartRenderer {
             return;
         }
 
-        // 常量：最小单元代表的BTC数量
-        const BTC_PER_UNIT: f64 = 0.1;
+        // 常量：最小单元代表的BTC数量 - 调整为更大的值以适应终端显示
+        const BTC_PER_UNIT: f64 = 1.0; // 每个单位代表1 BTC，使柱子高度更合理
         
         // 计算图表内容区域（减去边框）
         let chart_height = area.height.saturating_sub(3) as usize; // 减去标题和边框
@@ -230,49 +259,60 @@ impl VolumeBarChartRenderer {
         f.render_widget(paragraph, area);
     }
 
-    /// 准备柱状图数据
+    /// 准备柱状图数据 - 修改为占满窗体宽度并支持滑动
     fn prepare_bar_chart_data(&self, chart_width: usize, chart_height: usize, btc_per_unit: f64) -> Vec<BarData> {
         let data_count = self.minute_data.len();
         if data_count == 0 {
             return Vec::new();
         }
 
-        // 计算可用宽度（为时间标签留出空间）
-        let available_width = chart_width.saturating_sub(10); // 为时间标签留出10个字符的空间
-        let bars_per_width = if data_count <= available_width {
-            data_count
-        } else {
-            available_width
-        };
-
+        // 使用整个图表宽度，每个字符位置显示一个bar
+        let available_width = chart_width.saturating_sub(2); // 减去左右边框，每个位置显示一个bar
+        
         let mut chart_data = Vec::new();
         
-        // 如果数据点太多，需要采样
-        if data_count <= bars_per_width {
-            // 直接显示所有数据点
-            for (timestamp, data) in &self.minute_data {
-                let bar_height = self.calculate_bar_height(data.total_volume, chart_height, btc_per_unit);
+        // 如果数据点数量少于可用宽度，均匀分布
+        if data_count <= available_width {
+            // 数据点少，可以全部显示
+            let sorted_data: Vec<_> = self.minute_data.iter().collect();
+            
+            for (i, (timestamp, data)) in sorted_data.iter().enumerate() {
+                let height = self.calculate_bar_height(data.total_volume, chart_height, btc_per_unit);
                 chart_data.push(BarData {
-                    timestamp: *timestamp,
+                    timestamp: **timestamp,
                     volume: data.total_volume,
                     buy_volume: data.buy_volume,
                     sell_volume: data.sell_volume,
-                    height: bar_height,
+                    height,
+                });
+            }
+            
+            // 填充剩余空间为空bar，确保占满整个宽度
+            while chart_data.len() < available_width {
+                chart_data.push(BarData {
+                    timestamp: 0,
+                    volume: 0.0,
+                    buy_volume: 0.0,
+                    sell_volume: 0.0,
+                    height: 0,
                 });
             }
         } else {
-            // 需要采样数据点
-            let step = data_count as f64 / bars_per_width as f64;
-            for i in 0..bars_per_width {
-                let index = (i as f64 * step) as usize;
-                if let Some((timestamp, data)) = self.minute_data.iter().nth(index) {
-                    let bar_height = self.calculate_bar_height(data.total_volume, chart_height, btc_per_unit);
+            // 数据点多，需要滑动窗口显示最新的数据
+            let sorted_data: Vec<_> = self.minute_data.iter().collect();
+            
+            // 取最新的 available_width 个数据点
+            let start_index = data_count.saturating_sub(available_width);
+            
+            for i in start_index..data_count {
+                if let Some((timestamp, data)) = sorted_data.get(i) {
+                    let height = self.calculate_bar_height(data.total_volume, chart_height, btc_per_unit);
                     chart_data.push(BarData {
-                        timestamp: *timestamp,
+                        timestamp: **timestamp,
                         volume: data.total_volume,
                         buy_volume: data.buy_volume,
                         sell_volume: data.sell_volume,
-                        height: bar_height,
+                        height,
                     });
                 }
             }
@@ -281,19 +321,20 @@ impl VolumeBarChartRenderer {
         chart_data
     }
 
-    /// 计算柱子高度（以字符行数计算）
+    /// 计算柱子高度（以字符行数计算）- 基于实际BTC成交量动态增长，不设置最大限制
     fn calculate_bar_height(&self, volume: f64, max_height: usize, btc_per_unit: f64) -> usize {
-        if volume <= 0.0 || max_height == 0 {
+        if volume <= 0.0 {
             return 0;
         }
 
-        // 基于BTC_PER_UNIT计算高度
+        // 基于实际BTC成交量计算高度，每个字符行代表固定的BTC量
         // 每个字符行代表的BTC量 = btc_per_unit / 8 (因为有8个不同的Unicode块字符)
         let btc_per_char_line = btc_per_unit / 8.0;
         let total_char_lines_needed = (volume / btc_per_char_line).ceil() as usize;
         
-        // 限制在可用高度内
-        total_char_lines_needed.min(max_height)
+        // 不设置最大限制，让柱子根据实际成交量自由增长
+        // 如果超出可用高度，渲染时会自动处理（显示部分或调整显示区域）
+        total_char_lines_needed.max(1) // 确保至少有1个字符高度
     }
 
     /// 构建图表内容
@@ -305,12 +346,19 @@ impl VolumeBarChartRenderer {
             return lines;
         }
 
+        // 找到最高的柱子高度
+        let max_bar_height = chart_data.iter().map(|bar| bar.height).max().unwrap_or(0);
+        
+        // 使用可用高度和最高柱子高度中的较大值，但要为时间轴预留1行
+        let content_height = chart_height.saturating_sub(1); // 为时间轴预留1行
+        let actual_display_height = max_bar_height.max(content_height);
+
         // 构建柱状图（从上往下渲染，但柱子从下往上增长）
-        for row in 0..chart_height {
+        for row in 0..actual_display_height {
             let mut line_spans = Vec::new();
             
             // 计算当前行（从上数第几行）
-            let current_row_from_bottom = chart_height - row - 1;
+            let current_row_from_bottom = actual_display_height - row - 1;
             
             // 为每个数据点生成字符
             for (i, bar) in chart_data.iter().enumerate() {
@@ -328,16 +376,30 @@ impl VolumeBarChartRenderer {
             lines.push(Line::from(line_spans));
         }
 
-        // 添加时间轴标签
+        // 添加时间轴标签 - 智能显示时间，避免过于密集
         let mut time_labels_str = String::new();
+        let chart_len = chart_data.len();
+        
+        // 根据图表宽度决定显示间隔
+        let time_display_interval = if chart_len <= 20 {
+            1 // 20个以下每个都显示
+        } else if chart_len <= 60 {
+            3 // 21-60个每3个显示一次
+        } else {
+            5 // 60个以上每5个显示一次
+        };
+        
         for (i, bar) in chart_data.iter().enumerate() {
-            let time_str = format_timestamp_to_time(bar.timestamp);
-            // 只显示前5个字符（HH:MM）
-            let short_time = if time_str.len() >= 5 { &time_str[0..5] } else { &time_str };
-            time_labels_str.push_str(short_time);
-            
-            // 添加间隔（如果不是最后一个）
-            if i < chart_data.len() - 1 {
+            if bar.timestamp == 0 {
+                // 空数据点，显示空格
+                time_labels_str.push(' ');
+            } else if i % time_display_interval == 0 || i == chart_len - 1 {
+                // 显示时间标签
+                let time_str = format_timestamp_to_time(bar.timestamp);
+                let short_time = if time_str.len() >= 5 { &time_str[0..5] } else { &time_str };
+                time_labels_str.push_str(short_time);
+            } else {
+                // 占位符
                 time_labels_str.push(' ');
             }
         }
@@ -350,25 +412,35 @@ impl VolumeBarChartRenderer {
         lines
     }
 
-    /// 获取指定高度处的柱子字符
+    /// 获取指定高度处的柱子字符 - 使用 Unicode 精细显示（学习自 volume profile）
     fn get_bar_char_at_height(&self, bar: &BarData, row_from_bottom: usize) -> char {
         if bar.height == 0 {
             return ' ';
         }
 
-        // 计算当前行在柱子中的位置
+        // 使用与 volume profile 相同的 Unicode 字符精细显示方法
+        // 每个完整字符 █ 代表 8 个单位，部分字符代表 1-7 个单位
         let full_char_lines = bar.height / 8; // 完整的字符行数
         let partial_char_height = bar.height % 8; // 部分字符的高度
 
         if row_from_bottom < full_char_lines {
-            // 完整字符行
-            return BLOCK_CHARS[7]; // 最满的字符 █
+            // 完整字符行 - 使用满字符
+            '█'
         } else if row_from_bottom == full_char_lines && partial_char_height > 0 {
-            // 部分字符行
-            return BLOCK_CHARS[partial_char_height - 1];
+            // 部分字符行 - 使用对应的 Unicode 部分字符
+            match partial_char_height {
+                1 => '▁', // 1/8 高度
+                2 => '▂', // 2/8 高度
+                3 => '▃', // 3/8 高度
+                4 => '▄', // 4/8 高度
+                5 => '▅', // 5/8 高度
+                6 => '▆', // 6/8 高度
+                7 => '▇', // 7/8 高度
+                _ => ' ', // 不应该到达这里
+            }
         } else {
             // 空白区域
-            return ' ';
+            ' '
         }
     }
 
