@@ -1,4 +1,4 @@
-use binance_futures::{init_logging, Config, ReactiveApp};
+use binance_futures::{init_logging, init_cpu_affinity, check_affinity_status, Config, ReactiveApp};
 use binance_futures::gui::{VolumeProfileWidget, PriceChartRenderer};
 use binance_futures::orderbook::render_orderbook;
 use crossterm::{
@@ -20,11 +20,35 @@ use std::{
 
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // 初始化日志系统
+    // 1. 首先初始化日志系统
     init_logging();
 
-    // 获取交易对参数
-    let symbol = env::args().nth(1).unwrap_or_else(|| "BTCFDUSD".to_string());
+    // 2. 立即设置CPU亲和性 - 在任何其他操作之前进行
+    // 检查命令行参数中是否指定了CPU核心
+    let cpu_core = env::args()
+        .position(|arg| arg == "--cpu-core")
+        .and_then(|pos| env::args().nth(pos + 1))
+        .and_then(|core_str| core_str.parse::<usize>().ok());
+    
+    // 设置CPU亲和性（默认绑定到核心1）
+    match init_cpu_affinity(cpu_core) {
+        Ok(()) => {
+            log::info!("🚀 CPU亲和性设置成功，程序现在运行在专用CPU核心上");
+            // 输出到终端让用户知道绑定成功（在UI启动前）
+            println!("🚀 CPU亲和性设置成功! 程序已绑定到CPU核心 {} 运行", cpu_core.unwrap_or(1));
+            println!("📈 性能优化已启用: L1/L2缓存优化, 减少延迟");
+        }
+        Err(e) => {
+            log::warn!("⚠️ CPU亲和性设置失败: {}, 程序将继续运行", e);
+            println!("⚠️ 警告: CPU亲和性设置失败: {}", e);
+            println!("程序将继续运行，但可能无法获得最佳性能");
+        }
+    }
+
+    // 3. 获取交易对参数
+    let symbol = env::args()
+        .find(|arg| !arg.starts_with("--") && arg != &env::args().next().unwrap())
+        .unwrap_or_else(|| "BTCFDUSD".to_string());
 
     // 创建配置
     let config = Config::new(symbol)
@@ -61,11 +85,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 停止应用程序
     app.stop();
 
+    // 在程序退出前检查CPU亲和性状态
+    check_affinity_status();
+
     if let Err(err) = result {
         // 应用程序错误写入日志文件，不输出到控制台以避免干扰UI
         log::error!("应用程序错误: {:?}", err);
     }
 
+    // 程序退出消息
+    println!("👋 程序已退出，CPU绑定已释放");
+    
     Ok(())
 }
 
@@ -96,7 +126,7 @@ fn run_app(
         // 刷新UI
         terminal.draw(|f| ui(f, app, &volume_profile_widget, &price_chart_renderer))?;
 
-        // 处理UI事件（非阻塞）- 与备份版本完全一致
+        // 处理UI事件（非阻塞）
         if crossterm::event::poll(Duration::from_millis(0))? {
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {

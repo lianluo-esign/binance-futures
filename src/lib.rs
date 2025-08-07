@@ -13,7 +13,7 @@ pub mod monitoring;
 pub mod gui;
 
 // 重新导出主要类型
-pub use core::RingBuffer;
+pub use core::{RingBuffer, init_cpu_affinity, get_cpu_manager, check_affinity_status};
 pub use events::{Event, EventType, EventBus, EventDispatcher};
 pub use orderbook::{OrderBookManager, OrderFlow, MarketSnapshot};
 pub use websocket::{WebSocketManager, WebSocketConnection};

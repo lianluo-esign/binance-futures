@@ -9,6 +9,14 @@ use crate::monitoring::InternalMonitor;
 use crate::gui::volume_profile::VolumeProfileManager;
 use crate::Config;
 
+// Provider系统导入
+use crate::core::{
+    ProviderManager, ProviderManagerConfig, BinanceWebSocketProvider,
+    BinanceWebSocketConfig, ProviderMetadata, ProviderType, DataProvider, ProviderError,
+    StreamType, UpdateSpeed, ReconnectConfig, ProviderManagerStatus,
+};
+use std::collections::HashMap;
+
 /// 响应式应用主结构（基于EventBus架构）
 pub struct ReactiveApp {
     // 事件系统 - 使用无锁实现
@@ -59,6 +67,12 @@ pub struct ReactiveApp {
     
     // 最新交易数据（用于价格图表）
     last_trade_volume: Option<f64>,
+
+    // Provider系统 (新增，向后兼容)
+    provider_manager: Option<ProviderManager>,
+    
+    // Provider使用模式标志
+    use_provider_system: bool,
 }
 
 impl ReactiveApp {
@@ -103,41 +117,148 @@ impl ReactiveApp {
             circuit_breaker_open: false,
             circuit_breaker_last_failure: None,
             last_trade_volume: None,
+            
+            // Provider系统默认禁用，保持向后兼容
+            provider_manager: None,
+            use_provider_system: false,
         }
+    }
+
+    /// 创建使用Provider系统的应用实例
+    /// 
+    /// 这是新的创建方式，使用Provider抽象层管理数据源
+    /// 
+    /// # 参数
+    /// - `config`: 应用配置
+    /// - `provider_config`: Provider管理器配置（可选）
+    /// 
+    /// # 返回值
+    /// 配置了Provider系统的ReactiveApp实例
+    pub fn new_with_provider_system(
+        config: Config, 
+        provider_config: Option<ProviderManagerConfig>
+    ) -> Result<Self, ProviderError> {
+        log::info!("创建使用Provider系统的ReactiveApp");
+        
+        // 创建基础应用实例
+        let mut app = Self::new(config);
+        
+        // 创建Provider管理器
+        let provider_manager_config = provider_config.unwrap_or_else(|| {
+            ProviderManagerConfig {
+                default_provider_id: "binance_websocket".to_string(),
+                ..Default::default()
+            }
+        });
+        
+        let mut provider_manager = ProviderManager::new(provider_manager_config);
+        
+        // 创建Binance WebSocket Provider
+        let binance_config = BinanceWebSocketConfig {
+            symbol: app.config.symbol.clone(),
+            streams: vec![
+                StreamType::BookTicker,
+                StreamType::Depth { 
+                    levels: 20, 
+                    update_speed: UpdateSpeed::Ms100 
+                },
+                StreamType::Trade,
+            ],
+            reconnect_config: ReconnectConfig::default(),
+            heartbeat_interval_secs: 30,
+            max_buffer_size: 1000,
+            compression_enabled: false,
+            ..Default::default()
+        };
+        
+        let binance_provider = BinanceWebSocketProvider::new(binance_config);
+        
+        // 创建Provider元数据
+        let provider_metadata = ProviderMetadata {
+            id: "binance_websocket".to_string(),
+            name: "Binance WebSocket".to_string(),
+            description: "Binance实时WebSocket数据源".to_string(),
+            provider_type: ProviderType::Binance { 
+                mode: crate::core::provider::BinanceConnectionMode::WebSocket 
+            },
+            priority: 100,
+            is_fallback: false,
+            tags: {
+                let mut tags = HashMap::new();
+                tags.insert("exchange".to_string(), "binance".to_string());
+                tags.insert("type".to_string(), "websocket".to_string());
+                tags
+            },
+        };
+        
+        // 注册Provider
+        provider_manager.register_provider(binance_provider, provider_metadata)
+            .map_err(|e| {
+                log::error!("注册Binance WebSocket Provider失败: {}", e);
+                e
+            })?;
+        
+        // 启用Provider系统
+        app.provider_manager = Some(provider_manager);
+        app.use_provider_system = true;
+        
+        log::info!("Provider系统初始化完成");
+        Ok(app)
     }
 
     /// 初始化应用程序
     pub fn initialize(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         // 初始化信息写入日志文件，不输出到控制台
-        log::info!("初始化应用程序: {} (使用无锁事件系统)", self.config.symbol);
+        log::info!("初始化应用程序: {} (模式: {})", 
+            self.config.symbol,
+            if self.use_provider_system { "Provider系统" } else { "传统WebSocket" }
+        );
 
-        // 连接WebSocket，订单簿将通过WebSocket实时更新
-        log::info!("正在建立WebSocket连接...");
-        self.websocket_manager.connect()?;
+        if self.use_provider_system {
+            // 使用Provider系统
+            if let Some(ref mut provider_manager) = self.provider_manager {
+                log::info!("启动Provider管理器...");
+                provider_manager.start()
+                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+            } else {
+                return Err("Provider系统未正确初始化".into());
+            }
+        } else {
+            // 使用传统WebSocket系统
+            log::info!("正在建立WebSocket连接...");
+            self.websocket_manager.connect()?;
+        }
 
         self.running = true;
-        // 初始化完成信息写入日志文件，不输出到控制台
-        log::info!("应用程序初始化完成 - 无锁事件系统已启动，订单簿将通过WebSocket实时更新");
+        log::info!("应用程序初始化完成 - {} 已启动", 
+            if self.use_provider_system { "Provider系统" } else { "传统WebSocket系统" }
+        );
 
         Ok(())
     }
 
-    /// 主事件循环（非阻塞）- 简化版本，基于稳定的备份架构
+    /// 主事件循环（非阻塞）- 支持Provider系统和传统WebSocket
     pub fn event_loop(&mut self) {
         if !self.running {
             return;
         }
 
-        // 1. 读取WebSocket消息并转换为事件
-        if self.websocket_manager.is_connected() {
-            self.process_websocket_messages();
-        } else if self.websocket_manager.should_reconnect() {
-            // 简化重连逻辑，避免复杂的健康检查
-            let _ = self.websocket_manager.attempt_reconnect();
-        }
-
-        // 2. 处理事件队列
-        let events_processed = self.process_events();
+        // 1. 数据源处理：根据使用的系统类型选择不同的处理方式
+        let events_processed = if self.use_provider_system {
+            // 使用Provider系统
+            self.process_provider_events()
+        } else {
+            // 使用传统WebSocket系统
+            if self.websocket_manager.is_connected() {
+                self.process_websocket_messages();
+            } else if self.websocket_manager.should_reconnect() {
+                // 简化重连逻辑，避免复杂的健康检查
+                let _ = self.websocket_manager.attempt_reconnect();
+            }
+            
+            // 处理事件队列
+            self.process_events()
+        };
 
         // 3. 更新性能统计（简化版本）
         self.update_performance_stats(events_processed);
@@ -161,7 +282,84 @@ impl ReactiveApp {
         self.last_update = Instant::now();
     }
 
-    /// 处理WebSocket消息 - 带断路器保护的版本
+    /// 处理Provider事件（新的事件处理方式）
+    fn process_provider_events(&mut self) -> usize {
+        if let Some(ref mut provider_manager) = self.provider_manager {
+            match provider_manager.process_events() {
+                Ok(events) => {
+                    let mut events_created = 0;
+                    
+                    // 限制每次处理的事件数量
+                    const MAX_EVENTS_PER_CYCLE: usize = 50;
+                    let events_to_process = events.into_iter().take(MAX_EVENTS_PER_CYCLE);
+                    
+                    for event_type in events_to_process {
+                        // 更新业务组件
+                        self.update_business_components(&event_type);
+                        
+                        // 发布事件到事件系统
+                        let event = Event::new(event_type, "provider".to_string());
+                        self.event_dispatcher.publish(event);
+                        events_created += 1;
+                    }
+                    
+                    if events_created > 0 {
+                        log::info!("Provider系统处理了 {} 个事件", events_created);
+                        self.last_data_received = Some(Instant::now());
+                    }
+                    
+                    // 处理事件队列
+                    let events_processed = self.process_events();
+                    events_processed + events_created
+                }
+                Err(e) => {
+                    log::warn!("Provider事件处理失败: {}", e);
+                    
+                    // 更新错误统计
+                    self.circuit_breaker_failures += 1;
+                    self.circuit_breaker_last_failure = Some(Instant::now());
+                    
+                    // 如果失败次数过多，可以考虑切换Provider
+                    if self.circuit_breaker_failures >= 5 {
+                        self.circuit_breaker_open = true;
+                        log::error!("Provider断路器打开，暂停事件处理");
+                    }
+                    
+                    // 处理现有事件队列
+                    self.process_events()
+                }
+            }
+        } else {
+            log::error!("Provider管理器未初始化");
+            0
+        }
+    }
+
+    /// 更新业务组件（从EventType数据中）
+    fn update_business_components(&mut self, event_type: &EventType) {
+        match event_type {
+            EventType::DepthUpdate(data) => {
+                self.orderbook_manager.handle_depth_update(data);
+            }
+            EventType::Trade(data) => {
+                // 存储交易成交量信息（用于价格图表）
+                if let Some(qty_str) = data["q"].as_str() {
+                    if let Ok(qty) = qty_str.parse::<f64>() {
+                        self.last_trade_volume = Some(qty);
+                    }
+                }
+                
+                self.orderbook_manager.handle_trade(data);
+                self.update_volume_profile_from_trade(data);
+            }
+            EventType::BookTicker(data) => {
+                self.orderbook_manager.handle_book_ticker(data);
+            }
+            _ => {} // 其他事件类型暂不处理
+        }
+    }
+
+    /// 处理WebSocket消息 - 带断路器保护的版本（传统模式）
     fn process_websocket_messages(&mut self) {
         // 检查断路器状态
         if self.circuit_breaker_open {
@@ -1031,6 +1229,201 @@ impl ReactiveApp {
 
         aggregated
     }
+
+    // ========== Provider系统相关API ==========
+
+    /// 检查是否使用Provider系统
+    pub fn is_using_provider_system(&self) -> bool {
+        self.use_provider_system
+    }
+
+    /// 获取Provider管理器的引用（只读）
+    pub fn provider_manager(&self) -> Option<&ProviderManager> {
+        self.provider_manager.as_ref()
+    }
+
+    /// 获取当前活跃的Provider状态
+    pub fn get_active_provider_status(&self) -> Option<crate::core::provider::ProviderStatus> {
+        if let Some(ref provider_manager) = self.provider_manager {
+            if let Some(provider_id) = provider_manager.get_active_provider_id() {
+                if let Ok(status_map) = provider_manager.get_all_provider_status() {
+                    return status_map.get(&provider_id).cloned();
+                }
+            }
+        }
+        None
+    }
+
+    /// 获取Provider管理器状态
+    pub fn get_provider_manager_status(&self) -> Option<ProviderManagerStatus> {
+        if let Some(ref provider_manager) = self.provider_manager {
+            provider_manager.get_status().ok()
+        } else {
+            None
+        }
+    }
+
+    /// 切换到指定的Provider
+    /// 
+    /// # 参数
+    /// - `provider_id`: 目标Provider的ID
+    /// 
+    /// # 返回值
+    /// - `Ok(())`: 切换成功
+    /// - `Err(String)`: 切换失败的错误信息
+    pub fn switch_provider(&self, provider_id: &str) -> Result<(), String> {
+        if !self.use_provider_system {
+            return Err("未使用Provider系统，无法切换Provider".to_string());
+        }
+
+        if let Some(ref provider_manager) = self.provider_manager {
+            provider_manager.switch_to_provider(provider_id)
+                .map_err(|e| format!("切换Provider失败: {}", e))
+        } else {
+            Err("Provider管理器未初始化".to_string())
+        }
+    }
+
+    /// 获取所有注册的Provider信息
+    pub fn get_all_providers_info(&self) -> Vec<ProviderInfo> {
+        let mut providers = Vec::new();
+        
+        if let Some(ref provider_manager) = self.provider_manager {
+            if let Ok(status_map) = provider_manager.get_all_provider_status() {
+                for (provider_id, status) in status_map {
+                    providers.push(ProviderInfo {
+                        id: provider_id,
+                        provider_type: status.provider_metrics.summary(),
+                        is_connected: status.is_connected,
+                        is_healthy: status.is_healthy,
+                        events_received: status.events_received,
+                        last_event_time: status.last_event_time,
+                        error_count: status.error_count,
+                    });
+                }
+            }
+        }
+        
+        providers
+    }
+
+    /// 启用Provider系统（从传统WebSocket模式迁移）
+    /// 
+    /// 注意：这会停用传统的WebSocket系统
+    pub fn enable_provider_system(&mut self, provider_config: Option<ProviderManagerConfig>) -> Result<(), Box<dyn std::error::Error>> {
+        if self.use_provider_system {
+            return Ok(()); // 已经启用
+        }
+
+        log::info!("正在从传统WebSocket模式迁移到Provider系统");
+
+        // 停止传统WebSocket系统
+        self.websocket_manager.disconnect();
+        
+        // 创建基于现有WebSocket管理器的Provider
+        let binance_config = BinanceWebSocketConfig {
+            symbol: self.config.symbol.clone(),
+            streams: vec![
+                StreamType::BookTicker,
+                StreamType::Depth { 
+                    levels: 20, 
+                    update_speed: UpdateSpeed::Ms100 
+                },
+                StreamType::Trade,
+            ],
+            reconnect_config: ReconnectConfig::default(),
+            heartbeat_interval_secs: 30,
+            max_buffer_size: 1000,
+            compression_enabled: false,
+            ..Default::default()
+        };
+        
+        // 从现有WebSocket管理器创建Provider
+        let binance_provider = BinanceWebSocketProvider::from_websocket_manager(
+            std::mem::replace(&mut self.websocket_manager, WebSocketManager::new(
+                WebSocketConfig::new(self.config.symbol.clone())
+            )),
+            binance_config
+        );
+
+        // 创建Provider管理器
+        let provider_manager_config = provider_config.unwrap_or_else(|| {
+            ProviderManagerConfig {
+                default_provider_id: "binance_websocket".to_string(),
+                ..Default::default()
+            }
+        });
+        
+        let mut provider_manager = ProviderManager::new(provider_manager_config);
+
+        // 创建Provider元数据
+        let provider_metadata = ProviderMetadata {
+            id: "binance_websocket".to_string(),
+            name: "Binance WebSocket".to_string(),
+            description: "从传统WebSocket系统迁移的Binance数据源".to_string(),
+            provider_type: ProviderType::Binance { 
+                mode: crate::core::provider::BinanceConnectionMode::WebSocket 
+            },
+            priority: 100,
+            is_fallback: false,
+            tags: {
+                let mut tags = HashMap::new();
+                tags.insert("exchange".to_string(), "binance".to_string());
+                tags.insert("type".to_string(), "websocket".to_string());
+                tags.insert("migrated".to_string(), "true".to_string());
+                tags
+            },
+        };
+
+        // 注册Provider
+        provider_manager.register_provider(binance_provider, provider_metadata)
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+
+        // 启动Provider管理器
+        provider_manager.start()
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+
+        // 启用Provider系统
+        self.provider_manager = Some(provider_manager);
+        self.use_provider_system = true;
+
+        log::info!("成功迁移到Provider系统");
+        Ok(())
+    }
+
+    /// 禁用Provider系统（回退到传统WebSocket模式）
+    pub fn disable_provider_system(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        if !self.use_provider_system {
+            return Ok(()); // 已经禁用
+        }
+
+        log::info!("正在从Provider系统回退到传统WebSocket模式");
+
+        // 停止Provider系统
+        if let Some(mut provider_manager) = self.provider_manager.take() {
+            provider_manager.stop()
+                .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+        }
+
+        // 重新启用传统WebSocket系统
+        self.websocket_manager.connect()?;
+        self.use_provider_system = false;
+
+        log::info!("成功回退到传统WebSocket模式");
+        Ok(())
+    }
+}
+
+/// Provider信息结构体
+#[derive(Debug, Clone)]
+pub struct ProviderInfo {
+    pub id: String,
+    pub provider_type: String,
+    pub is_connected: bool,
+    pub is_healthy: bool,
+    pub events_received: u64,
+    pub last_event_time: Option<u64>,
+    pub error_count: u32,
 }
 
 /// 应用程序统计信息
