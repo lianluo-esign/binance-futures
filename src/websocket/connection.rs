@@ -155,10 +155,6 @@ impl WebSocketConnection {
                     match &message {
                         Message::Text(text) => {
                             self.total_bytes_received += text.len() as u64;
-                            // 添加调试日志，但限制频率
-                            if self.total_messages_received % 100 == 1 {
-                                log::info!("收到文本消息 #{}: {} 字节", self.total_messages_received, text.len());
-                            }
                         }
                         Message::Binary(data) => {
                             self.total_bytes_received += data.len() as u64;
@@ -166,19 +162,14 @@ impl WebSocketConnection {
                         }
                         Message::Pong(_) => {
                             self.last_pong = std::time::Instant::now();
-                            log::debug!("收到Pong消息");
                         }
                         Message::Close(_) => {
                             self.state = ConnectionState::Disconnected;
                             // 连接关闭信息写入日志文件，不输出到控制台
                             log::warn!("WebSocket连接已关闭");
                         }
-                        Message::Ping(_) => {
-                            log::debug!("收到Ping消息");
-                        }
-                        _ => {
-                            log::debug!("收到其他类型消息");
-                        }
+                        Message::Ping(_) => {}
+                        _ => {}
                     }
 
                     Ok(Some(message))

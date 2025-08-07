@@ -142,13 +142,6 @@ impl WebSocketManager {
                         .as_millis() as u64
                 );
 
-                // 添加调试日志，限制频率
-                if self.stats.total_json_messages % 50 == 1 {
-                    log::info!("处理JSON消息 #{}: {} 字符", self.stats.total_json_messages, text.len());
-                    if text.len() < 200 {
-                        log::debug!("消息内容: {}", text);
-                    }
-                }
 
                 match serde_json::from_str::<Value>(&text) {
                     Ok(json_value) => Some(json_value),

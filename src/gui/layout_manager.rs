@@ -20,12 +20,12 @@ impl LayoutManager {
         Self {
             column_widths: vec![
                 Constraint::Length(8),  // Price - 价格列
-                Constraint::Percentage(60), // Quantity - 数量列（Bid & Ask）- 增加宽度
-                Constraint::Length(8), // Buy - 主动买单列 - 固定8字符宽度
-                Constraint::Length(8), // Sell - 主动卖单列 - 固定8字符宽度
+                Constraint::Percentage(70), // Quantity - 数量列（Bid & Ask）- 最大化宽度
+                Constraint::Length(12), // Buy - 主动买单列 - 增加宽度以容纳5位小数和右对齐
+                Constraint::Length(12), // Sell - 主动卖单列 - 增加宽度以容纳5位小数和右对齐
             ],
             show_merged_column: true,
-            show_order_flow: true,
+            show_order_flow: false,
             cell_width: 60, // 合并列的宽度 - 减小以模拟字体缩小效果
         }
     }
@@ -42,9 +42,9 @@ impl LayoutManager {
             // 4列布局：Price, Quantity, Buy, Sell
             manager.column_widths = vec![
                 Constraint::Length(8),      // Price - 价格列
-                Constraint::Percentage(60), // Quantity - 数量列（Bid & Ask）- 增加宽度
-                Constraint::Length(8),      // Buy - 主动买单列 - 固定8字符宽度
-                Constraint::Length(8),      // Sell - 主动卖单列 - 固定8字符宽度
+                Constraint::Percentage(70), // Quantity - 数量列（Bid & Ask）- 最大化宽度
+                Constraint::Length(12),     // Buy - 主动买单列 - 增加宽度以容纳5位小数和右对齐
+                Constraint::Length(12),     // Sell - 主动卖单列 - 增加宽度以容纳5位小数和右对齐
             ];
         } else if show_merged_column {
             // 2列布局：Price, Bid & Ask
@@ -206,9 +206,9 @@ impl LayoutManager {
             // 4列布局：Price, Quantity, Buy, Sell
             self.column_widths = vec![
                 Constraint::Length(8),      // Price - 价格列
-                Constraint::Percentage(60), // Quantity - 数量列（Bid & Ask）- 增加宽度
-                Constraint::Length(8),      // Buy - 主动买单列 - 固定8字符宽度
-                Constraint::Length(8),      // Sell - 主动卖单列 - 固定8字符宽度
+                Constraint::Percentage(70), // Quantity - 数量列（Bid & Ask）- 最大化宽度
+                Constraint::Length(12),     // Buy - 主动买单列 - 增加宽度以容纳5位小数和右对齐
+                Constraint::Length(12),     // Sell - 主动卖单列 - 增加宽度以容纳5位小数和右对齐
             ];
         } else if self.show_merged_column {
             // 2列布局：Price, Bid & Ask
@@ -229,8 +229,8 @@ impl LayoutManager {
         if volume == 0.0 {
             Cell::from("")
         } else {
-            // 格式化数字，保留3位小数
-            let formatted_volume = format!("{:.3}", volume);
+            // 格式化数字，保留5位小数
+            let formatted_volume = format!("{:>10.5}", volume); // Right-align with width of 10
             
             // 使用绿色前景色，无背景色
             Cell::from(formatted_volume)
@@ -243,8 +243,8 @@ impl LayoutManager {
         if volume == 0.0 {
             Cell::from("")
         } else {
-            // 格式化数字，保留3位小数
-            let formatted_volume = format!("{:.3}", volume);
+            // 格式化数字，保留5位小数
+            let formatted_volume = format!("{:>10.5}", volume); // Right-align with width of 10
             
             // 使用红色前景色，无背景色
             Cell::from(formatted_volume)
@@ -327,9 +327,9 @@ impl LayoutManager {
                 // 标准4列布局
                 vec![
                     Constraint::Length(8),      // Price - 价格列
-                    Constraint::Percentage(60), // Quantity - 数量列（Bid & Ask）- 增加宽度
-                    Constraint::Length(8),      // Buy - 主动买单列 - 固定8字符宽度
-                    Constraint::Length(8),      // Sell - 主动卖单列 - 固定8字符宽度
+                    Constraint::Percentage(70), // Quantity - 数量列（Bid & Ask）- 最大化宽度
+                    Constraint::Length(12),     // Buy - 主动买单列 - 增加宽度以容纳5位小数和右对齐
+                    Constraint::Length(12),     // Sell - 主动卖单列 - 增加宽度以容纳5位小数和右对齐
                 ]
             }
         } else {
@@ -418,17 +418,17 @@ mod tests {
         let manager = LayoutManager::new();
         
         let widths = manager.calculate_optimal_widths(100);
-        assert_eq!(widths.len(), 2);
+        assert_eq!(widths.len(), 4); // Now default has 4 columns (order flow enabled)
         
         // 测试窗口太小的情况
         let widths = manager.calculate_optimal_widths(30);
-        assert_eq!(widths.len(), 2);
+        assert_eq!(widths.len(), 4); // Still 4 columns even when small
         // 第一列应该是固定长度，第二列应该是百分比
         if let Constraint::Length(w) = widths[0] {
             assert_eq!(w, 6);
         }
         if let Constraint::Percentage(p) = widths[1] {
-            assert_eq!(p, 100);
+            assert_eq!(p, 35); // Updated for 4-column layout
         }
     }
 
@@ -451,7 +451,7 @@ mod tests {
         let manager = LayoutManager::new();
         let stats = manager.get_layout_stats();
         
-        assert_eq!(stats.total_columns, 2);
+        assert_eq!(stats.total_columns, 4); // Now default has 4 columns
         assert!(stats.total_fixed_width > 0);
         assert_eq!(stats.merged_column_width, 60);
         assert!(stats.merged_column_enabled);

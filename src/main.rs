@@ -1,5 +1,5 @@
 use binance_futures::{init_logging, Config, ReactiveApp};
-use binance_futures::gui::{render_signals, VolumeProfileWidget, PriceChartRenderer, RatatuiVolumeBarChartRenderer};
+use binance_futures::gui::{VolumeProfileWidget, PriceChartRenderer};
 use binance_futures::orderbook::render_orderbook;
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind},
@@ -80,8 +80,6 @@ fn run_app(
     // 创建价格图表渲染器，使用20000个数据点的滑动窗口
     let mut price_chart_renderer = PriceChartRenderer::new(20000);
     
-    // 创建成交量柱状图渲染器，使用20分钟滑动窗口
-    let mut volume_bar_chart_renderer = RatatuiVolumeBarChartRenderer::new();
     
     // 主事件循环 - 集成WebSocket处理和UI刷新，与备份版本保持一致
     loop {
@@ -94,11 +92,9 @@ fn run_app(
         // 更新价格图表数据
         update_price_chart(&mut price_chart_renderer, app);
         
-        // 更新成交量柱状图数据
-        update_volume_bar_chart(&mut volume_bar_chart_renderer, &price_chart_renderer);
 
         // 刷新UI
-        terminal.draw(|f| ui(f, app, &volume_profile_widget, &price_chart_renderer, &volume_bar_chart_renderer))?;
+        terminal.draw(|f| ui(f, app, &volume_profile_widget, &price_chart_renderer))?;
 
         // 处理UI事件（非阻塞）- 与备份版本完全一致
         if crossterm::event::poll(Duration::from_millis(0))? {
@@ -167,13 +163,12 @@ fn run_app(
     Ok(())
 }
 
-/// UI渲染函数 - 三列布局版本，右侧图表区域分上下两部分
+/// UI渲染函数 - 三列布局版本
 fn ui(
     f: &mut Frame, 
     app: &ReactiveApp, 
     volume_profile_widget: &VolumeProfileWidget, 
-    price_chart_renderer: &PriceChartRenderer, 
-    volume_bar_chart_renderer: &RatatuiVolumeBarChartRenderer
+    price_chart_renderer: &PriceChartRenderer
 ) {
     let size = f.area();
 
@@ -182,8 +177,8 @@ fn ui(
         .direction(Direction::Horizontal)
         .constraints([
             Constraint::Percentage(20), // 订单薄占20%
-            Constraint::Percentage(30), // Volume Profile占30%
-            Constraint::Percentage(50), // 图表区域占50%
+            Constraint::Percentage(40), // Volume Profile占30%
+            Constraint::Percentage(40), // 图表区域占50%
         ])
         .split(size);
 
@@ -191,17 +186,7 @@ fn ui(
     let volume_profile_area = horizontal_chunks[1];
     let chart_area = horizontal_chunks[2];
 
-    // 将图表区域垂直分割：价格图表(80%) + 成交量柱状图(20%)
-    let chart_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage(80), // 价格图表占80%
-            Constraint::Percentage(20), // 成交量柱状图占20%
-        ])
-        .split(chart_area);
-
-    let price_chart_area = chart_chunks[0];
-    let volume_bar_chart_area = chart_chunks[1];
+    let price_chart_area = chart_area;
 
     // 渲染各个组件
     render_orderbook(f, app, orderbook_area);
@@ -211,9 +196,6 @@ fn ui(
     
     // 渲染价格图表
     render_price_chart(f, price_chart_renderer, price_chart_area);
-    
-    // 渲染成交量柱状图
-    render_volume_bar_chart(f, volume_bar_chart_renderer, volume_bar_chart_area);
 }
 
 /// 更新Volume Profile数据
@@ -223,19 +205,34 @@ fn update_volume_profile(volume_profile_widget: &mut VolumeProfileWidget, app: &
     let app_volume_manager = app.get_volume_profile_manager();
     let app_data = app_volume_manager.get_data();
     
+    
+    
+    // 获取 orderbook 的 order flow 数据
+    let order_flows = app.get_orderbook_manager().get_order_flows();
+    
     // 获取widget的管理器
     let widget_manager = volume_profile_widget.get_manager_mut();
     
-    // 清空widget管理器的旧数据
-    widget_manager.clear_data();
+    // 修复：不要清空数据！这会导致累积的volume profile数据丢失
+    // 改为增量更新，让volume profile数据能够正确累积
+    // widget_manager.clear_data(); // 删除这行 - 这是导致累积数据为0的根本原因
     
-    // 直接复制应用管理器中的数据，避免重复累加
+    // 修复：直接同步应用层的volume profile累积数据到widget
+    // 应用层的VolumeProfileManager已经正确处理了交易事件的累积
     for (price_key, volume_level) in &app_data.price_volumes {
         let price = price_key.0;
         
-        // 直接设置成交量数据，而不是累加
+        
+        
+        
+        // 修复：使用set_volume_data直接同步应用层的累积数据到widget
+        // 应用层的VolumeProfileManager已经正确累积了所有交易数据
         widget_manager.set_volume_data(price, volume_level.buy_volume, volume_level.sell_volume);
     }
+    
+    // 修复：不需要为orderbook中的价格层级添加空的volume数据
+    // volume profile应该只显示有实际交易发生的价格层级
+    // orderbook数据在渲染时会单独处理，显示在Buy/Sell列中
 }
 
 /// 渲染Volume Profile widget
@@ -254,8 +251,11 @@ fn render_volume_profile(
     // 获取最新交易价格用于高亮显示
     let latest_trade_price = app.get_market_snapshot().current_price;
     
+    // 获取orderbook数据用于显示buy/sell列
+    let orderbook_data = app.get_orderbook_manager().get_order_flows();
+    
     // 渲染Volume Profile widget
-    volume_profile_widget.render(f, area, &visible_price_range, latest_trade_price);
+    volume_profile_widget.render(f, area, &visible_price_range, latest_trade_price, Some(orderbook_data));
 }
 
 /// 获取当前可见的价格范围（为Volume Profile动态生成价格层级）
@@ -413,10 +413,23 @@ fn calculate_visible_rows_from_area(area: ratatui::layout::Rect) -> usize {
 fn get_visible_price_range_for_area(app: &ReactiveApp, visible_rows: usize) -> Vec<f64> {
     let snapshot = app.get_market_snapshot();
     
+    // 获取volume profile数据范围
+    let volume_manager = app.get_volume_profile_manager();
+    let volume_data = volume_manager.get_data();
+    
     // 优先使用当前交易价格，如果没有则使用best_bid，最后使用best_ask
     let reference_price = snapshot.current_price
         .or(snapshot.best_bid_price)
         .or(snapshot.best_ask_price);
+    
+    // 如果有volume profile数据，扩展价格范围以包含这些数据
+    let (min_volume_price, max_volume_price) = if !volume_data.price_volumes.is_empty() {
+        let min_price = volume_data.price_volumes.keys().next().unwrap().0;
+        let max_price = volume_data.price_volumes.keys().next_back().unwrap().0;
+        (Some(min_price), Some(max_price))
+    } else {
+        (None, None)
+    };
         
     if let Some(center_price) = reference_price {
         // 动态生成价格层级：以当前价格为中心，上下各扩展足够的层级
@@ -426,11 +439,21 @@ fn get_visible_price_range_for_area(app: &ReactiveApp, visible_rows: usize) -> V
         // 计算中心价格的聚合值（向下取整到最近的美元）
         let center_aggregated = (center_price / price_precision).floor() * price_precision;
         
-        // 根据可见行数动态计算需要的层级数
-        // 确保有足够的层级来填满整个widget
+        // 根据可见行数和volume数据范围动态计算需要的层级数
         let half_visible = visible_rows / 2;
-        let levels_above = half_visible + 50; // 额外50层级作为缓冲
-        let levels_below = half_visible + 50;
+        let mut levels_above = half_visible + 20; // 减少缓冲，因为我们要包含volume数据
+        let mut levels_below = half_visible + 20;
+        
+        // 如果有volume数据，扩展范围以包含这些价格
+        if let Some(max_vol_price) = max_volume_price {
+            let levels_needed_above = ((max_vol_price - center_aggregated) / price_precision).ceil() as usize;
+            levels_above = levels_above.max(levels_needed_above + 10);
+        }
+        if let Some(min_vol_price) = min_volume_price {
+            let levels_needed_below = ((center_aggregated - min_vol_price) / price_precision).ceil() as usize;
+            levels_below = levels_below.max(levels_needed_below + 10);
+        }
+        
         let total_levels = levels_above + levels_below + 1;
         
         let mut price_levels = Vec::with_capacity(total_levels);
@@ -520,26 +543,6 @@ fn render_price_chart(f: &mut Frame, price_chart_renderer: &PriceChartRenderer, 
     price_chart_renderer.render(f, area);
 }
 
-/// 更新成交量柱状图数据
-fn update_volume_bar_chart(
-    volume_bar_chart_renderer: &mut RatatuiVolumeBarChartRenderer, 
-    price_chart_renderer: &PriceChartRenderer
-) {
-    // 从价格图表中获取所有交易数据点，并同步到成交量柱状图
-    // 使用批量同步方式避免重复计算
-    let trade_data: Vec<(u64, f64, bool)> = price_chart_renderer
-        .get_data_points()
-        .map(|point| (point.timestamp, point.volume, point.is_buyer_maker))
-        .collect();
-    
-    // 批量同步数据到成交量柱状图
-    volume_bar_chart_renderer.sync_from_price_data(trade_data.into_iter());
-}
-
-/// 渲染成交量柱状图
-fn render_volume_bar_chart(f: &mut Frame, volume_bar_chart_renderer: &RatatuiVolumeBarChartRenderer, area: Rect) {
-    volume_bar_chart_renderer.render(f, area);
-}
 
 
 

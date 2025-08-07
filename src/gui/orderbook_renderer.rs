@@ -430,7 +430,7 @@ impl OrderBookRenderer {
             .style(Style::default().fg(Color::White));
 
         if self.layout_manager.is_order_flow_enabled() {
-            // 4列布局：Price, Quantity, Buy, Sell
+            // 2列布局：Price, Quantity
             
             // 合并的 Bid & Ask 单元格 (Quantity列)
             let quantity_cell = if let (Some(best_bid), Some(best_ask)) = (render_data.best_bid_price, render_data.best_ask_price) {
@@ -453,33 +453,19 @@ impl OrderBookRenderer {
                     Cell::from(combined_text).style(Style::default().fg(Color::Yellow))
                 } else if level.bid_volume > 0.0 {
                     // 只有bid，显示绿色
-                    self.bar_chart.create_bar_with_text(level.bid_volume, render_data.max_bid_volume, 30, true)
+                    self.bar_chart.create_bar_with_text(level.bid_volume, render_data.max_bid_volume, 60, true)
                 } else if level.ask_volume > 0.0 {
                     // 只有ask，显示红色
-                    self.bar_chart.create_bar_with_text(level.ask_volume, render_data.max_ask_volume, 30, false)
+                    self.bar_chart.create_bar_with_text(level.ask_volume, render_data.max_ask_volume, 60, false)
                 } else {
                     // 没有数据
                     Cell::from("")
                 }
             };
 
-            // 获取对应的订单流数据 - 通过价格匹配而不是索引
-            let (buy_volume, sell_volume) = render_data.order_flow_data.iter()
-                .find(|data| (data.price - level.price).abs() < 0.01)
-                .map(|data| (data.buy_volume, data.sell_volume))
-                .unwrap_or((0.0, 0.0));
-
-            // Buy列单元格
-            let buy_cell = self.layout_manager.create_buy_flow_cell(buy_volume, render_data.max_buy_flow_volume);
-
-            // Sell列单元格
-            let sell_cell = self.layout_manager.create_sell_flow_cell(sell_volume, render_data.max_sell_flow_volume);
-
             Row::new(vec![
                 price_cell,    // Price - 价格列
                 quantity_cell, // Quantity - 数量列（Bid & Ask）
-                buy_cell,      // Buy - 主动买单列
-                sell_cell,     // Sell - 主动卖单列
             ])
         } else {
             // 2列布局：Price, Bid & Ask

@@ -162,11 +162,6 @@ impl VolumeBarChartRenderer {
         // 重新计算最大成交量
         self.recalculate_max_volume();
         
-        // 打印调试信息（可以通过日志查看）
-        let after_count = self.minute_data.len();
-        if after_count != before_count {
-            log::debug!("Volume bar chart: {} -> {} minutes", before_count, after_count);
-        }
     }
 
     /// 将时间戳转换为分钟边界

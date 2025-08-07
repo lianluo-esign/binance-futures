@@ -227,15 +227,12 @@ impl ReactiveApp {
     fn convert_message_to_event(&mut self, message: serde_json::Value) -> Option<Event> {
         let start_time = Instant::now();
 
-        // 添加调试日志
-        log::debug!("转换消息到事件: {}", serde_json::to_string(&message).unwrap_or_else(|_| "无法序列化".to_string()));
 
         // 检查消息结构
         let stream = message["stream"].as_str()?;
         let data = message["data"].as_object()?;
         let event_data = serde_json::Value::Object(data.clone());
 
-        log::debug!("检测到流类型: {}", stream);
 
         // 根据流类型处理事件，但添加超时检查
         let event_type = if stream.contains("depth") {
@@ -594,7 +591,7 @@ impl ReactiveApp {
             if let (Ok(price), Ok(qty)) = (price_str.parse::<f64>(), qty_str.parse::<f64>()) {
                 let side = if is_buyer_maker { "sell" } else { "buy" };
                 
-                // 更新Volume Profile数据
+                        // 更新Volume Profile数据
                 self.volume_profile_manager.handle_trade(price, qty, side);
             }
         }
@@ -711,20 +708,15 @@ impl ReactiveApp {
 
         let trade_index = match trade_price_index {
             Some(index) => {
-                log::debug!("智能滑动窗口: 找到交易价格 {:.2} 在索引 {} (精确匹配)", trade_price, index);
-                index
+                    index
             },
             None => {
                 // 如果没有精确匹配，检查距离是否过大
                 if !price_levels.is_empty() && closest_distance < 100.0 {  // 允许100美元的差距
-                    log::debug!("智能滑动窗口: 使用最接近的价格索引 {} (距离 {:.2})", closest_index, closest_distance);
                     closest_index
                 } else {
-                    log::warn!("智能滑动窗口: 交易价格 {:.2} 与orderbook价格差距过大 ({:.2})，可能需要重新初始化orderbook", trade_price, closest_distance);
-
                     // 如果价格差距过大，触发orderbook重新初始化
                     if closest_distance > 200.0 {
-                        log::warn!("价格差距超过200美元，触发orderbook重新初始化");
                         // 调用重新初始化逻辑
                         self.check_and_reinitialize_orderbook(trade_price);
                     }
@@ -746,8 +738,6 @@ impl ReactiveApp {
 
         let needs_scrolling = near_top || near_bottom;
 
-        log::debug!("智能滑动窗口: 交易价格索引={}, 可见范围=[{}, {}], 接近顶部={}, 接近底部={}, 需要滚动={}",
-                   trade_index, current_visible_start, current_visible_end, near_top, near_bottom, needs_scrolling);
 
         if needs_scrolling {
             // 计算新的滚动偏移，使交易价格居中到可见窗口的正中间
@@ -758,9 +748,6 @@ impl ReactiveApp {
             // 更新滚动偏移
             self.scroll_offset = new_scroll;
 
-            let scroll_reason = if near_top { "接近顶部" } else { "接近底部" };
-            log::debug!("智能滑动窗口: 交易价格 {:.2} {} (索引 {}), 窗口居中到偏移 {}",
-                       trade_price, scroll_reason, trade_index, new_scroll);
 
             new_scroll
         } else {
@@ -801,9 +788,7 @@ impl ReactiveApp {
 
     /// 更新自动滚动逻辑（在事件循环中调用）
     fn update_auto_scroll(&mut self) {
-        log::debug!("update_auto_scroll 被调用, auto_scroll = {}", self.auto_scroll);
         if !self.auto_scroll {
-            log::debug!("自动滚动已禁用，跳过");
             return; // 如果禁用自动滚动，直接返回
         }
 
@@ -812,11 +797,8 @@ impl ReactiveApp {
         let current_trade_price = market_snapshot.current_price;
 
         if current_trade_price.is_none() {
-            log::debug!("自动滚动: 没有当前交易价格数据");
             return; // 如果没有当前价格，直接返回
         }
-
-        log::debug!("自动滚动: 当前交易价格 = {:?}", current_trade_price);
 
         // 应用价格精度聚合到当前交易价格
         let aggregated_trade_price = current_trade_price.map(|price| {
@@ -846,15 +828,6 @@ impl ReactiveApp {
         // 使用配置的可见行数
         let visible_rows = self.config.max_visible_rows.min(50); // 限制最大值以避免性能问题
 
-        // 添加调试信息
-        log::debug!("自动滚动: 价格列表长度={}, 聚合后交易价格={:?}, 价格精度={}",
-                   price_values.len(), aggregated_trade_price, self.config.price_precision);
-
-        if !price_values.is_empty() {
-            log::debug!("自动滚动: 价格范围 [{:.2} - {:.2}]",
-                       price_values.last().unwrap_or(&0.0),
-                       price_values.first().unwrap_or(&0.0));
-        }
 
         // 检查是否需要重新初始化orderbook
         if let Some(trade_price) = current_trade_price {
@@ -950,7 +923,6 @@ impl ReactiveApp {
         // 如果没有精确匹配，使用最接近的价格
         if target_index.is_none() && !price_values.is_empty() && closest_distance < 10.0 {
             target_index = Some(closest_index);
-            log::debug!("窗口居中: 使用最接近的价格索引 {} (距离 {:.2})", closest_index, closest_distance);
         }
 
         if let Some(index) = target_index {
@@ -965,8 +937,6 @@ impl ReactiveApp {
             // 更新滚动偏移
             self.scroll_offset = new_scroll;
 
-            log::debug!("窗口居中: 目标价格 {:.2} 位于索引 {}, 新滚动偏移 {}",
-                       aggregated_target_price, index, new_scroll);
         }
     }
 
@@ -1007,7 +977,6 @@ impl ReactiveApp {
                 // 触发窗口重新居中
                 self.center_window_on_price(current_price);
 
-                log::debug!("价格跟踪: 参考价格 {:.2} 触发窗口重新居中", current_price);
             }
         }
     }

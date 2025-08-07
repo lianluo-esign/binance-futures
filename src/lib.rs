@@ -39,7 +39,7 @@ pub fn init_logging() {
 
     env_logger::Builder::from_default_env()
         .target(env_logger::Target::Pipe(Box::new(log_file)))
-        .filter_level(log::LevelFilter::Debug) // 记录调试、信息、警告和错误
+        .filter_level(log::LevelFilter::Error) // 只记录错误
         .init();
 }
 

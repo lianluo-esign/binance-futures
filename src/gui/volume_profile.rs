@@ -145,6 +145,7 @@ impl VolumeProfileManager {
         volume_level.total_volume = buy_volume + sell_volume;
         volume_level.timestamp = timestamp;
         
+        
         // 更新最大成交量（在insert之前）
         if volume_level.total_volume > self.data.max_volume {
             self.data.max_volume = volume_level.total_volume;
@@ -187,7 +188,7 @@ impl VolumeProfileWidget {
     }
 
     /// 渲染Volume Profile widget
-    pub fn render(&self, f: &mut ratatui::Frame, area: ratatui::layout::Rect, visible_price_range: &[f64], latest_trade_price: Option<f64>) {
+    pub fn render(&self, f: &mut ratatui::Frame, area: ratatui::layout::Rect, visible_price_range: &[f64], latest_trade_price: Option<f64>, orderbook_data: Option<&std::collections::BTreeMap<ordered_float::OrderedFloat<f64>, crate::orderbook::OrderFlow>>) {
         use ratatui::{
             layout::Constraint,
             style::{Color, Modifier, Style},
@@ -196,7 +197,7 @@ impl VolumeProfileWidget {
 
         // 创建边框块
         let block = Block::default()
-            .title("Volume Profile - 历史成交量分布")
+            .title("Volume Profile")
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Blue));
 
@@ -212,22 +213,37 @@ impl VolumeProfileWidget {
             // 价格列 - 检查是否为最新交易价格，如果是则显示黄色高亮
             let price_cell = self.create_price_cell_with_highlight(price, latest_trade_price);
             
-            // Volume Profile柱状图列和数值列
-            let (volume_cell, stats_cell) = if let Some(volume_level) = volume_data.price_volumes.get(&price_key) {
+            // Volume Profile柱状图列、Buy列、Sell列和数值列
+            let (volume_cell, buy_cell, sell_cell, stats_cell) = if let Some(volume_level) = volume_data.price_volumes.get(&price_key) {
+                
                 let bar_cell = self.create_volume_bar_cell_without_text(volume_level, volume_data.max_volume);
+                
+                // 从orderbook数据中获取buy/sell信息，带超时检查
+                let (orderbook_buy, orderbook_sell) = self.get_orderbook_data_with_timeout(orderbook_data, &price_key);
+                
+                let buy_cell = self.create_buy_volume_cell(orderbook_buy);
+                let sell_cell = self.create_sell_volume_cell(orderbook_sell);
                 let stats_cell = self.create_volume_stats_cell(volume_level);
-                (bar_cell, stats_cell)
+                (bar_cell, buy_cell, sell_cell, stats_cell)
             } else {
-                (self.create_empty_volume_cell(), Cell::from(""))
+                // 即使没有volume profile数据，也检查是否有orderbook数据，带超时检查
+                let (orderbook_buy, orderbook_sell) = self.get_orderbook_data_with_timeout(orderbook_data, &price_key);
+                
+                let buy_cell = self.create_buy_volume_cell(orderbook_buy);
+                let sell_cell = self.create_sell_volume_cell(orderbook_sell);
+                
+                (self.create_empty_volume_cell(), buy_cell, sell_cell, Cell::from(""))
             };
 
-            rows.push(Row::new(vec![price_cell, volume_cell, stats_cell]));
+            rows.push(Row::new(vec![price_cell, volume_cell, buy_cell, sell_cell, stats_cell]));
         }
 
         // 如果没有数据，显示等待状态
         if rows.is_empty() {
             let empty_row = Row::new(vec![
                 Cell::from("等待成交数据...").style(Style::default().fg(Color::Yellow)),
+                Cell::from(""),
+                Cell::from(""),
                 Cell::from(""),
                 Cell::from(""),
             ]);
@@ -239,14 +255,18 @@ impl VolumeProfileWidget {
             rows,
             [
                 Constraint::Length(8),   // 价格列（8个字符宽度）
-                Constraint::Min(0),      // Volume Profile柱状图列（占据剩余所有空间）
-                Constraint::Length(12),   // 数值统计列（8个字符宽度，与价格列相同）
+                Constraint::Min(20),     // Volume Profile柱状图列（最小20个字符宽度，确保可见）
+                Constraint::Length(12),  // Buy列（12个字符宽度，5位小数右对齐）
+                Constraint::Length(12),  // Sell列（12个字符宽度，5位小数右对齐）
+                Constraint::Length(14),  // 数值统计列（14个字符宽度，容纳Vol/Delta）
             ]
         )
         .header(
             Row::new(vec![
                 Cell::from("Price").style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
                 Cell::from("Volume").style(Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD)),
+                Cell::from("Buy").style(Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+                Cell::from("Sell").style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
                 Cell::from("Vol/Delta").style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
             ])
         )
@@ -257,21 +277,22 @@ impl VolumeProfileWidget {
 
     /// 创建成交量柱状图单元格（不带文本）
     fn create_volume_bar_cell_without_text(&self, volume_level: &VolumeLevel, max_volume: f64) -> Cell {
+        
         if volume_level.total_volume <= 0.0 {
             return Cell::from("");
         }
 
-        // 计算Unicode块字符填充：0.1BTC对应最小填充字符单位
+        // 计算Unicode块字符填充：0.01BTC对应最小填充字符单位
         let btc_volume = volume_level.total_volume; // 假设成交量单位就是BTC
         
         // 计算delta（买单-卖单）
         let delta = volume_level.buy_volume - volume_level.sell_volume;
         
         // 根据delta决定颜色
-        let color = if delta > 10.0 {
-            Color::Green  // delta > 10BTC 显示绿色
-        } else if delta < -10.0 {
-            Color::Red    // delta < -10BTC 显示红色
+        let color = if delta > 0.1 {  // 降低阈值
+            Color::Green  // delta > 0.1BTC 显示绿色
+        } else if delta < -0.1 {
+            Color::Red    // delta < -0.1BTC 显示红色
         } else {
             Color::Blue   // 默认蓝色
         };
@@ -279,7 +300,15 @@ impl VolumeProfileWidget {
         // 使用Unicode块字符创建更精细的bar显示（不限制长度）
         let bar_chars = self.create_unicode_bar_unlimited(btc_volume);
         
-        Cell::from(bar_chars)
+        // 如果没有字符但有成交量，至少显示一个最小字符
+        let final_bar_chars = if bar_chars.is_empty() && btc_volume > 0.0 {
+            "▏".to_string()  // 至少显示一个最小字符
+        } else {
+            bar_chars
+        };
+        
+        
+        Cell::from(final_bar_chars)
             .style(Style::default().fg(color))
     }
 
@@ -332,7 +361,8 @@ impl VolumeProfileWidget {
         }
 
         // 计算需要多少个0.01 BTC单位（适合现货精度）
-        let units = (btc_volume / 0.01).round() as usize;
+        // 修复：使用更合理的缩放因子，让小成交量也能显示
+        let units = (btc_volume / 0.05).round() as usize;
         
         // 计算完整字符数（每个█代表8个0.01 BTC单位，即0.08 BTC）
         let full_chars = units / 8;
@@ -424,6 +454,60 @@ impl VolumeProfileWidget {
         // 普通价格，显示白色
         Cell::from(price_text)
             .style(Style::default().fg(Color::White))
+    }
+
+    /// 创建Buy单元格（绿色，5位小数，右对齐）
+    fn create_buy_volume_cell(&self, buy_volume: f64) -> Cell {
+        if buy_volume <= 0.0 {
+            Cell::from("")
+        } else {
+            let formatted_volume = format!("{:>10.5}", buy_volume);
+            Cell::from(formatted_volume)
+                .style(Style::default().fg(Color::Green))
+        }
+    }
+
+    /// 创建Sell单元格（红色，5位小数，右对齐）
+    fn create_sell_volume_cell(&self, sell_volume: f64) -> Cell {
+        if sell_volume <= 0.0 {
+            Cell::from("")
+        } else {
+            let formatted_volume = format!("{:>10.5}", sell_volume);
+            Cell::from(formatted_volume)
+                .style(Style::default().fg(Color::Red))
+        }
+    }
+
+    /// 获取orderbook数据，带2秒超时检查
+    /// 注意：这个函数返回的是orderbook的bid/ask挂单量，不是历史交易量
+    fn get_orderbook_data_with_timeout(
+        &self,
+        orderbook_data: Option<&std::collections::BTreeMap<ordered_float::OrderedFloat<f64>, crate::orderbook::OrderFlow>>,
+        price_key: &ordered_float::OrderedFloat<f64>,
+    ) -> (f64, f64) {
+        if let Some(orderbook) = orderbook_data {
+            if let Some(order_flow) = orderbook.get(price_key) {
+                // 检查数据是否在2秒内更新过
+                let current_time = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() as u64;
+                
+                if current_time.saturating_sub(order_flow.bid_ask.timestamp) <= 2000 {
+                    // 数据在2秒内更新过，返回orderbook的bid/ask挂单量
+                    // 修复：orderbook数据应该显示当前挂单量，而不是累计交易量
+                    // bid表示买单挂单量，ask表示卖单挂单量
+                    (order_flow.bid_ask.bid, order_flow.bid_ask.ask)
+                } else {
+                    // 数据超过2秒未更新，清除显示
+                    (0.0, 0.0)
+                }
+            } else {
+                (0.0, 0.0)
+            }
+        } else {
+            (0.0, 0.0)
+        }
     }
 }
 
@@ -528,7 +612,7 @@ impl VolumeProfileRenderer {
         }
 
         // 计算需要多少个0.01 BTC单位
-        let units = (btc_volume / 0.01).round() as usize;
+        let units = (btc_volume / 0.05).round() as usize;
         
         // 计算完整字符数（每个█代表8个0.01 BTC单位，即0.08 BTC）
         let full_chars = units / 8;

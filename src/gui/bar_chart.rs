@@ -300,7 +300,7 @@ impl BarChartRenderer {
     pub fn create_bar_data(&self, volume: f64, max_volume: f64, is_bid: bool) -> BarChartData {
         let color = if is_bid { self.bid_color } else { self.ask_color };
         let normalized_length = self.calculate_bar_length(volume, max_volume, self.max_bar_width);
-        let text = format!("{:.3}", volume);
+        let text = format!("{:.5}", volume);
 
         BarChartData {
             volume,
