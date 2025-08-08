@@ -16,7 +16,8 @@
       "Bash(timeout 8s cargo run)",
       "Bash(timeout 5s cargo run BTCUSDT)",
       "Bash(timeout 5s cargo run)",
-      "Bash(find:*)"
+      "Bash(find:*)",
+      "Bash(gunzip:*)"
     ],
     "deny": []
   }
