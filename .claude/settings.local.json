@@ -17,7 +17,24 @@
       "Bash(timeout 5s cargo run BTCUSDT)",
       "Bash(timeout 5s cargo run)",
       "Bash(find:*)",
-      "Bash(gunzip:*)"
+      "Bash(gunzip:*)",
+      "Bash(python:*)",
+      "Bash(mv:*)",
+      "Bash(mkdir:*)",
+      "Bash(./test_config_standalone.exe)",
+      "Bash(RUST_LOG=debug rustc --edition 2021 examples/simple_gzip_timing_test.rs --extern tempfile --extern flate2 --extern serde --extern serde_json -L target/debug/deps -o simple_timing_test)",
+      "Bash(./timing_test.exe)",
+      "Bash(timeout 15s cargo check)",
+      "mcp__ide__getDiagnostics",
+      "Bash(timeout 20s cargo check)",
+      "Bash(timeout 30 cargo check)",
+      "Bash(cmd /c:*)",
+      "Bash(del:*)",
+      "Bash(timeout 10 cargo check)",
+      "Bash(timeout 10s cargo run --release BTCFDUSD)",
+      "Bash(timeout:*)",
+      "Bash(RUST_LOG=debug cargo run)",
+      "Bash(dir logs)"
     ],
     "deny": []
   }

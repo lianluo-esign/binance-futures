@@ -15,20 +15,25 @@
 
 use super::{
     DataProvider, ProviderType, ProviderStatus, EventKind, PerformanceMetrics,
-    BinanceConnectionMode, HistoricalDataFormat,
+    BinanceConnectionMode,
     error::{ProviderError, ProviderResult},
 };
+use crate::config::ProviderIdentity;
 use crate::events::EventType;
 use crate::websocket::{WebSocketManager, WebSocketConfig};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// 币安Provider配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BinanceProviderConfig {
-    /// 交易对符号
+    /// 交易对符号列表 (支持多个symbol)
+    pub symbols: Vec<String>,
+    
+    /// 向后兼容的单个symbol (优先级低于symbols)
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub symbol: String,
     
     /// 连接模式
@@ -47,12 +52,32 @@ pub struct BinanceProviderConfig {
 impl Default for BinanceProviderConfig {
     fn default() -> Self {
         Self {
-            symbol: "BTCUSDT".to_string(),
+            symbols: vec!["BTCFDUSD".to_string()],
+            symbol: String::new(), // 向后兼容，默认为空
             connection_mode: BinanceConnectionMode::WebSocket,
             websocket_config: Some(BinanceWebSocketConfig::default()),
             rest_api_config: None,
             failover_config: FailoverConfig::default(),
         }
+    }
+}
+
+impl BinanceProviderConfig {
+    /// 获取有效的交易对符号列表（优先使用symbols，否则使用单个symbol）
+    pub fn get_symbols(&self) -> Vec<String> {
+        if !self.symbols.is_empty() {
+            self.symbols.clone()
+        } else if !self.symbol.is_empty() {
+            vec![self.symbol.clone()]
+        } else {
+            vec!["BTCFDUSD".to_string()] // 默认值
+        }
+    }
+    
+    /// 获取主要交易对符号（第一个symbol）
+    pub fn get_primary_symbol(&self) -> String {
+        let symbols = self.get_symbols();
+        symbols.first().cloned().unwrap_or_else(|| "BTCFDUSD".to_string())
     }
 }
 
@@ -154,6 +179,17 @@ pub enum StreamType {
 }
 
 impl StreamType {
+    /// 从字符串创建 StreamType
+    pub fn from_string(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "depth" => Some(StreamType::Depth { levels: 20, update_speed: UpdateSpeed::Ms100 }),
+            "trade" => Some(StreamType::Trade),
+            "bookticker" => Some(StreamType::BookTicker),
+            "ticker" => Some(StreamType::MiniTicker),
+            _ => None,
+        }
+    }
+    
     /// 生成Binance WebSocket流名称
     pub fn to_binance_stream(&self, symbol: &str) -> String {
         let symbol_lower = symbol.to_lowercase();
@@ -300,6 +336,43 @@ impl std::fmt::Debug for BinanceProvider {
 }
 
 impl BinanceProvider {
+    /// 从配置创建新的币安Provider
+    pub fn from_config(config: crate::config::BinanceWebSocketConfig) -> Result<Self, String> {
+        // 简化的配置转换，与src/websocket保持一致
+        let provider_config = BinanceProviderConfig {
+            symbols: config.subscription.symbols.clone(),
+            symbol: String::new(), // 不使用单个symbol
+            connection_mode: BinanceConnectionMode::WebSocket,
+            websocket_config: Some(BinanceWebSocketConfig {
+                endpoint_url: Some(config.connection.base_url.clone()),
+                streams: config.subscription.streams
+                    .iter()
+                    .filter_map(|s| StreamType::from_string(s))
+                    .collect(), // 使用配置中的streams并转换为StreamType
+                reconnect_config: ReconnectConfig {
+                    enabled: true,
+                    initial_delay_ms: config.connection.reconnect_delay_ms,
+                    max_delay_ms: config.connection.reconnect_delay_ms * 8, // 指数退避上限
+                    backoff_multiplier: 2.0, // 默认指数退避倍数
+                    max_attempts: config.connection.max_reconnect_attempts,
+                },
+                heartbeat_interval_secs: 30,
+                max_buffer_size: 1000,
+                compression_enabled: false,
+            }),
+            rest_api_config: None,
+            failover_config: FailoverConfig::default(),
+        };
+        
+        let mut provider = Self::new(provider_config);
+        
+        log::info!("创建BinanceProvider，symbols: {:?}，streams: {:?}", 
+                  provider.config.get_symbols(), 
+                  config.subscription.streams);
+        
+        Ok(provider)
+    }
+
     /// 创建新的币安Provider
     pub fn new(config: BinanceProviderConfig) -> Self {
         // 计算支持的事件类型
@@ -357,6 +430,7 @@ impl BinanceProvider {
         symbol: String,
     ) -> Self {
         let config = BinanceProviderConfig {
+            symbols: vec![symbol.clone()],
             symbol,
             connection_mode: BinanceConnectionMode::WebSocket,
             websocket_config: Some(BinanceWebSocketConfig::default()),
@@ -405,18 +479,76 @@ impl BinanceProvider {
     pub fn websocket_manager_mut(&mut self) -> Option<&mut WebSocketManager> {
         self.websocket_manager.as_mut()
     }
+    
+    /// 为多个symbols构建WebSocket流订阅URL（与src/websocket保持一致）
+    fn build_websocket_streams(&self, symbols: &[String], stream_types: &[StreamType]) -> Vec<String> {
+        let mut all_streams = Vec::new();
+        
+        for symbol in symbols {
+            for stream_type in stream_types {
+                // 转换StreamType到字符串格式
+                let stream_str = self.stream_type_to_string(stream_type);
+                let stream_name = format!("{}@{}", symbol.to_lowercase(), stream_str);
+                all_streams.push(stream_name);
+            }
+        }
+        
+        log::info!("构建WebSocket流订阅: {:?}", all_streams);
+        all_streams
+    }
+    
+    /// 将StreamType转换为字符串格式
+    fn stream_type_to_string(&self, stream_type: &StreamType) -> String {
+        match stream_type {
+            StreamType::BookTicker => "bookTicker".to_string(),
+            StreamType::Depth { .. } => "depth".to_string(),
+            StreamType::Trade => "trade".to_string(),
+            StreamType::Kline { interval } => {
+                format!("kline_{}", interval)
+            },
+            StreamType::MiniTicker => "miniTicker".to_string(),
+            StreamType::Ticker24hr => "ticker".to_string(),
+        }
+    }
 
-    /// 初始化WebSocket连接
+    /// 初始化WebSocket连接（与src/websocket保持一致）
     fn initialize_websocket(&mut self) -> ProviderResult<()> {
         if let Some(ws_config) = &self.config.websocket_config {
-            // 创建WebSocket配置
-            let ws_manager_config = WebSocketConfig::new(self.config.symbol.clone());
+            let symbols = self.config.get_symbols();
+            if symbols.is_empty() {
+                return Err(ProviderError::configuration_field(
+                    "没有配置任何交易对符号",
+                    "symbols",
+                    Some("至少一个有效的符号".to_string()),
+                    Some("empty vec".to_string()),
+                ));
+            }
+            
+            // 使用第一个symbol创建WebSocketConfig，但需要支持多个symbol
+            // 这与src/websocket/connection.rs的实现保持一致
+            let primary_symbol = symbols[0].clone();
+            let mut ws_manager_config = WebSocketConfig::new(primary_symbol.clone());
+            
+            // 如果配置了streams，为所有symbol构建streams
+            if !ws_config.streams.is_empty() {
+                ws_manager_config.streams = self.build_websocket_streams(&symbols, &ws_config.streams);
+            } else if symbols.len() > 1 {
+                // 如果没有配置streams但有多个symbol，使用默认streams
+                let stream_types = vec![
+                    StreamType::Depth { levels: 20, update_speed: UpdateSpeed::Ms100 },
+                    StreamType::Trade,
+                    StreamType::BookTicker,
+                ];
+                ws_manager_config.streams = self.build_websocket_streams(&symbols, &stream_types);
+            }
+            // 如果只有一个symbol且没有配置streams，使用WebSocketConfig::new的默认streams
             
             // 创建WebSocket管理器
             let websocket_manager = WebSocketManager::new(ws_manager_config);
             self.websocket_manager = Some(websocket_manager);
             
-            log::info!("WebSocket管理器初始化完成: {}", self.config.symbol);
+            log::info!("WebSocket管理器初始化完成，symbols: {:?}, streams: {:?}", 
+                      symbols, ws_config.streams);
             Ok(())
         } else {
             Err(ProviderError::configuration_field(
@@ -656,19 +788,22 @@ impl DataProvider for BinanceProvider {
     type Error = ProviderError;
 
     fn initialize(&mut self) -> ProviderResult<()> {
-        log::info!("初始化Binance Provider: {} ({:?})", 
-                  self.config.symbol, 
-                  self.config.connection_mode);
+        log::info!("初始化Binance Provider ({:?}), symbols: {:?}", 
+                  self.config.connection_mode, 
+                  self.config.get_symbols());
 
         // 验证配置
-        if self.config.symbol.is_empty() {
+        let symbols = self.config.get_symbols();
+        if symbols.is_empty() {
             return Err(ProviderError::configuration_field(
-                "交易对符号不能为空",
-                "symbol",
-                Some("非空字符串".to_string()),
-                Some("空字符串".to_string()),
+                "没有配置任何交易对符号",
+                "symbols",
+                Some("至少一个有效的符号".to_string()),
+                Some("empty symbols list".to_string()),
             ));
         }
+        
+        log::info!("验证配置完成，交易对符号: {:?}", symbols);
 
         // 根据连接模式初始化相应组件
         match self.config.connection_mode {
@@ -706,9 +841,10 @@ impl DataProvider for BinanceProvider {
 
                     // 订阅数据流
                     if let Some(ws_config) = &self.config.websocket_config {
+                        let primary_symbol = self.config.get_primary_symbol();
                         let streams: Vec<String> = ws_config.streams
                             .iter()
-                            .map(|stream| stream.to_binance_stream(&self.config.symbol))
+                            .map(|stream| stream.to_binance_stream(&primary_symbol))
                             .collect();
 
                         ws_manager.subscribe(streams)
@@ -804,8 +940,8 @@ impl DataProvider for BinanceProvider {
 
     fn get_config_info(&self) -> Option<String> {
         Some(format!(
-            "Symbol: {}, Mode: {:?}, Streams: {}",
-            self.config.symbol,
+            "Symbols: {:?}, Mode: {:?}, Streams: {}",
+            self.config.get_symbols(),
             self.config.connection_mode,
             if let Some(ws_config) = &self.config.websocket_config {
                 format!("{:?}", ws_config.streams)
@@ -845,6 +981,21 @@ impl DataProvider for BinanceProvider {
     }
 }
 
+/// ProviderIdentity implementation - defines the canonical name and type
+impl ProviderIdentity for BinanceProvider {
+    /// Canonical name that MUST be used in configuration files
+    const CANONICAL_NAME: &'static str = "binance_market_provider";
+    
+    /// Canonical type identifier 
+    const CANONICAL_TYPE: &'static str = "BinanceWebSocket";
+    
+    /// Human-readable display name
+    const DISPLAY_NAME: &'static str = "Binance Market Data Provider";
+    
+    /// Provider version
+    const VERSION: &'static str = "1.0.0";
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -852,7 +1003,8 @@ mod tests {
     #[test]
     fn test_binance_provider_config_default() {
         let config = BinanceProviderConfig::default();
-        assert_eq!(config.symbol, "BTCUSDT");
+        assert_eq!(config.symbol, ""); // 向后兼容，默认为空
+        assert_eq!(config.symbols, vec!["BTCFDUSD".to_string()]);
         assert_eq!(config.connection_mode, BinanceConnectionMode::WebSocket);
         assert!(config.websocket_config.is_some());
     }

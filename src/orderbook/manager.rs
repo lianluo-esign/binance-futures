@@ -82,8 +82,9 @@ impl OrderBookManager {
         let mut bid_prices_updated = Vec::new();
         let mut ask_prices_updated = Vec::new();
         
-        // 处理买单
-        if let Some(bids) = data["b"].as_array() {
+        // 处理买单 - check if "b" or "bids" field exists
+        let bids_data = data.get("b").or_else(|| data.get("bids"));
+        if let Some(bids) = bids_data.and_then(|b| b.as_array()) {
             for bid in bids {
                 if let (Some(price_str), Some(qty_str)) = (bid[0].as_str(), bid[1].as_str()) {
                     if let (Ok(price), Ok(qty)) = (price_str.parse::<f64>(), qty_str.parse::<f64>()) {
@@ -97,10 +98,13 @@ impl OrderBookManager {
                     }
                 }
             }
+        } else {
+            log::warn!("No bids data found in depth update");
         }
         
-        // 处理卖单
-        if let Some(asks) = data["a"].as_array() {
+        // 处理卖单 - check if "a" or "asks" field exists
+        let asks_data = data.get("a").or_else(|| data.get("asks"));
+        if let Some(asks) = asks_data.and_then(|a| a.as_array()) {
             for ask in asks {
                 if let (Some(price_str), Some(qty_str)) = (ask[0].as_str(), ask[1].as_str()) {
                     if let (Ok(price), Ok(qty)) = (price_str.parse::<f64>(), qty_str.parse::<f64>()) {
@@ -114,6 +118,14 @@ impl OrderBookManager {
                     }
                 }
             }
+        } else {
+            log::warn!("No asks data found in depth update");
+        }
+        
+        // Log processing results
+        if !bid_prices_updated.is_empty() || !ask_prices_updated.is_empty() {
+            log::info!("Updated {} bid prices, {} ask prices. Total updates: {}", 
+                bid_prices_updated.len(), ask_prices_updated.len(), self.stats.total_depth_updates);
         }
         
         // 重新计算最优价格，确保准确性

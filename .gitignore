@@ -13,3 +13,5 @@ nul
 *.tar.gz
 *.rar
 *.tar
+
+/__pycache__

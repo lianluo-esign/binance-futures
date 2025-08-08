@@ -1,0 +1,22 @@
+# Binance WebSocket Provider Configuration
+# Real-time market data streaming via WebSocket
+# Simplified configuration that aligns with src/websocket implementation
+
+[provider]
+# Provider identification - MUST match BinanceProvider::CANONICAL_NAME
+name = "binance_market_provider"  # MUST match BinanceProvider::CANONICAL_NAME
+type = "BinanceWebSocket"         # MUST match BinanceProvider::CANONICAL_TYPE  
+version = "1.0.0"
+
+[connection]
+# WebSocket connection settings (aligned with WebSocketConfig)
+base_url = "wss://stream.binance.com:9443"  # Binance WebSocket endpoint
+max_reconnect_attempts = 5
+reconnect_delay_ms = 1000
+ping_interval_ms = 30000
+connection_timeout_ms = 10000
+
+[subscription]
+# Market data subscriptions
+symbols = ["BTCFDUSD"]  # Symbols to subscribe
+streams = ["depth@100ms", "trade", "bookTicker"]  # Stream types for each symbol

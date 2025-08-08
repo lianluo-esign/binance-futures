@@ -1,0 +1,74 @@
+# Mock Provider Configuration
+# For testing and development purposes
+
+[provider]
+# Provider identification - MUST match config.toml
+name = "mock_provider"      # Matches config.toml exactly
+type = "Mock"              # Matches config.toml exactly
+version = "1.0.0"
+
+[data_generation]
+# Mock data generation settings
+mode = "random"  # random, replay, fixed
+symbols = ["BTCFDUSD", "ETHFDUSD"]
+base_price = 92000.0  # Starting price for BTCFDUSD
+price_volatility = 0.001  # Price change percentage
+volume_range = [0.001, 10.0]  # Min and max volume
+spread = 0.1  # Bid-ask spread
+
+[event_generation]
+# Event generation configuration
+events_per_second = 100
+event_types = ["bookTicker", "trade", "depthUpdate"]
+event_distribution = {bookTicker = 70, trade = 20, depthUpdate = 10}
+randomize_timing = true
+burst_mode = false
+burst_size = 50
+
+[replay]
+# Replay mode settings (when mode = "replay")
+replay_file = "mock_data.json"
+replay_speed = 1.0
+loop_on_end = true
+
+[order_book]
+# Order book simulation
+depth_levels = 20
+initial_liquidity = 1000.0  # Total volume per side
+liquidity_distribution = "normal"  # normal, uniform, exponential
+update_frequency = 100  # milliseconds
+
+[trade_simulation]
+# Trade simulation settings
+trade_size_distribution = "normal"
+min_trade_size = 0.001
+max_trade_size = 100.0
+aggressive_ratio = 0.5  # Ratio of market orders
+
+[market_conditions]
+# Simulate different market conditions
+condition = "normal"  # normal, volatile, trending, ranging
+trend_strength = 0.0  # -1.0 to 1.0 (negative = down, positive = up)
+volatility_cycles = true
+cycle_period = 300000  # milliseconds
+
+[anomalies]
+# Inject anomalies for testing
+enabled = false
+types = ["gap", "spike", "freeze", "disconnect"]
+frequency = 0.001  # Probability per event
+severity = "medium"  # low, medium, high
+
+[performance]
+# Performance settings
+use_cache = true
+cache_size = 1000
+batch_events = true
+batch_size = 10
+
+[logging]
+# Provider-specific logging
+log_level = "info"
+log_generated_data = false
+save_generated_data = false
+output_file = "mock_output.json"

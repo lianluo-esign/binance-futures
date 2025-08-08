@@ -15,6 +15,7 @@ use super::{
     PerformanceMetrics, PlaybackInfo, HistoricalDataFormat,
     error::{ProviderError, ProviderResult},
 };
+use crate::config::ProviderIdentity;
 use crate::events::EventType;
 
 use flate2::read::GzDecoder;
@@ -188,10 +189,11 @@ pub struct GzipProvider {
     total_bytes_read: u64,
     events_sent: u64,
     
-    /// 时间控制
-    last_event_timestamp: Option<u64>,
-    playback_start_time: Option<Instant>,
-    virtual_time_offset: u64,
+    /// 时间控制 - 全新的定时系统
+    last_event_timestamp_ns: Option<u64>,  // 上一个事件的纳秒时间戳
+    playback_start_time: Option<Instant>,  // 播放开始的实时时间
+    virtual_start_timestamp_ns: Option<u64>, // 虚拟播放开始时的事件时间戳
+    next_event_due_time: Option<Instant>,  // 下一个事件应该发送的实时时间
     
     /// 性能监控
     performance_window_start: Instant,
@@ -265,9 +267,10 @@ impl GzipProvider {
             total_records_read: 0,
             total_bytes_read: 0,
             events_sent: 0,
-            last_event_timestamp: None,
+            last_event_timestamp_ns: None,
             playback_start_time: None,
-            virtual_time_offset: 0,
+            virtual_start_timestamp_ns: None,
+            next_event_due_time: None,
             performance_window_start: now,
             performance_events_count: 0,
             total_file_size: 0,
@@ -353,9 +356,9 @@ impl GzipProvider {
         // 检查是否还有更多文件
         if self.current_file_index >= self.data_files.len() {
             if self.config.playback_config.loop_enabled {
-                // 重新开始
+                // 重新开始时重置时间控制系统
                 self.current_file_index = 0;
-                self.virtual_time_offset = self.last_event_timestamp.unwrap_or(0);
+                self.reset_timing_base();
                 log::info!("重新开始播放数据文件");
             } else {
                 // 播放完成
@@ -587,7 +590,7 @@ impl GzipProvider {
             *file_progress = overall_progress;
             *processed_events = self.events_sent;
             *total_events = self.total_records_read; // 这是一个估算
-            *current_timestamp = self.last_event_timestamp.unwrap_or(0);
+            *current_timestamp = self.last_event_timestamp_ns.map(|ns| ns / 1_000_000).unwrap_or(0);
         }
 
         self.status.update_timestamp();
@@ -604,22 +607,86 @@ impl GzipProvider {
         }
     }
 
-    /// 检查是否应该发送事件（基于播放速度）
-    fn should_send_event(&self, record: &GzipRecord) -> bool {
-        if let Some(last_timestamp) = self.last_event_timestamp {
-            if let Some(start_time) = self.playback_start_time {
-                let real_time_elapsed = start_time.elapsed();
-                let time_diff_ms = record.timestamp_ms.saturating_sub(last_timestamp);
-                let virtual_time_elapsed = Duration::from_millis(
-                    (time_diff_ms as f64 / self.playback_info.playback_speed) as u64
-                );
-                
-                real_time_elapsed >= virtual_time_elapsed
+    /// 检查是否应该发送事件（基于播放速度的现实时间算法）
+    /// 
+    /// 算法逻辑：
+    /// - speed = 0: 立即发送所有事件（无延迟模式）
+    /// - speed > 0: 基于原始市场时间间隔，按速度倍数缩放
+    ///   例如：两个事件原本间隔100ms，2x速度下间隔50ms，0.5x速度下间隔200ms
+    fn should_send_event(&mut self, record: &GzipRecord) -> bool {
+        // 速度为0表示无延迟模式，立即发送
+        if self.playback_info.playback_speed == 0.0 {
+            return true;
+        }
+
+        let now = Instant::now();
+        
+        // 如果已经到了预定发送时间，则发送
+        if let Some(due_time) = self.next_event_due_time {
+            if now >= due_time {
+                return true;
             } else {
-                true
+                return false;
+            }
+        }
+        
+        // 第一个事件立即发送
+        true
+    }
+    
+    /// 更新下一个事件的预定发送时间
+    /// 
+    /// 此方法在成功发送事件后调用，计算下一个事件应该发送的时间
+    fn update_next_event_timing(&mut self, current_record: &GzipRecord, next_record: Option<&GzipRecord>) {
+        // 速度为0的情况下不需要时间控制
+        if self.playback_info.playback_speed == 0.0 {
+            self.next_event_due_time = None;
+            self.last_event_timestamp_ns = Some(current_record.timestamp_ns);
+            return;
+        }
+        
+        let now = Instant::now();
+        
+        // 初始化播放时间基准
+        if self.playback_start_time.is_none() {
+            self.playback_start_time = Some(now);
+            self.virtual_start_timestamp_ns = Some(current_record.timestamp_ns);
+        }
+        
+        // 如果有下一个事件，计算其应该发送的时间
+        if let Some(next_record) = next_record {
+            if let (Some(start_time), Some(virtual_start)) = (self.playback_start_time, self.virtual_start_timestamp_ns) {
+                // 计算下一个事件与播放开始时间的虚拟时间差（纳秒）
+                let virtual_time_diff_ns = next_record.timestamp_ns.saturating_sub(virtual_start);
+                
+                // 按播放速度缩放时间差
+                let scaled_time_diff_ns = if self.playback_info.playback_speed > 0.0 {
+                    (virtual_time_diff_ns as f64 / self.playback_info.playback_speed) as u64
+                } else {
+                    0 // 避免除零
+                };
+                
+                // 计算下一个事件应该发送的实际时间
+                let scaled_duration = Duration::from_nanos(scaled_time_diff_ns);
+                self.next_event_due_time = Some(start_time + scaled_duration);
             }
         } else {
-            true // 第一个事件立即发送
+            // 没有下一个事件，清除预定时间
+            self.next_event_due_time = None;
+        }
+        
+        self.last_event_timestamp_ns = Some(current_record.timestamp_ns);
+    }
+    
+    /// 重置播放时间基准（当速度改变或暂停/恢复时调用）
+    fn reset_timing_base(&mut self) {
+        let now = Instant::now();
+        self.playback_start_time = Some(now);
+        self.next_event_due_time = None;
+        
+        // 如果有当前事件，将其作为新的虚拟开始时间
+        if let Some(current_record) = self.event_buffer.front() {
+            self.virtual_start_timestamp_ns = Some(current_record.timestamp_ns);
         }
     }
 }
@@ -696,26 +763,31 @@ impl DataProvider for GzipProvider {
 
         // 从缓冲区读取准备好的事件
         loop {
-            // 检查是否有可用的记录
-            let should_send = if let Some(record) = self.event_buffer.front() {
-                self.should_send_event(record)
+            // 先检查是否还有事件，并克隆记录以避免借用冲突
+            let should_send = if let Some(record) = self.event_buffer.front().cloned() {
+                self.should_send_event(&record)
             } else {
-                break; // 没有更多记录
+                false
             };
-
-            if should_send {
-                let record = self.event_buffer.pop_front().unwrap();
-                let event = self.convert_record_to_event(&record);
-                events.push(event);
-
-                // 更新统计
-                self.events_sent += 1;
-                self.last_event_timestamp = Some(record.timestamp_ms);
-                self.performance_events_count += 1;
-                self.status.record_event();
-            } else {
-                break; // 还没到发送时间
+            
+            if !should_send {
+                break; // 没有更多事件或者还没到发送时间
             }
+            
+            // 从缓冲区取出事件
+            let record = self.event_buffer.pop_front().unwrap();
+            let event = self.convert_record_to_event(&record);
+            events.push(event);
+
+            // 更新下一个事件的定时
+            // 创建一个临时的 Option，避免借用冲突
+            let next_record_copy = self.event_buffer.front().cloned();
+            self.update_next_event_timing(&record, next_record_copy.as_ref());
+            
+            // 更新统计
+            self.events_sent += 1;
+            self.performance_events_count += 1;
+            self.status.record_event();
         }
 
         // 如果缓冲区快空了，尝试读取更多数据
@@ -792,6 +864,8 @@ impl ControllableProvider for GzipProvider {
     fn pause(&mut self) -> ProviderResult<()> {
         if matches!(self.playback_state, PlaybackState::Playing) {
             self.playback_state = PlaybackState::Paused;
+            // 暂停时清除定时器，避免时间计算错误
+            self.next_event_due_time = None;
             log::info!("压缩数据播放已暂停");
         }
         Ok(())
@@ -800,29 +874,38 @@ impl ControllableProvider for GzipProvider {
     fn resume(&mut self) -> ProviderResult<()> {
         if matches!(self.playback_state, PlaybackState::Paused) {
             self.playback_state = PlaybackState::Playing;
-            self.playback_start_time = Some(Instant::now());
+            // 恢复时重置时间基准，保证时间计算的连续性
+            self.reset_timing_base();
             log::info!("压缩数据播放已恢复");
         }
         Ok(())
     }
 
     fn set_playback_speed(&mut self, speed: f64) -> ProviderResult<()> {
-        if speed < self.config.playback_config.min_speed || 
+        // 允许speed=0作为特殊情况（无延迟模式）
+        if speed < 0.0 || (speed > 0.0 && speed < self.config.playback_config.min_speed) || 
            speed > self.config.playback_config.max_speed {
             return Err(ProviderError::configuration(
-                format!("播放速度超出范围 [{}, {}]: {}", 
+                format!("播放速度超出范围 [0.0, {}-{}]: {}", 
                        self.config.playback_config.min_speed,
                        self.config.playback_config.max_speed,
                        speed)
             ));
         }
 
+        let old_speed = self.playback_info.playback_speed;
         self.playback_info.playback_speed = speed;
         
-        // 重置播放时间基准
-        self.playback_start_time = Some(Instant::now());
+        // 当速度改变时重置时间基准，确保平滑过渡
+        if (old_speed == 0.0) != (speed == 0.0) || speed != old_speed {
+            self.reset_timing_base();
+        }
         
-        log::info!("播放速度已设置为 {:.1}x", speed);
+        if speed == 0.0 {
+            log::info!("播放速度已设置为无延迟模式（speed=0）");
+        } else {
+            log::info!("播放速度已设置为 {:.1}x", speed);
+        }
         Ok(())
     }
 
@@ -902,4 +985,204 @@ mod tests {
         assert!(provider.initialize().is_ok());
         assert!(provider.event_buffer.len() > 0);
     }
+    
+    #[test]
+    fn test_timing_algorithm_speed_zero() {
+        let temp_dir = TempDir::new().unwrap();
+        // 创建两个事件，间隔1秒（纳秒时间戳）
+        let test_data = concat!(
+            "1754092800000000000 {\"stream\":\"btcfdusd@bookTicker\",\"data\":{}}\n",
+            "1754092801000000000 {\"stream\":\"btcfdusd@bookTicker\",\"data\":{}}\n"
+        );
+        
+        create_test_gzip_file(temp_dir.path(), "timing_test.gz", test_data);
+        
+        let mut config = GzipProviderConfig::default();
+        config.data_dir = temp_dir.path().to_path_buf();
+        config.playback_config.initial_speed = 0.0; // 无延迟模式
+        config.playback_config.auto_start = true;
+        
+        let mut provider = GzipProvider::new(config);
+        provider.initialize().unwrap();
+        provider.start().unwrap();
+        
+        let start_time = Instant::now();
+        
+        // speed=0时，所有事件应该立即可用
+        let events1 = provider.read_events().unwrap();
+        let events2 = provider.read_events().unwrap();
+        
+        let elapsed = start_time.elapsed();
+        
+        // 在speed=0模式下，两个事件都应该在极短时间内可用（< 10ms）
+        assert!(!events1.is_empty() || !events2.is_empty());
+        assert!(elapsed.as_millis() < 10, 
+                "Speed=0 mode should not introduce delays, but took {}ms", 
+                elapsed.as_millis());
+    }
+    
+    #[test]
+    fn test_timing_algorithm_speed_scaling() {
+        let temp_dir = TempDir::new().unwrap();
+        // 创建两个事件，间隔100ms（纳秒时间戳）
+        let base_time = 1754092800000000000u64;
+        let interval_ns = 100_000_000u64; // 100ms in nanoseconds
+        
+        let test_data = format!(
+            "{} {{\"stream\":\"btcfdusd@bookTicker\",\"data\":{{}}}}\n{} {{\"stream\":\"btcfdusd@bookTicker\",\"data\":{{}}}}", 
+            base_time, 
+            base_time + interval_ns
+        );
+        
+        create_test_gzip_file(temp_dir.path(), "timing_test.gz", &test_data);
+        
+        // 测试2x速度
+        let mut config = GzipProviderConfig::default();
+        config.data_dir = temp_dir.path().to_path_buf();
+        config.playback_config.initial_speed = 2.0; // 2x速度
+        config.playback_config.auto_start = true;
+        
+        let mut provider = GzipProvider::new(config);
+        provider.initialize().unwrap();
+        provider.start().unwrap();
+        
+        let start_time = Instant::now();
+        
+        // 第一个事件应该立即可用
+        let events1 = provider.read_events().unwrap();
+        assert!(!events1.is_empty(), "First event should be immediately available");
+        
+        // 第二个事件应该在约50ms后可用（原100ms / 2x速度）
+        std::thread::sleep(Duration::from_millis(45)); // 稍微早一点
+        let events2 = provider.read_events().unwrap();
+        assert!(events2.is_empty(), "Second event should not be available yet");
+        
+        std::thread::sleep(Duration::from_millis(10)); // 总共等55ms
+        let events3 = provider.read_events().unwrap();
+        assert!(!events3.is_empty(), "Second event should now be available");
+        
+        let total_elapsed = start_time.elapsed();
+        assert!(total_elapsed.as_millis() >= 50, 
+                "Should take at least 50ms for 2x speed, but took {}ms", 
+                total_elapsed.as_millis());
+        assert!(total_elapsed.as_millis() < 70, 
+                "Should not take much more than 50ms for 2x speed, but took {}ms", 
+                total_elapsed.as_millis());
+    }
+    
+    #[test]
+    fn test_speed_change_during_playback() {
+        let temp_dir = TempDir::new().unwrap();
+        // 创建三个事件，每个间隔100ms
+        let base_time = 1754092800000000000u64;
+        let interval_ns = 100_000_000u64; 
+        
+        let test_data = format!(
+            "{} {{\"stream\":\"btcfdusd@bookTicker\",\"data\":{{}}}}\n{} {{\"stream\":\"btcfdusd@bookTicker\",\"data\":{{}}}}\n{} {{\"stream\":\"btcfdusd@bookTicker\",\"data\":{{}}}}", 
+            base_time, 
+            base_time + interval_ns,
+            base_time + 2 * interval_ns
+        );
+        
+        create_test_gzip_file(temp_dir.path(), "speed_change_test.gz", &test_data);
+        
+        let mut config = GzipProviderConfig::default();
+        config.data_dir = temp_dir.path().to_path_buf();
+        config.playback_config.initial_speed = 1.0; // 正常速度
+        config.playback_config.auto_start = true;
+        
+        let mut provider = GzipProvider::new(config);
+        provider.initialize().unwrap();
+        provider.start().unwrap();
+        
+        // 第一个事件立即可用
+        let events1 = provider.read_events().unwrap();
+        assert!(!events1.is_empty());
+        
+        // 改变速度为2x
+        provider.set_playback_speed(2.0).unwrap();
+        
+        let start_time = Instant::now();
+        
+        // 第二个事件应该在约50ms后可用（因为速度改变后重置了时间基准）
+        std::thread::sleep(Duration::from_millis(45));
+        let events2 = provider.read_events().unwrap();
+        assert!(events2.is_empty(), "Event should not be ready yet after speed change");
+        
+        std::thread::sleep(Duration::from_millis(10));
+        let events3 = provider.read_events().unwrap();
+        assert!(!events3.is_empty(), "Event should be ready now");
+        
+        let elapsed = start_time.elapsed();
+        assert!(elapsed.as_millis() >= 50 && elapsed.as_millis() < 70,
+                "Speed change should work correctly, elapsed: {}ms", elapsed.as_millis());
+    }
+    
+    #[test]
+    fn test_pause_resume_timing() {
+        let temp_dir = TempDir::new().unwrap();
+        let base_time = 1754092800000000000u64;
+        let interval_ns = 100_000_000u64; // 100ms
+        
+        let test_data = format!(
+            "{} {{\"stream\":\"btcfdusd@bookTicker\",\"data\":{{}}}}\n{} {{\"stream\":\"btcfdusd@bookTicker\",\"data\":{{}}}}", 
+            base_time, 
+            base_time + interval_ns
+        );
+        
+        create_test_gzip_file(temp_dir.path(), "pause_test.gz", &test_data);
+        
+        let mut config = GzipProviderConfig::default();
+        config.data_dir = temp_dir.path().to_path_buf();
+        config.playback_config.initial_speed = 1.0;
+        config.playback_config.auto_start = true;
+        
+        let mut provider = GzipProvider::new(config);
+        provider.initialize().unwrap();
+        provider.start().unwrap();
+        
+        // 第一个事件
+        let events1 = provider.read_events().unwrap();
+        assert!(!events1.is_empty());
+        
+        // 暂停
+        provider.pause().unwrap();
+        
+        // 暂停时不应该有事件
+        std::thread::sleep(Duration::from_millis(110)); // 超过原始间隔
+        let events2 = provider.read_events().unwrap();
+        assert!(events2.is_empty(), "No events should be available while paused");
+        
+        // 恢复
+        let resume_time = Instant::now();
+        provider.resume().unwrap();
+        
+        // 恢复后第二个事件应该在100ms后可用
+        std::thread::sleep(Duration::from_millis(95));
+        let events3 = provider.read_events().unwrap();
+        assert!(events3.is_empty(), "Event should not be ready yet");
+        
+        std::thread::sleep(Duration::from_millis(10));
+        let events4 = provider.read_events().unwrap();
+        assert!(!events4.is_empty(), "Event should be ready after resume timing");
+        
+        let resume_elapsed = resume_time.elapsed();
+        assert!(resume_elapsed.as_millis() >= 100,
+                "Resume should respect original timing, elapsed: {}ms", resume_elapsed.as_millis());
+    }
+}
+
+/// ProviderIdentity implementation - defines the canonical name and type
+impl ProviderIdentity for GzipProvider {
+    /// Canonical name that MUST be used in configuration files
+    const CANONICAL_NAME: &'static str = "gzip_historical_provider";
+    
+    /// Canonical type identifier 
+    const CANONICAL_TYPE: &'static str = "GzipProvider";
+    
+    /// Human-readable display name
+    const DISPLAY_NAME: &'static str = "Gzip Historical Data Provider";
+    
+    /// Provider version
+    const VERSION: &'static str = "1.0.0";
 }

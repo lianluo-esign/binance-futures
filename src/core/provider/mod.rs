@@ -20,6 +20,7 @@ pub mod historical_provider;
 pub mod gzip_provider;
 pub mod manager;
 pub mod error;
+pub mod config_adapter;
 
 // 重构后的核心导出
 pub use types::*;
@@ -28,6 +29,7 @@ pub use historical_provider::{HistoricalDataProvider, HistoricalDataConfig};
 pub use gzip_provider::{GzipProvider, GzipProviderConfig};
 pub use manager::ProviderManager;
 pub use error::{ProviderError, ProviderResult};
+pub use config_adapter::{ConfigurableProvider as Configurable, ProviderConfigAdapter, ConfiguredProviderFactory};
 
 // 向后兼容导出
 pub use websocket_provider::BinanceWebSocketProvider;

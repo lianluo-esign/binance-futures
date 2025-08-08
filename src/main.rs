@@ -243,26 +243,13 @@ fn update_volume_profile(volume_profile_widget: &mut VolumeProfileWidget, app: &
     // 获取widget的管理器
     let widget_manager = volume_profile_widget.get_manager_mut();
     
-    // 修复：不要清空数据！这会导致累积的volume profile数据丢失
-    // 改为增量更新，让volume profile数据能够正确累积
-    // widget_manager.clear_data(); // 删除这行 - 这是导致累积数据为0的根本原因
-    
-    // 修复：直接同步应用层的volume profile累积数据到widget
-    // 应用层的VolumeProfileManager已经正确处理了交易事件的累积
+    // 直接同步应用层的volume profile累积数据到widget
+    // 不清空数据以保持累积的volume profile数据
     for (price_key, volume_level) in &app_data.price_volumes {
         let price = price_key.0;
-        
-        
-        
-        
-        // 修复：使用set_volume_data直接同步应用层的累积数据到widget
-        // 应用层的VolumeProfileManager已经正确累积了所有交易数据
+        // 同步累积的交易数据到widget
         widget_manager.set_volume_data(price, volume_level.buy_volume, volume_level.sell_volume);
     }
-    
-    // 修复：不需要为orderbook中的价格层级添加空的volume数据
-    // volume profile应该只显示有实际交易发生的价格层级
-    // orderbook数据在渲染时会单独处理，显示在Buy/Sell列中
 }
 
 /// 渲染Volume Profile widget
@@ -289,7 +276,7 @@ fn render_volume_profile(
 }
 
 /// 获取当前可见的价格范围（为Volume Profile动态生成价格层级）
-/// 修复：动态扩展100个层级上下，跟随当前价格变化
+/// 动态扩展上下各100个层级，跟随当前价格变化
 fn get_visible_price_range(app: &ReactiveApp) -> Vec<f64> {
     let snapshot = app.get_market_snapshot();
     let visible_rows = get_actual_visible_rows();

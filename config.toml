@@ -1,0 +1,67 @@
+# Global Configuration for Binance Futures Trading System
+# This is the main configuration file that defines which providers are active
+# and their individual configuration paths
+
+[system]
+# System-wide settings
+name = "Binance Futures Trading System"
+version = "1.0.0"
+log_level = "error"  # trace, debug, info, warn, error
+log_file = "binance_futures.log"
+performance_mode = "high"  # low, medium, high
+
+[runtime]
+# Runtime configuration
+cpu_affinity = true
+cpu_cores = [1]  # Which CPU cores to use
+thread_pool_size = 4
+event_buffer_size = 65536
+
+[providers]
+# Define which providers are active and their priorities
+# Priority: lower number = higher priority
+active = ["binance_market_provider", "gzip_historical_provider"]
+
+# Provider configurations
+[[providers.config]]
+name = "binance_market_provider"    # MUST match BinanceProvider::CANONICAL_NAME
+type = "BinanceWebSocket"           # MUST match BinanceProvider::CANONICAL_TYPE
+enabled = true
+priority = 1
+config_file = "configs/providers/binance_market_provider.toml"
+
+[[providers.config]]
+name = "gzip_historical_provider"   # MUST match GzipProvider::CANONICAL_NAME
+type = "GzipProvider"               # MUST match GzipProvider::CANONICAL_TYPE
+enabled = true
+priority = 2
+config_file = "configs/providers/gzip_historical_provider.toml"
+
+[[providers.config]]
+name = "binance_rest"
+type = "BinanceRest"
+enabled = false
+priority = 3
+config_file = "configs/providers/binance_rest.toml"
+
+[[providers.config]]
+name = "mock_provider"
+type = "Mock"
+enabled = false
+priority = 99
+config_file = "configs/providers/mock.toml"
+
+[gui]
+# GUI Configuration
+theme = "dark"
+fps = 0  # Maximum refresh rate (no limiting)
+show_debug_info = false
+layout = "default"  # default, compact, extended
+
+[monitoring]
+# Monitoring and metrics
+enabled = true
+metrics_port = 9090
+health_check_interval = 30  # seconds
+export_metrics = true
+metrics_file = "metrics.json"

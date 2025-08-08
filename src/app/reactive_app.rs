@@ -1,8 +1,6 @@
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::core::RingBuffer;
-use crate::events::{Event, EventType, EventBus, EventDispatcher, LockFreeEventDispatcher};
+use crate::events::{Event, EventType, LockFreeEventDispatcher};
 use crate::orderbook::{OrderBookManager, MarketSnapshot};
 use crate::websocket::{WebSocketManager, WebSocketConfig};
 use crate::monitoring::InternalMonitor;
@@ -11,9 +9,13 @@ use crate::Config;
 
 // Provider系统导入
 use crate::core::{
-    ProviderManager, ProviderManagerConfig, BinanceWebSocketProvider,
-    BinanceWebSocketConfig, ProviderMetadata, ProviderType, DataProvider, ProviderError,
-    StreamType, UpdateSpeed, ReconnectConfig, ProviderManagerStatus,
+    ProviderManager, ProviderManagerConfig, ProviderMetadata, ProviderType, ProviderError,
+    ProviderManagerStatus,
+};
+use crate::core::provider::{BinanceProvider, DataProvider};
+use crate::config::{
+    provider_config::{BinanceWebSocketConfig as ConfigBinanceWebSocketConfig, ProviderInfo as ConfigProviderInfo, WebSocketConnection, WebSocketSubscription, Authentication, WebSocketPerformanceConfig},
+    ProviderIdentity,
 };
 use std::collections::HashMap;
 
@@ -24,8 +26,15 @@ pub struct ReactiveApp {
     
     // 业务组件
     orderbook_manager: OrderBookManager,
-    websocket_manager: WebSocketManager,
+    binance_provider: BinanceProvider,
     volume_profile_manager: VolumeProfileManager,
+    
+    // WebSocket系统（传统模式）
+    websocket_manager: WebSocketManager,
+    
+    // Provider系统（新模式）
+    provider_manager: Option<ProviderManager>,
+    use_provider_system: bool,
     
     // 应用状态
     config: Config,
@@ -68,11 +77,6 @@ pub struct ReactiveApp {
     // 最新交易数据（用于价格图表）
     last_trade_volume: Option<f64>,
 
-    // Provider系统 (新增，向后兼容)
-    provider_manager: Option<ProviderManager>,
-    
-    // Provider使用模式标志
-    use_provider_system: bool,
 }
 
 impl ReactiveApp {
@@ -80,19 +84,54 @@ impl ReactiveApp {
         // 创建无锁事件分发器
         let event_dispatcher = LockFreeEventDispatcher::new(config.event_buffer_size);
         
-        // 创建WebSocket管理器
-        let ws_config = WebSocketConfig::new(config.symbol.clone());
-        let websocket_manager = WebSocketManager::new(ws_config);
+        // 创建BinanceProvider配置
+        let binance_config = ConfigBinanceWebSocketConfig {
+            provider: ConfigProviderInfo {
+                name: BinanceProvider::CANONICAL_NAME.to_string(),
+                provider_type: BinanceProvider::CANONICAL_TYPE.to_string(), 
+                version: "1.0.0".to_string(),
+            },
+            connection: WebSocketConnection {
+                base_url: "wss://stream.binance.com:9443".to_string(),
+                max_reconnect_attempts: 5,
+                reconnect_delay_ms: 1000,
+                ping_interval_ms: 30000,
+                connection_timeout_ms: 10000,
+            },
+            subscription: WebSocketSubscription {
+                symbols: vec![config.symbol.clone()],
+                streams: vec!["depth".to_string(), "trade".to_string(), "bookTicker".to_string()],
+            },
+            authentication: Authentication {
+                api_key: String::new(),
+                api_secret: String::new(),
+            },
+            performance: WebSocketPerformanceConfig {
+                buffer_size: 8192,
+                batch_processing: true,
+                batch_size: 100,
+            },
+        };
+        
+        // 使用配置适配器创建BinanceProvider
+        let binance_provider = BinanceProvider::from_websocket_config(&binance_config).unwrap();
         
         // 创建订单簿管理器
         let orderbook_manager = OrderBookManager::new();
+        
+        // 创建传统 WebSocket 管理器
+        let websocket_config = WebSocketConfig::new(config.symbol.clone());
+        let websocket_manager = WebSocketManager::new(websocket_config);
         
         let now = Instant::now();
 
         Self {
             event_dispatcher,
             orderbook_manager,
+            binance_provider,
             websocket_manager,
+            provider_manager: None,
+            use_provider_system: false,
             volume_profile_manager: VolumeProfileManager::new(),
             config,
             running: false,
@@ -118,9 +157,6 @@ impl ReactiveApp {
             circuit_breaker_last_failure: None,
             last_trade_volume: None,
             
-            // Provider系统默认禁用，保持向后兼容
-            provider_manager: None,
-            use_provider_system: false,
         }
     }
 
@@ -153,25 +189,37 @@ impl ReactiveApp {
         
         let mut provider_manager = ProviderManager::new(provider_manager_config);
         
-        // 创建Binance WebSocket Provider
-        let binance_config = BinanceWebSocketConfig {
-            symbol: app.config.symbol.clone(),
-            streams: vec![
-                StreamType::BookTicker,
-                StreamType::Depth { 
-                    levels: 20, 
-                    update_speed: UpdateSpeed::Ms100 
-                },
-                StreamType::Trade,
-            ],
-            reconnect_config: ReconnectConfig::default(),
-            heartbeat_interval_secs: 30,
-            max_buffer_size: 1000,
-            compression_enabled: false,
-            ..Default::default()
+        // 创建Binance Provider配置 
+        let binance_config = ConfigBinanceWebSocketConfig {
+            provider: ConfigProviderInfo {
+                name: BinanceProvider::CANONICAL_NAME.to_string(),
+                provider_type: BinanceProvider::CANONICAL_TYPE.to_string(), 
+                version: "1.0.0".to_string(),
+            },
+            connection: WebSocketConnection {
+                base_url: "wss://stream.binance.com:9443".to_string(),
+                max_reconnect_attempts: 5,
+                reconnect_delay_ms: 1000,
+                ping_interval_ms: 30000,
+                connection_timeout_ms: 10000,
+            },
+            subscription: WebSocketSubscription {
+                symbols: vec![app.config.symbol.clone()],
+                streams: vec!["depth".to_string(), "trade".to_string(), "bookTicker".to_string()],
+            },
+            authentication: Authentication {
+                api_key: String::new(),
+                api_secret: String::new(),
+            },
+            performance: WebSocketPerformanceConfig {
+                buffer_size: 1000,
+                batch_processing: false,
+                batch_size: 100,
+            },
         };
         
-        let binance_provider = BinanceWebSocketProvider::new(binance_config);
+        let binance_provider = BinanceProvider::from_config(binance_config)
+            .expect("Failed to create BinanceProvider from config");
         
         // 创建Provider元数据
         let provider_metadata = ProviderMetadata {
@@ -209,56 +257,27 @@ impl ReactiveApp {
     /// 初始化应用程序
     pub fn initialize(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         // 初始化信息写入日志文件，不输出到控制台
-        log::info!("初始化应用程序: {} (模式: {})", 
-            self.config.symbol,
-            if self.use_provider_system { "Provider系统" } else { "传统WebSocket" }
-        );
+        log::info!("初始化应用程序: {} (模式: BinanceProvider)", self.config.symbol);
 
-        if self.use_provider_system {
-            // 使用Provider系统
-            if let Some(ref mut provider_manager) = self.provider_manager {
-                log::info!("启动Provider管理器...");
-                provider_manager.start()
-                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
-            } else {
-                return Err("Provider系统未正确初始化".into());
-            }
-        } else {
-            // 使用传统WebSocket系统
-            log::info!("正在建立WebSocket连接...");
-            self.websocket_manager.connect()?;
-        }
+        // 使用BinanceProvider系统
+        log::info!("正在启动BinanceProvider...");
+        self.binance_provider.initialize()
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
 
         self.running = true;
-        log::info!("应用程序初始化完成 - {} 已启动", 
-            if self.use_provider_system { "Provider系统" } else { "传统WebSocket系统" }
-        );
+        log::info!("应用程序初始化完成 - BinanceProvider已启动");
 
         Ok(())
     }
 
-    /// 主事件循环（非阻塞）- 支持Provider系统和传统WebSocket
+    /// 主事件循环（非阻塞）- 使用BinanceProvider
     pub fn event_loop(&mut self) {
         if !self.running {
             return;
         }
 
-        // 1. 数据源处理：根据使用的系统类型选择不同的处理方式
-        let events_processed = if self.use_provider_system {
-            // 使用Provider系统
-            self.process_provider_events()
-        } else {
-            // 使用传统WebSocket系统
-            if self.websocket_manager.is_connected() {
-                self.process_websocket_messages();
-            } else if self.websocket_manager.should_reconnect() {
-                // 简化重连逻辑，避免复杂的健康检查
-                let _ = self.websocket_manager.attempt_reconnect();
-            }
-            
-            // 处理事件队列
-            self.process_events()
-        };
+        // 1. 使用BinanceProvider处理数据
+        let events_processed = self.process_binance_provider_events();
 
         // 3. 更新性能统计（简化版本）
         self.update_performance_stats(events_processed);
@@ -282,6 +301,36 @@ impl ReactiveApp {
         self.last_update = Instant::now();
     }
 
+    /// 处理BinanceProvider事件（直接使用BinanceProvider）
+    fn process_binance_provider_events(&mut self) -> usize {
+        // 获取BinanceProvider的数据
+        match self.binance_provider.read_events() {
+            Ok(events) => {
+                let mut events_processed = 0;
+                
+                for event_type in events {
+                    // 更新业务组件
+                    self.update_business_components(&event_type);
+                    events_processed += 1;
+                    
+                    // Don't publish events to the dispatcher since we're processing them directly
+                    // This prevents buffer accumulation with no handlers
+                }
+                
+                if events_processed > 0 {
+                    log::debug!("BinanceProvider处理了 {} 个事件", events_processed);
+                    self.last_data_received = Some(Instant::now());
+                }
+                
+                events_processed
+            }
+            Err(e) => {
+                log::warn!("BinanceProvider数据获取失败: {}", e);
+                0
+            }
+        }
+    }
+
     /// 处理Provider事件（新的事件处理方式）
     fn process_provider_events(&mut self) -> usize {
         if let Some(ref mut provider_manager) = self.provider_manager {
@@ -296,11 +345,10 @@ impl ReactiveApp {
                     for event_type in events_to_process {
                         // 更新业务组件
                         self.update_business_components(&event_type);
-                        
-                        // 发布事件到事件系统
-                        let event = Event::new(event_type, "provider".to_string());
-                        self.event_dispatcher.publish(event);
                         events_created += 1;
+                        
+                        // Don't publish events to the dispatcher since we're processing them directly
+                        // This prevents buffer accumulation with no handlers
                     }
                     
                     if events_created > 0 {
@@ -308,9 +356,8 @@ impl ReactiveApp {
                         self.last_data_received = Some(Instant::now());
                     }
                     
-                    // 处理事件队列
-                    let events_processed = self.process_events();
-                    events_processed + events_created
+                    // Events are processed directly, no need for additional event processing
+                    events_created
                 }
                 Err(e) => {
                     log::warn!("Provider事件处理失败: {}", e);
@@ -325,8 +372,8 @@ impl ReactiveApp {
                         log::error!("Provider断路器打开，暂停事件处理");
                     }
                     
-                    // 处理现有事件队列
-                    self.process_events()
+                    // Return 0 since no events were processed due to error
+                    0
                 }
             }
         } else {
@@ -339,21 +386,67 @@ impl ReactiveApp {
     fn update_business_components(&mut self, event_type: &EventType) {
         match event_type {
             EventType::DepthUpdate(data) => {
-                self.orderbook_manager.handle_depth_update(data);
+                // Extract the actual depth data from the WebSocket message wrapper
+                let depth_data = if let Some(inner_data) = data.get("data") {
+                    inner_data
+                } else {
+                    data // Fallback to the original data if no wrapper
+                };
+                
+                // Simple logging for depth updates
+                // Check if we received any depth events at all
+                log::info!("DepthUpdate event received!");
+                
+                if let (Some(bids), Some(asks)) = (depth_data.get("b"), depth_data.get("a")) {
+                    if let (Some(bids_array), Some(asks_array)) = (bids.as_array(), asks.as_array()) {
+                        log::info!("Depth update received - {} bids, {} asks", bids_array.len(), asks_array.len());
+                        
+                        // Log first bid and ask if available
+                        if let (Some(first_bid), Some(first_ask)) = (bids_array.first(), asks_array.first()) {
+                            if let (Some(bid_price), Some(bid_qty)) = (first_bid[0].as_str(), first_bid[1].as_str()) {
+                                log::info!("Sample bid: price={}, qty={}", bid_price, bid_qty);
+                            }
+                            if let (Some(ask_price), Some(ask_qty)) = (first_ask[0].as_str(), first_ask[1].as_str()) {
+                                log::info!("Sample ask: price={}, qty={}", ask_price, ask_qty);
+                            }
+                        }
+                    } else {
+                        log::warn!("Depth update 'b' and 'a' fields are not arrays: b={:?}, a={:?}", bids, asks);
+                    }
+                } else {
+                    log::warn!("Depth update missing 'b' or 'a' fields. Available keys: {:?}", 
+                        depth_data.as_object().map(|obj| obj.keys().collect::<Vec<_>>()).unwrap_or_default());
+                }
+                
+                self.orderbook_manager.handle_depth_update(depth_data);
             }
             EventType::Trade(data) => {
+                // Extract the actual trade data from the WebSocket message wrapper
+                let trade_data = if let Some(inner_data) = data.get("data") {
+                    inner_data
+                } else {
+                    data // Fallback to the original data if no wrapper
+                };
+                
+                
                 // 存储交易成交量信息（用于价格图表）
-                if let Some(qty_str) = data["q"].as_str() {
+                if let Some(qty_str) = trade_data["q"].as_str() {
                     if let Ok(qty) = qty_str.parse::<f64>() {
                         self.last_trade_volume = Some(qty);
                     }
                 }
                 
-                self.orderbook_manager.handle_trade(data);
-                self.update_volume_profile_from_trade(data);
+                self.orderbook_manager.handle_trade(trade_data);
+                self.update_volume_profile_from_trade(trade_data);
             }
             EventType::BookTicker(data) => {
-                self.orderbook_manager.handle_book_ticker(data);
+                // Extract the actual book ticker data from the WebSocket message wrapper
+                let ticker_data = if let Some(inner_data) = data.get("data") {
+                    inner_data
+                } else {
+                    data // Fallback to the original data if no wrapper
+                };
+                self.orderbook_manager.handle_book_ticker(ticker_data);
             }
             _ => {} // 其他事件类型暂不处理
         }
@@ -486,11 +579,21 @@ impl ReactiveApp {
     fn process_events(&mut self) -> usize {
         // 限制每次处理的事件数量，避免UI阻塞
         const MAX_EVENTS_PER_CYCLE: usize = 100;
+        
+        // Check buffer status before processing
+        let (pending_before, max_capacity) = self.event_dispatcher.get_buffer_usage();
+        log::debug!("Event buffer status before processing: {}/{}", pending_before, max_capacity);
+        
         let events_processed = self.event_dispatcher.process_events_batch(MAX_EVENTS_PER_CYCLE);
 
+        // Check buffer status after processing
+        let (pending_after, _) = self.event_dispatcher.get_buffer_usage();
+        
         // 添加调试日志
         if events_processed > 0 {
-            log::info!("处理了 {} 个事件", events_processed);
+            log::info!("处理了 {} 个事件, buffer: {} -> {}", events_processed, pending_before, pending_after);
+        } else if pending_before > 0 {
+            log::warn!("Buffer has {} pending events but none were processed", pending_before);
         }
 
         events_processed
@@ -678,7 +781,7 @@ impl ReactiveApp {
         // 停止信息写入日志文件，不输出到控制台
         log::info!("正在停止应用程序...");
         self.running = false;
-        self.websocket_manager.disconnect();
+        let _ = self.binance_provider.stop();
         
         // 处理剩余的事件
         self.event_dispatcher.process_events();
@@ -1320,30 +1423,12 @@ impl ReactiveApp {
         // 停止传统WebSocket系统
         self.websocket_manager.disconnect();
         
-        // 创建基于现有WebSocket管理器的Provider
-        let binance_config = BinanceWebSocketConfig {
-            symbol: self.config.symbol.clone(),
-            streams: vec![
-                StreamType::BookTicker,
-                StreamType::Depth { 
-                    levels: 20, 
-                    update_speed: UpdateSpeed::Ms100 
-                },
-                StreamType::Trade,
-            ],
-            reconnect_config: ReconnectConfig::default(),
-            heartbeat_interval_secs: 30,
-            max_buffer_size: 1000,
-            compression_enabled: false,
-            ..Default::default()
-        };
-        
-        // 从现有WebSocket管理器创建Provider
-        let binance_provider = BinanceWebSocketProvider::from_websocket_manager(
+        // 从现有WebSocket管理器创建Provider（使用BinanceProvider的方法）
+        let binance_provider = BinanceProvider::from_websocket_manager(
             std::mem::replace(&mut self.websocket_manager, WebSocketManager::new(
                 WebSocketConfig::new(self.config.symbol.clone())
             )),
-            binance_config
+            self.config.symbol.clone()
         );
 
         // 创建Provider管理器
