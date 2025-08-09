@@ -35,7 +35,14 @@
       "Bash(timeout:*)",
       "Bash(RUST_LOG=debug cargo run)",
       "Bash(dir logs)",
-      "Bash(move:*)"
+      "Bash(move:*)",
+      "Bash(taskkill:*)",
+      "Bash(powershell:*)",
+      "Bash(targetreleasebinance-futures.exe)",
+      "Bash(\".\\target\\release\\binance-futures.exe\")",
+      "Bash(RUST_LOG=debug cargo run --release BTCFDUSD)",
+      "Bash(RUST_LOG=debug rustc --edition 2021 examplestiming_test.rs --extern env_logger --extern tokio --extern binance_futures -L targetdebugdeps -o timing_test.exe)",
+      "Bash(RUST_LOG=debug rustc --edition 2021 examples/timing_test.rs --extern env_logger --extern tokio --extern binance_futures -L target/debug/deps -o timing_test.exe)"
     ],
     "deny": []
   }

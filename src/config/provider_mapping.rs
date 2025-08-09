@@ -28,17 +28,17 @@ lazy_static! {
         let mut map = HashMap::new();
         
         // Binance WebSocket Provider Mapping
-        map.insert("binance_websocket", ProviderMapping {
-            config_name: "binance_websocket",
+        map.insert("binance_market_provider", ProviderMapping {
+            config_name: "binance_market_provider",
             provider_type: "BinanceWebSocket", 
-            implementation_file: "core/provider/binance_provider.rs",
+            implementation_file: "core/provider/binance_market_provider.rs",
             struct_name: "BinanceProvider",
             config_struct: "BinanceWebSocketConfig",
         });
         
-        // Gzip Historical Data Provider Mapping
-        map.insert("gzip_historical", ProviderMapping {
-            config_name: "gzip_historical",
+        // Gzip Historical Data Provider Mapping  
+        map.insert("gzip_historical_provider", ProviderMapping {
+            config_name: "gzip_historical_provider",
             provider_type: "GzipProvider",
             implementation_file: "core/provider/gzip_provider.rs", 
             struct_name: "GzipProvider",
@@ -145,10 +145,10 @@ pub fn generate_mapping_docs() -> String {
     docs.push_str("\n## Usage in config.toml\n\n");
     docs.push_str("```toml\n");
     docs.push_str("[[providers.config]]\n");
-    docs.push_str("name = \"binance_websocket\"     # Must match Config Name in table above\n");
-    docs.push_str("type = \"BinanceWebSocket\"       # Must match Provider Type in table above\n");
+    docs.push_str("name = \"binance_market_provider\"     # Must match Config Name in table above\n");
+    docs.push_str("type = \"BinanceWebSocket\"            # Must match Provider Type in table above\n");
     docs.push_str("enabled = true\n");
-    docs.push_str("config_file = \"configs/providers/binance_websocket.toml\"\n");
+    docs.push_str("config_file = \"configs/providers/binance_market_provider.toml\"\n");
     docs.push_str("```\n");
     
     docs
@@ -160,17 +160,17 @@ mod tests {
     
     #[test]
     fn test_binance_websocket_mapping() {
-        let mapping = get_provider_mapping("binance_websocket").unwrap();
-        assert_eq!(mapping.config_name, "binance_websocket");
+        let mapping = get_provider_mapping("binance_market_provider").unwrap();
+        assert_eq!(mapping.config_name, "binance_market_provider");
         assert_eq!(mapping.provider_type, "BinanceWebSocket");
-        assert_eq!(mapping.implementation_file, "core/provider/binance_provider.rs");
+        assert_eq!(mapping.implementation_file, "core/provider/binance_market_provider.rs");
         assert_eq!(mapping.struct_name, "BinanceProvider");
     }
     
     #[test]
     fn test_gzip_mapping() {
-        let mapping = get_provider_mapping("gzip_historical").unwrap();
-        assert_eq!(mapping.config_name, "gzip_historical");
+        let mapping = get_provider_mapping("gzip_historical_provider").unwrap();
+        assert_eq!(mapping.config_name, "gzip_historical_provider");
         assert_eq!(mapping.provider_type, "GzipProvider");
         assert_eq!(mapping.implementation_file, "core/provider/gzip_provider.rs");
         assert_eq!(mapping.struct_name, "GzipProvider");
@@ -178,15 +178,15 @@ mod tests {
     
     #[test]
     fn test_validation() {
-        assert!(validate_provider_config("binance_websocket", "BinanceWebSocket").is_ok());
-        assert!(validate_provider_config("binance_websocket", "WrongType").is_err());
+        assert!(validate_provider_config("binance_market_provider", "BinanceWebSocket").is_ok());
+        assert!(validate_provider_config("binance_market_provider", "WrongType").is_err());
         assert!(validate_provider_config("unknown_provider", "AnyType").is_err());
     }
     
     #[test]
     fn test_provider_names() {
         let names = get_all_provider_names();
-        assert!(names.contains(&"binance_websocket"));
-        assert!(names.contains(&"gzip_historical"));
+        assert!(names.contains(&"binance_market_provider"));
+        assert!(names.contains(&"gzip_historical_provider"));
     }
 }

@@ -1,4 +1,5 @@
 use std::time::{Duration, Instant};
+use std::sync::Arc;
 
 use crate::events::{EventType, LockFreeEventDispatcher};
 use crate::orderbook::{OrderBookManager, MarketSnapshot};
@@ -11,7 +12,7 @@ use crate::core::{
     ProviderManager, ProviderManagerConfig, ProviderMetadata, ProviderType, ProviderError,
     ProviderManagerStatus,
 };
-use crate::core::provider::{BinanceProvider, DataProvider};
+use crate::core::provider::{BinanceProvider, DataProvider, AnyProvider};
 use crate::config::{
     provider_config::{BinanceWebSocketConfig as ConfigBinanceWebSocketConfig, ProviderInfo as ConfigProviderInfo, WebSocketConnection, WebSocketSubscription, Authentication, WebSocketPerformanceConfig},
 };
@@ -31,6 +32,10 @@ pub struct ReactiveApp {
     // Provider系统（新模式）
     provider_manager: Option<ProviderManager>,
     use_provider_system: bool,
+    
+    // 新的Provider系统（通过启动流程注入）
+    dynamic_provider: Option<Arc<tokio::sync::Mutex<AnyProvider>>>,
+    injected_event_dispatcher: Option<Arc<tokio::sync::Mutex<LockFreeEventDispatcher>>>,
     
     // 应用状态
     config: Config,
@@ -125,6 +130,8 @@ impl ReactiveApp {
             binance_provider,
             provider_manager: None,
             use_provider_system: false,
+            dynamic_provider: None,
+            injected_event_dispatcher: None,
             volume_profile_manager: VolumeProfileManager::new(),
             config,
             running: false,
@@ -247,17 +254,126 @@ impl ReactiveApp {
         Ok(app)
     }
 
+    /// 创建带有预选Provider和EventDispatcher的ReactiveApp实例
+    /// 
+    /// 此构造函数用于启动流程，接受已经初始化的Provider和事件分发器
+    /// 
+    /// # 参数
+    /// - `config`: 应用配置
+    /// - `provider`: 已初始化的Provider实例
+    /// - `event_dispatcher`: 事件分发器
+    /// 
+    /// # 返回值
+    /// 配置了指定Provider的ReactiveApp实例
+    pub fn with_provider(
+        config: Config,
+        provider: Arc<tokio::sync::Mutex<AnyProvider>>,
+        event_dispatcher: Arc<tokio::sync::Mutex<LockFreeEventDispatcher>>,
+    ) -> Result<Self, ProviderError> {
+        log::info!("创建带有预选Provider的ReactiveApp");
+        
+        // 创建基础应用实例（不初始化Provider）
+        let mut app = Self::new_minimal(config);
+        
+        // 注入Provider和事件分发器
+        app.dynamic_provider = Some(provider);
+        app.injected_event_dispatcher = Some(event_dispatcher);
+        app.use_provider_system = true;
+        
+        log::info!("带有预选Provider的ReactiveApp创建完成");
+        Ok(app)
+    }
+    
+    /// 创建最小化的ReactiveApp实例（不初始化任何Provider）
+    fn new_minimal(config: Config) -> Self {
+        let event_dispatcher = LockFreeEventDispatcher::new(config.event_buffer_size);
+        let orderbook_manager = OrderBookManager::new();
+        
+        // 创建一个dummy BinanceProvider（不会被使用）
+        let binance_config = ConfigBinanceWebSocketConfig {
+            provider: ConfigProviderInfo {
+                name: "dummy".to_string(),
+                provider_type: "dummy".to_string(), 
+                version: "1.0.0".to_string(),
+            },
+            connection: WebSocketConnection {
+                base_url: "wss://dummy".to_string(),
+                max_reconnect_attempts: 1,
+                reconnect_delay_ms: 1000,
+                ping_interval_ms: 30000,
+                connection_timeout_ms: 10000,
+            },
+            subscription: WebSocketSubscription {
+                symbols: vec![config.symbol.clone()],
+                streams: vec![],
+            },
+            authentication: Authentication {
+                api_key: String::new(),
+                api_secret: String::new(),
+            },
+            performance: WebSocketPerformanceConfig {
+                buffer_size: 1024,
+                batch_processing: false,
+                batch_size: 1,
+            },
+        };
+        
+        let binance_provider = BinanceProvider::from_config(binance_config).unwrap();
+        let now = Instant::now();
+
+        Self {
+            event_dispatcher,
+            orderbook_manager,
+            binance_provider, // dummy provider
+            provider_manager: None,
+            use_provider_system: true, // 使用新的Provider系统
+            dynamic_provider: None,    // 将被注入
+            injected_event_dispatcher: None, // 将被注入
+            volume_profile_manager: VolumeProfileManager::new(),
+            config,
+            running: false,
+            last_update: now,
+            scroll_offset: 0,
+            auto_scroll: true,
+            edge_threshold: 2,
+            auto_center_enabled: true,
+            price_tracking_enabled: true,
+            last_tracked_price: None,
+            price_change_threshold: 0.1,
+            events_processed_per_second: 0.0,
+            last_performance_check: now,
+            events_processed_since_last_check: 0,
+            last_heartbeat: now,
+            heartbeat_interval: Duration::from_secs(30),
+            last_data_received: None,
+            health_check_failures: 0,
+            is_healthy: true,
+            internal_monitor: InternalMonitor::new(),
+            circuit_breaker_failures: 0,
+            circuit_breaker_open: false,
+            circuit_breaker_last_failure: None,
+            last_trade_volume: None,
+        }
+    }
+
     /// 初始化应用程序
     pub fn initialize(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         // 初始化信息写入日志文件，不输出到控制台
-        log::info!("初始化应用程序: {} (模式: BinanceProvider)", self.config.symbol);
+        log::info!("初始化应用程序: {} (模式: Provider系统)", self.config.symbol);
 
-        // 使用BinanceProvider系统
-        log::info!("正在启动BinanceProvider...");
-        self.binance_provider.initialize()?;
+        // 检查是否使用新的Provider系统
+        if self.use_provider_system && self.dynamic_provider.is_some() {
+            log::info!("使用动态注入的Provider系统");
+            // 新的Provider系统已经在启动流程中初始化完成
+            // 这里不需要额外的初始化
+        } else {
+            // 使用旧的BinanceProvider系统（向后兼容）
+            log::info!("正在启动旧的BinanceProvider系统...");
+            self.binance_provider.initialize()?;
+        }
 
         self.running = true;
-        log::info!("应用程序初始化完成 - BinanceProvider已启动");
+        log::info!("应用程序初始化完成 - Provider系统已准备就绪");
 
         Ok(())
     }
@@ -268,8 +384,14 @@ impl ReactiveApp {
             return;
         }
 
-        // 1. 使用BinanceProvider处理数据
-        let events_processed = self.process_binance_provider_events();
+        // 1. 处理Provider数据
+        let events_processed = if self.use_provider_system && self.dynamic_provider.is_some() {
+            // 使用新的动态Provider系统
+            self.process_dynamic_provider_events()
+        } else {
+            // 使用旧的BinanceProvider（向后兼容）
+            self.process_binance_provider_events()
+        };
 
         // 3. 更新性能统计（简化版本）
         self.update_performance_stats(events_processed);
@@ -320,6 +442,49 @@ impl ReactiveApp {
                 log::warn!("BinanceProvider数据获取失败: {}", e);
                 0
             }
+        }
+    }
+
+    /// 处理动态Provider事件（新的Provider系统）
+    fn process_dynamic_provider_events(&mut self) -> usize {
+        // 先获取事件，然后释放provider锁
+        let events = if let Some(ref provider) = self.dynamic_provider {
+            // 尝试锁定provider以避免阻塞
+            if let Ok(mut provider_lock) = provider.try_lock() {
+                match provider_lock.read_events() {
+                    Ok(events) => Some(events),
+                    Err(e) => {
+                        log::warn!("动态Provider数据获取失败: {}", e);
+                        None
+                    }
+                }
+            } else {
+                // Provider被锁定，跳过这次循环
+                None
+            }
+        } else {
+            log::error!("动态Provider未设置");
+            None
+        };
+        
+        // 现在处理事件（provider锁已释放）
+        if let Some(events) = events {
+            let mut events_processed = 0;
+            
+            for event_type in events {
+                // 更新业务组件
+                self.update_business_components(&event_type);
+                events_processed += 1;
+            }
+            
+            if events_processed > 0 {
+                log::debug!("动态Provider处理了 {} 个事件", events_processed);
+                self.last_data_received = Some(Instant::now());
+            }
+            
+            events_processed
+        } else {
+            0
         }
     }
 

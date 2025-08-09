@@ -10,6 +10,7 @@ pub mod app;
 pub mod monitoring;
 pub mod gui;
 pub mod config;
+pub mod startup_flow;
 
 // 重新导出主要类型
 pub use core::{RingBuffer, init_cpu_affinity, get_cpu_manager, check_affinity_status};

@@ -1,54 +1,37 @@
 # Gzip Historical Data Provider Configuration
 # Reads compressed historical market data from .gz files
 
-[provider]
-# Provider identification - MUST match GzipProvider::CANONICAL_NAME
-name = "gzip_historical_provider"  # MUST match GzipProvider::CANONICAL_NAME
-type = "GzipProvider"              # MUST match GzipProvider::CANONICAL_TYPE
-version = "1.0.0"
+# 数据目录路径
+data_dir = "./data"
 
-[data_source]
-# Data source configuration
-data_directory = "./data"
-file_pattern = "*.gz"  # File pattern to match
-symbols = ["BTCFDUSD"]  # Symbols to load
-date_range_start = "20250802"  # Optional: start date (YYYYMMDD)
-date_range_end = "20250807"    # Optional: end date (YYYYMMDD)
+# 文件名模式
+file_pattern = "*.gz"
 
-[files]
-# Specific files to load (optional, overrides pattern matching)
-# Leave empty to use file_pattern
-specific_files = [
-    "btcfdusd_20250802.gz",
-]
+# 符号过滤（可选）
+# symbol_filter = "BTCFDUSD"
 
-[playback]
-# Playback configuration
-initial_speed = 1.0  # Playback speed multiplier
-auto_start = true    # Start playback automatically
-loop_enabled = false # Loop when reaching end of data
-start_paused = false # Start in paused state
+# 事件类型过滤
+event_filter = []
 
-[parsing]
-# Data parsing configuration
-timestamp_format = "nanoseconds"  # nanoseconds, milliseconds, microseconds
-line_delimiter = "\n"
-field_separator = " "  # Space between timestamp and JSON
-skip_invalid_lines = true
-max_parse_errors = 100  # Stop after this many errors
+[playback_config]
+# 初始播放速度倍数
+initial_speed = 2.0
+# 是否自动开始播放
+auto_start = true
+# 是否循环播放
+loop_enabled = false
+# 最大播放速度
+max_speed = 1000.0
+# 最小播放速度
+min_speed = 0.1
+# 时间过滤（可选）
+# start_timestamp = 0
+# end_timestamp = 0
 
-[buffering]
-# Buffer configuration for performance
-read_buffer_size = 65536  # 64KB
-decompress_buffer_size = 131072  # 128KB
+[buffer_config]
+# 事件缓冲区大小
 event_buffer_size = 10000
-prefetch_enabled = true
-prefetch_size = 1000
-
-[filtering]
-# Data filtering options
-filter_by_event_type = false
-allowed_event_types = ["bookTicker", "trade", "depthUpdate"]
-filter_by_time = false
-time_start = 0  # Unix timestamp in milliseconds
-time_end = 0    # Unix timestamp in milliseconds
+# 预读取行数
+prefetch_lines = 1000
+# 内存限制（MB）
+memory_limit_mb = 500

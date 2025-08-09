@@ -1,6 +1,7 @@
 use binance_futures::{init_logging, init_cpu_affinity, check_affinity_status, Config, ReactiveApp};
 use binance_futures::gui::{VolumeProfileWidget, PriceChartRenderer};
 use binance_futures::orderbook::render_orderbook;
+use binance_futures::startup_flow::run_startup_flow;
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind},
     execute,
@@ -19,10 +20,12 @@ use std::{
     io,
     time::Duration,
 };
+use tokio;
 
 
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1. 首先初始化日志系统
     init_logging();
 
@@ -53,6 +56,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .find(|arg| !arg.starts_with("--") && arg != &env::args().next().unwrap())
         .unwrap_or_else(|| "BTCFDUSD".to_string());
 
+    // 4. 运行Provider选择流程
+    println!("🔧 启动Provider选择界面...");
+    let startup_result = run_startup_flow("config.toml").await?;
+    
+    println!("✅ Provider启动完成，启动时间: {:?}", startup_result.launch_duration);
+    println!("🎯 正在启动主应用界面...");
+    
     // 创建配置
     let config = Config::new(symbol)
         .with_buffer_size(10000)
@@ -60,8 +70,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_max_visible_rows(3000)    // 设置最大可见行数为3000
         .with_price_precision(0.01);    // 设置价格精度为0.01 USD (1分)
 
-    // 创建应用程序
-    let mut app = ReactiveApp::new(config);
+    // 创建应用程序并传入已启动的Provider
+    let mut app = ReactiveApp::with_provider(config, startup_result.provider, startup_result.event_dispatcher)?;
 
     // 初始化应用程序
     app.initialize()?;
@@ -74,7 +84,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut terminal = Terminal::new(backend)?;
 
     // 运行应用程序
-    let result = run_app(&mut terminal, &mut app);
+    let result = run_app(&mut terminal, &mut app).await;
 
     // 清理终端
     disable_raw_mode()?;
@@ -103,7 +113,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// 运行应用程序主循环 - 基于稳定的备份版本架构
-fn run_app(
+async fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut ReactiveApp,
 ) -> io::Result<()> {

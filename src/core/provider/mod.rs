@@ -20,6 +20,8 @@ pub mod gzip_provider;
 pub mod manager;
 pub mod error;
 pub mod config_adapter;
+pub mod provider_selector;
+pub mod provider_launcher;
 
 // 重构后的核心导出
 pub use types::*;
@@ -29,6 +31,8 @@ pub use gzip_provider::{GzipProvider, GzipProviderConfig};
 pub use manager::ProviderManager;
 pub use error::{ProviderError, ProviderResult};
 pub use config_adapter::{ConfigurableProvider as Configurable, ProviderConfigAdapter, ConfiguredProviderFactory};
+pub use provider_selector::{ProviderSelector, ProviderOption, ProviderOptionStatus};
+pub use provider_launcher::{ProviderLauncher, LaunchConfig, LaunchProgress, LaunchResult};
 
 use crate::events::EventType;
 use std::fmt::Debug;
