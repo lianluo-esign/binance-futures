@@ -59,36 +59,11 @@ impl OrderBookRenderer {
 
     /// 主渲染方法
     pub fn render(&mut self, f: &mut Frame, app: &ReactiveApp, area: Rect) {
-        // 获取应用统计信息
-        let stats = app.get_stats();
-        let connection_status = if stats.websocket_connected {
-            "已连接"
-        } else {
-            "断开连接"
-        };
-
-        // 获取缓冲区使用情况
-        let (current_buffer_size, max_buffer_capacity) = app.get_buffer_usage();
-
-        // 获取价格跟踪状态
-        let price_tracking_status = if app.is_price_tracking_enabled() { "跟踪" } else { "关闭" };
-        let auto_center_status = if app.is_auto_center_enabled() { "居中" } else { "关闭" };
-
-        let title = format!(
-            "Binance Futures Order Book - {} | 缓冲区: {}/{} | 事件/秒: {:.1} | 状态: {} | 价格跟踪: {} | 自动居中: {}",
-            app.get_symbol(), 
-            current_buffer_size, 
-            max_buffer_capacity, 
-            stats.events_processed_per_second, 
-            connection_status, 
-            price_tracking_status, 
-            auto_center_status
-        );
-
-        // 创建边框块
+        // 创建简洁的边框块（移除复杂的标题信息）
         let block = Block::default()
-            .title(title)
-            .borders(Borders::ALL);
+            .title("Order Book")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::White));
 
         // 计算内部区域
         let inner_area = Rect {

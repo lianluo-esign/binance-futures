@@ -697,6 +697,15 @@ impl PlaybackInfo {
 /// Provider的性能统计信息
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PerformanceMetrics {
+    /// 已接收事件总数
+    pub events_received: u64,
+    
+    /// 最后一次事件时间戳
+    pub last_event_time: Option<u64>,
+    
+    /// 错误计数
+    pub error_count: u32,
+    
     /// 每秒事件数
     pub events_per_second: f64,
     
@@ -726,6 +735,9 @@ impl PerformanceMetrics {
     /// 创建空的性能指标
     pub fn new() -> Self {
         Self {
+            events_received: 0,
+            last_event_time: None,
+            error_count: 0,
             events_per_second: 0.0,
             bytes_per_second: 0.0,
             average_latency_ms: 0.0,

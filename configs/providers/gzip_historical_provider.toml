@@ -12,15 +12,14 @@ version = "1.0.0"
 data_directory = "./data"
 file_pattern = "*.gz"  # File pattern to match
 symbols = ["BTCFDUSD"]  # Symbols to load
-date_range_start = "2025-08-02"  # Optional: start date (YYYY-MM-DD)
-date_range_end = "2025-08-07"    # Optional: end date (YYYY-MM-DD)
+date_range_start = "20250802"  # Optional: start date (YYYYMMDD)
+date_range_end = "20250807"    # Optional: end date (YYYYMMDD)
 
 [files]
 # Specific files to load (optional, overrides pattern matching)
 # Leave empty to use file_pattern
 specific_files = [
     "btcfdusd_20250802.gz",
-    # "btcfdusd_20250803.gz",
 ]
 
 [playback]
@@ -53,26 +52,3 @@ allowed_event_types = ["bookTicker", "trade", "depthUpdate"]
 filter_by_time = false
 time_start = 0  # Unix timestamp in milliseconds
 time_end = 0    # Unix timestamp in milliseconds
-
-[performance]
-# Performance settings
-use_parallel_decompression = false  # Enable for multi-file processing
-thread_count = 2  # Number of decompression threads
-cache_decompressed_data = false  # Cache in memory (uses more RAM)
-cache_size_mb = 100  # Maximum cache size in MB
-
-[error_handling]
-# Error handling configuration
-on_parse_error = "skip"  # skip, log, stop
-on_file_error = "next"   # next, stop
-max_consecutive_errors = 10
-retry_on_error = true
-retry_count = 3
-
-[logging]
-# Provider-specific logging
-log_level = "info"
-log_parsing_errors = true
-log_performance_metrics = true
-metrics_interval = 10000  # milliseconds
-show_progress = true

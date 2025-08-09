@@ -848,6 +848,9 @@ impl DataProvider for GzipProvider {
         let bytes_per_second = self.total_bytes_read as f64 / window_duration.as_secs_f64();
 
         Some(PerformanceMetrics {
+            events_received: self.events_sent,
+            last_event_time: self.last_event_timestamp_ns.map(|ns| ns / 1_000_000),
+            error_count: 0, // 历史数据很少出错
             events_per_second,
             bytes_per_second,
             average_latency_ms: 0.0,

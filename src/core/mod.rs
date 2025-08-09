@@ -11,7 +11,7 @@ pub use cpu_affinity::{init_cpu_affinity, get_cpu_manager, check_affinity_status
 pub use provider::{
     DataProvider, ProviderType, ProviderStatus, ProviderFactory,
     ConfigurableProvider, ControllableProvider,
-    BinanceWebSocketProvider, ProviderManager,
+    ProviderManager,
     ProviderError, ProviderResult,
     EventKind, PerformanceMetrics, PlaybackInfo,
     ExchangeId,
@@ -19,4 +19,3 @@ pub use provider::{
 
 // 从子模块导出具体类型
 pub use provider::manager::{ProviderMetadata, ProviderManagerConfig, ProviderManagerStatus};
-pub use provider::websocket_provider::{BinanceWebSocketConfig, StreamType, UpdateSpeed, ReconnectConfig};

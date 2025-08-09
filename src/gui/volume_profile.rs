@@ -27,6 +27,8 @@ pub struct VolumeLevel {
     pub total_volume: f64,
     /// 最后更新时间
     pub timestamp: u64,
+    /// 最后更新的方向（买单还是卖单）
+    pub last_update_side: Option<String>,
 }
 
 impl VolumeLevel {
@@ -36,6 +38,7 @@ impl VolumeLevel {
             sell_volume: 0.0,
             total_volume: 0.0,
             timestamp: 0,
+            last_update_side: None,
         }
     }
 
@@ -48,6 +51,7 @@ impl VolumeLevel {
         }
         self.total_volume = self.buy_volume + self.sell_volume;
         self.timestamp = timestamp;
+        self.last_update_side = Some(side.to_string());
     }
 }
 
@@ -144,6 +148,7 @@ impl VolumeProfileManager {
         volume_level.sell_volume = sell_volume;
         volume_level.total_volume = buy_volume + sell_volume;
         volume_level.timestamp = timestamp;
+        volume_level.last_update_side = None;
         
         
         // 更新最大成交量（在insert之前）
@@ -152,6 +157,38 @@ impl VolumeProfileManager {
         }
         
         // 直接设置数据（覆盖而不是累加）
+        self.data.price_volumes.insert(price_key, volume_level);
+        
+        self.data.last_update = timestamp;
+    }
+
+    /// 同步成交量数据并保持更新信息（用于实时高亮显示）
+    pub fn sync_volume_level_with_update_info(
+        &mut self, 
+        price: f64, 
+        buy_volume: f64, 
+        sell_volume: f64, 
+        timestamp: u64,
+        last_update_side: Option<String>
+    ) {
+        // 聚合到1美元精度
+        let aggregated_price = (price / self.price_precision).floor() * self.price_precision;
+        let price_key = OrderedFloat(aggregated_price);
+        
+        // 创建新的成交量层级数据
+        let mut volume_level = VolumeLevel::new();
+        volume_level.buy_volume = buy_volume;
+        volume_level.sell_volume = sell_volume;
+        volume_level.total_volume = buy_volume + sell_volume;
+        volume_level.timestamp = timestamp;
+        volume_level.last_update_side = last_update_side;
+        
+        // 更新最大成交量（在insert之前）
+        if volume_level.total_volume > self.data.max_volume {
+            self.data.max_volume = volume_level.total_volume;
+        }
+        
+        // 直接设置数据（覆盖而不是累加），保持更新信息
         self.data.price_volumes.insert(price_key, volume_level);
         
         self.data.last_update = timestamp;
@@ -188,7 +225,7 @@ impl VolumeProfileWidget {
     }
 
     /// 渲染Volume Profile widget
-    pub fn render(&self, f: &mut ratatui::Frame, area: ratatui::layout::Rect, visible_price_range: &[f64], latest_trade_price: Option<f64>, orderbook_data: Option<&std::collections::BTreeMap<ordered_float::OrderedFloat<f64>, crate::orderbook::OrderFlow>>) {
+    pub fn render(&self, f: &mut ratatui::Frame, area: ratatui::layout::Rect, visible_price_range: &[f64], latest_trade_price: Option<f64>, _orderbook_data: Option<&std::collections::BTreeMap<ordered_float::OrderedFloat<f64>, crate::orderbook::OrderFlow>>) {
         use ratatui::{
             layout::Constraint,
             style::{Color, Modifier, Style},
@@ -199,7 +236,7 @@ impl VolumeProfileWidget {
         let block = Block::default()
             .title("Volume Profile")
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Blue));
+            .border_style(Style::default().fg(Color::White));
 
         // 获取Volume Profile数据
         let volume_data = self.manager.get_data();
@@ -213,29 +250,17 @@ impl VolumeProfileWidget {
             // 价格列 - 检查是否为最新交易价格，如果是则显示黄色高亮
             let price_cell = self.create_price_cell_with_highlight(price, latest_trade_price);
             
-            // Volume Profile柱状图列、Buy列、Sell列和数值列
-            let (volume_cell, buy_cell, sell_cell, stats_cell) = if let Some(volume_level) = volume_data.price_volumes.get(&price_key) {
+            // Volume Profile柱状图列和数值列（去掉Buy和Sell列）
+            let (volume_cell, stats_cell) = if let Some(volume_level) = volume_data.price_volumes.get(&price_key) {
                 
                 let bar_cell = self.create_volume_bar_cell_without_text(volume_level, volume_data.max_volume);
-                
-                // 从orderbook数据中获取buy/sell信息，带超时检查
-                let (orderbook_buy, orderbook_sell) = self.get_orderbook_data_with_timeout(orderbook_data, &price_key);
-                
-                let buy_cell = self.create_buy_volume_cell(orderbook_buy);
-                let sell_cell = self.create_sell_volume_cell(orderbook_sell);
-                let stats_cell = self.create_volume_stats_cell(volume_level);
-                (bar_cell, buy_cell, sell_cell, stats_cell)
+                let stats_cell = self.create_volume_stats_cell_with_highlight(volume_level);
+                (bar_cell, stats_cell)
             } else {
-                // 即使没有volume profile数据，也检查是否有orderbook数据，带超时检查
-                let (orderbook_buy, orderbook_sell) = self.get_orderbook_data_with_timeout(orderbook_data, &price_key);
-                
-                let buy_cell = self.create_buy_volume_cell(orderbook_buy);
-                let sell_cell = self.create_sell_volume_cell(orderbook_sell);
-                
-                (self.create_empty_volume_cell(), buy_cell, sell_cell, Cell::from(""))
+                (self.create_empty_volume_cell(), Cell::from(""))
             };
 
-            rows.push(Row::new(vec![price_cell, volume_cell, buy_cell, sell_cell, stats_cell]));
+            rows.push(Row::new(vec![price_cell, volume_cell, stats_cell]));
         }
 
         // 如果没有数据，显示等待状态
@@ -244,29 +269,23 @@ impl VolumeProfileWidget {
                 Cell::from("等待成交数据...").style(Style::default().fg(Color::Yellow)),
                 Cell::from(""),
                 Cell::from(""),
-                Cell::from(""),
-                Cell::from(""),
             ]);
             rows.push(empty_row);
         }
 
-        // 创建表格
+        // 创建表格（去掉Buy和Sell列）
         let table = Table::new(
             rows,
             [
-                Constraint::Length(8),   // 价格列（8个字符宽度）
-                Constraint::Min(20),     // Volume Profile柱状图列（最小20个字符宽度，确保可见）
-                Constraint::Length(12),  // Buy列（12个字符宽度，5位小数右对齐）
-                Constraint::Length(12),  // Sell列（12个字符宽度，5位小数右对齐）
-                Constraint::Length(14),  // 数值统计列（14个字符宽度，容纳Vol/Delta）
+                Constraint::Length(6),   // 价格列（8个字符宽度）
+                Constraint::Min(30),     // Volume Profile柱状图列（增加宽度）
+                Constraint::Length(15),  // 数值统计列（增加宽度，容纳Vol/Delta和高亮）
             ]
         )
         .header(
             Row::new(vec![
                 Cell::from("Price").style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
                 Cell::from("Volume").style(Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD)),
-                Cell::from("Buy").style(Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-                Cell::from("Sell").style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
                 Cell::from("Vol/Delta").style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
             ])
         )
@@ -341,6 +360,74 @@ impl VolumeProfileWidget {
         
         Cell::from(display_text)
             .style(Style::default().fg(color))
+    }
+
+    /// 创建带高亮的成交量统计信息单元格（新数据更新时高亮显示）
+    fn create_volume_stats_cell_with_highlight(&self, volume_level: &VolumeLevel) -> Cell {
+        let btc_volume = volume_level.total_volume;
+        let delta = volume_level.buy_volume - volume_level.sell_volume;
+        
+        // 格式化总成交量显示 - 保留5位小数
+        let volume_text = format!("{:.5}", btc_volume);
+
+        // 格式化delta显示 - 保留5位小数
+        let delta_text = if delta >= 0.0 {
+            format!("+{:.5}", delta)
+        } else {
+            format!("{:.5}", delta)  // 负号已经包含在delta中
+        };
+
+        // 组合显示：成交量数值 + delta数值
+        let display_text = format!("{} {}", volume_text, delta_text);
+        
+        // 检查是否为最近更新（2秒内）
+        let current_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        
+        let is_recent_update = current_time.saturating_sub(volume_level.timestamp) <= 500;
+        
+        // 根据最后更新方向和是否最近更新决定样式
+        if is_recent_update && volume_level.last_update_side.is_some() {
+            // 最近有更新，根据方向高亮显示
+            match volume_level.last_update_side.as_ref().unwrap().as_str() {
+                "buy" => {
+                    // 买单累加 - 绿色背景白色文字
+                    Cell::from(display_text)
+                        .style(Style::default().bg(Color::Green).fg(Color::White))
+                },
+                "sell" => {
+                    // 卖单累加 - 红色背景白色文字
+                    Cell::from(display_text)
+                        .style(Style::default().bg(Color::Red).fg(Color::White))
+                },
+                _ => {
+                    // 其他情况，使用delta颜色
+                    let color = if delta > 10.0 {
+                        Color::Green
+                    } else if delta < -10.0 {
+                        Color::Red
+                    } else {
+                        Color::White
+                    };
+                    Cell::from(display_text)
+                        .style(Style::default().fg(color))
+                }
+            }
+        } else {
+            // 没有最近更新，使用普通颜色
+            let color = if delta > 10.0 {
+                Color::Green  // delta > 10BTC 显示绿色
+            } else if delta < -10.0 {
+                Color::Red    // delta < -10BTC 显示红色
+            } else {
+                Color::White  // 默认白色
+            };
+            
+            Cell::from(display_text)
+                .style(Style::default().fg(color))
+        }
     }
 
     /// 创建成交量柱状图单元格（保持向后兼容）

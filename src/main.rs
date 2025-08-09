@@ -9,6 +9,9 @@ use crossterm::{
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
+    style::{Color, Style, Modifier},
+    widgets::{Block, Borders, Paragraph},
+    text::{Line, Span},
     Frame, Terminal,
 };
 use std::{
@@ -193,7 +196,7 @@ fn run_app(
     Ok(())
 }
 
-/// UI渲染函数 - 三列布局版本
+/// UI渲染函数 - 带状态栏的三列布局版本
 fn ui(
     f: &mut Frame, 
     app: &ReactiveApp, 
@@ -201,6 +204,21 @@ fn ui(
     price_chart_renderer: &PriceChartRenderer
 ) {
     let size = f.area();
+
+    // 垂直布局：顶部状态栏，下方主要内容区域
+    let main_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),      // 顶部状态栏高度改为2
+            Constraint::Min(0),         // 主要内容区域
+        ])
+        .split(size);
+
+    let status_bar_area = main_chunks[0];
+    let content_area = main_chunks[1];
+
+    // 渲染顶部状态栏
+    render_status_bar(f, app, status_bar_area);
 
     // 创建三列布局：订单薄(20%)、Volume Profile(30%)、图表区域(50%)
     let horizontal_chunks = Layout::default()
@@ -210,7 +228,7 @@ fn ui(
             Constraint::Percentage(40), // Volume Profile占30%
             Constraint::Percentage(40), // 图表区域占50%
         ])
-        .split(size);
+        .split(content_area);
 
     let orderbook_area = horizontal_chunks[0];
     let volume_profile_area = horizontal_chunks[1];
@@ -244,11 +262,40 @@ fn update_volume_profile(volume_profile_widget: &mut VolumeProfileWidget, app: &
     let widget_manager = volume_profile_widget.get_manager_mut();
     
     // 直接同步应用层的volume profile累积数据到widget
-    // 不清空数据以保持累积的volume profile数据
-    for (price_key, volume_level) in &app_data.price_volumes {
+    // 保持原有的累积数据和最新更新信息
+    for (price_key, app_volume_level) in &app_data.price_volumes {
         let price = price_key.0;
-        // 同步累积的交易数据到widget
-        widget_manager.set_volume_data(price, volume_level.buy_volume, volume_level.sell_volume);
+        
+        // 检查widget中是否已有这个价格层级的数据
+        let widget_data = widget_manager.get_data();
+        let existing_level = widget_data.price_volumes.get(price_key);
+        
+        // 如果是新数据或者数据有更新，则同步并保持更新状态
+        match existing_level {
+            Some(existing) => {
+                // 检查是否有新的交易数据
+                if existing.total_volume != app_volume_level.total_volume {
+                    // 数据有更新，直接设置完整的level数据，包括last_update_side
+                    widget_manager.sync_volume_level_with_update_info(
+                        price, 
+                        app_volume_level.buy_volume, 
+                        app_volume_level.sell_volume,
+                        app_volume_level.timestamp,
+                        app_volume_level.last_update_side.clone()
+                    );
+                }
+            },
+            None => {
+                // 新的价格层级，同步数据
+                widget_manager.sync_volume_level_with_update_info(
+                    price, 
+                    app_volume_level.buy_volume, 
+                    app_volume_level.sell_volume,
+                    app_volume_level.timestamp,
+                    app_volume_level.last_update_side.clone()
+                );
+            }
+        }
     }
 }
 
@@ -558,6 +605,49 @@ fn update_price_chart(price_chart_renderer: &mut PriceChartRenderer, app: &React
 /// 渲染价格图表
 fn render_price_chart(f: &mut Frame, price_chart_renderer: &PriceChartRenderer, area: Rect) {
     price_chart_renderer.render(f, area);
+}
+
+/// 渲染顶部状态栏
+fn render_status_bar(f: &mut Frame, app: &ReactiveApp, area: Rect) {
+    // 获取应用统计信息
+    let stats = app.get_stats();
+    let connection_status = if stats.websocket_connected {
+        "已连接"
+    } else {
+        "断开连接"
+    };
+    
+    // 获取缓冲区使用情况
+    let (current_buffer_size, max_buffer_capacity) = app.get_buffer_usage();
+   
+    // 创建状态信息文本（单行显示）
+    let status_text = vec![
+        Line::from(vec![
+            Span::styled("Symbol: ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled(app.get_symbol(), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled(" | Buffer: ", Style::default().fg(Color::White)),
+            Span::styled(format!("{}/{}", current_buffer_size, max_buffer_capacity), Style::default().fg(Color::Yellow)),
+            Span::styled(" | Status: ", Style::default().fg(Color::White)),
+            Span::styled(connection_status, if stats.websocket_connected { 
+                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD) 
+            } else { 
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD) 
+            }),
+            Span::styled(" | Events/s: ", Style::default().fg(Color::White)),
+            Span::styled(format!("{:.1}", stats.events_processed_per_second), Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+
+        ]),
+    ];
+    
+    // 创建状态栏段落
+    let status_paragraph = Paragraph::new(status_text)
+        .block(Block::default()
+            .title("System Status")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::White))
+        );
+    
+    f.render_widget(status_paragraph, area);
 }
 
 

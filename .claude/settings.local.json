@@ -34,7 +34,8 @@
       "Bash(timeout 10s cargo run --release BTCFDUSD)",
       "Bash(timeout:*)",
       "Bash(RUST_LOG=debug cargo run)",
-      "Bash(dir logs)"
+      "Bash(dir logs)",
+      "Bash(move:*)"
     ],
     "deny": []
   }

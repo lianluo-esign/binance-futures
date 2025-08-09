@@ -785,6 +785,9 @@ impl DataProvider for HistoricalDataProvider {
         let events_per_second = self.performance_events_count as f64 / window_duration.as_secs_f64();
 
         Some(PerformanceMetrics {
+            events_received: self.events_sent,
+            last_event_time: self.last_event_timestamp,
+            error_count: 0, // 历史数据很少出错
             events_per_second,
             bytes_per_second: 0.0, // 文件读取不需要字节统计
             average_latency_ms: 0.0,

@@ -37,20 +37,6 @@ enabled = true
 priority = 2
 config_file = "configs/providers/gzip_historical_provider.toml"
 
-[[providers.config]]
-name = "binance_rest"
-type = "BinanceRest"
-enabled = false
-priority = 3
-config_file = "configs/providers/binance_rest.toml"
-
-[[providers.config]]
-name = "mock_provider"
-type = "Mock"
-enabled = false
-priority = 99
-config_file = "configs/providers/mock.toml"
-
 [gui]
 # GUI Configuration
 theme = "dark"

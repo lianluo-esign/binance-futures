@@ -14,9 +14,8 @@
 // 5. 可扩展性：便于添加新的交易所支持
 
 pub mod types;
-pub mod websocket_provider; // 保留向后兼容
-pub mod binance_provider;
-pub mod historical_provider;
+pub mod binance_market_provider;
+pub mod gzip_historical_provider;
 pub mod gzip_provider;
 pub mod manager;
 pub mod error;
@@ -24,15 +23,12 @@ pub mod config_adapter;
 
 // 重构后的核心导出
 pub use types::*;
-pub use binance_provider::{BinanceProvider, BinanceProviderConfig};
-pub use historical_provider::{HistoricalDataProvider, HistoricalDataConfig};
+pub use binance_market_provider::BinanceProvider;
+pub use gzip_historical_provider::{HistoricalDataProvider, HistoricalDataConfig};
 pub use gzip_provider::{GzipProvider, GzipProviderConfig};
 pub use manager::ProviderManager;
 pub use error::{ProviderError, ProviderResult};
 pub use config_adapter::{ConfigurableProvider as Configurable, ProviderConfigAdapter, ConfiguredProviderFactory};
-
-// 向后兼容导出
-pub use websocket_provider::BinanceWebSocketProvider;
 
 use crate::events::EventType;
 use std::fmt::Debug;
@@ -42,15 +38,12 @@ use std::fmt::Debug;
 /// 这个枚举包装了所有具体的Provider实现，允许运行时多态
 #[derive(Debug)]
 pub enum AnyProvider {
-    /// 币安Provider
+    /// Binance WebSocket Provider
     Binance(BinanceProvider),
     /// 历史数据Provider
     Historical(HistoricalDataProvider),
     /// Gzip压缩数据Provider
     Gzip(GzipProvider),
-    /// 旧版WebSocket Provider（向后兼容）
-    #[deprecated(note = "Use BinanceProvider instead")]
-    WebSocket(websocket_provider::BinanceWebSocketProvider),
 }
 
 impl AnyProvider {
@@ -60,8 +53,6 @@ impl AnyProvider {
             AnyProvider::Binance(p) => p.provider_type(),
             AnyProvider::Historical(p) => p.provider_type(),
             AnyProvider::Gzip(p) => p.provider_type(),
-            #[allow(deprecated)]
-            AnyProvider::WebSocket(p) => p.provider_type(),
         }
     }
     
@@ -71,8 +62,6 @@ impl AnyProvider {
             AnyProvider::Binance(p) => p.is_connected(),
             AnyProvider::Historical(p) => p.is_connected(),
             AnyProvider::Gzip(p) => p.is_connected(),
-            #[allow(deprecated)]
-            AnyProvider::WebSocket(p) => p.is_connected(),
         }
     }
     
@@ -82,8 +71,6 @@ impl AnyProvider {
             AnyProvider::Binance(p) => p.get_status(),
             AnyProvider::Historical(p) => p.get_status(),
             AnyProvider::Gzip(p) => p.get_status(),
-            #[allow(deprecated)]
-            AnyProvider::WebSocket(p) => p.get_status(),
         }
     }
     
@@ -93,8 +80,6 @@ impl AnyProvider {
             AnyProvider::Binance(p) => p.initialize().map_err(|e| e.into()),
             AnyProvider::Historical(p) => p.initialize().map_err(|e| e.into()),
             AnyProvider::Gzip(p) => p.initialize().map_err(|e| e.into()),
-            #[allow(deprecated)]
-            AnyProvider::WebSocket(p) => p.initialize().map_err(|e| e.into()),
         }
     }
     
@@ -104,8 +89,6 @@ impl AnyProvider {
             AnyProvider::Binance(p) => p.start().map_err(|e| e.into()),
             AnyProvider::Historical(p) => p.start().map_err(|e| e.into()),
             AnyProvider::Gzip(p) => p.start().map_err(|e| e.into()),
-            #[allow(deprecated)]
-            AnyProvider::WebSocket(p) => p.start().map_err(|e| e.into()),
         }
     }
     
@@ -115,8 +98,6 @@ impl AnyProvider {
             AnyProvider::Binance(p) => p.stop().map_err(|e| e.into()),
             AnyProvider::Historical(p) => p.stop().map_err(|e| e.into()),
             AnyProvider::Gzip(p) => p.stop().map_err(|e| e.into()),
-            #[allow(deprecated)]
-            AnyProvider::WebSocket(p) => p.stop().map_err(|e| e.into()),
         }
     }
     
@@ -126,8 +107,6 @@ impl AnyProvider {
             AnyProvider::Binance(p) => p.read_events().map_err(|e| e.into()),
             AnyProvider::Historical(p) => p.read_events().map_err(|e| e.into()),
             AnyProvider::Gzip(p) => p.read_events().map_err(|e| e.into()),
-            #[allow(deprecated)]
-            AnyProvider::WebSocket(p) => p.read_events().map_err(|e| e.into()),
         }
     }
     
@@ -137,8 +116,6 @@ impl AnyProvider {
             AnyProvider::Binance(p) => p.health_check(),
             AnyProvider::Historical(p) => p.health_check(),
             AnyProvider::Gzip(p) => p.health_check(),
-            #[allow(deprecated)]
-            AnyProvider::WebSocket(p) => p.health_check(),
         }
     }
     
@@ -148,8 +125,6 @@ impl AnyProvider {
             AnyProvider::Binance(p) => p.supported_events(),
             AnyProvider::Historical(p) => p.supported_events(),
             AnyProvider::Gzip(p) => p.supported_events(),
-            #[allow(deprecated)]
-            AnyProvider::WebSocket(p) => p.supported_events(),
         }
     }
 }
@@ -170,13 +145,6 @@ impl From<HistoricalDataProvider> for AnyProvider {
 impl From<GzipProvider> for AnyProvider {
     fn from(provider: GzipProvider) -> Self {
         AnyProvider::Gzip(provider)
-    }
-}
-
-#[allow(deprecated)]
-impl From<websocket_provider::BinanceWebSocketProvider> for AnyProvider {
-    fn from(provider: websocket_provider::BinanceWebSocketProvider) -> Self {
-        AnyProvider::WebSocket(provider)
     }
 }
 
@@ -374,12 +342,12 @@ pub struct ProviderCreator;
 
 impl ProviderCreator {
     /// 创建Binance Provider
-    pub fn create_binance(config: binance_provider::BinanceProviderConfig) -> Result<BinanceProvider, ProviderError> {
+    pub fn create_binance(config: crate::config::provider_config::BinanceWebSocketConfig) -> Result<BinanceProvider, ProviderError> {
         Ok(BinanceProvider::new(config))
     }
     
     /// 创建Historical Data Provider
-    pub fn create_historical(config: historical_provider::HistoricalDataConfig) -> Result<HistoricalDataProvider, ProviderError> {
+    pub fn create_historical(config: gzip_historical_provider::HistoricalDataConfig) -> Result<HistoricalDataProvider, ProviderError> {
         Ok(HistoricalDataProvider::new(config))
     }
     
@@ -388,19 +356,11 @@ impl ProviderCreator {
         Ok(GzipProvider::new(config))
     }
     
-    /// 从WebSocketManager创建Binance Provider（向后兼容）
-    pub fn create_binance_from_websocket(
-        websocket_manager: crate::websocket::WebSocketManager,
-        symbol: String,
-    ) -> Result<BinanceProvider, ProviderError> {
-        Ok(BinanceProvider::from_websocket_manager(websocket_manager, symbol))
-    }
-    
     /// 创建AnyProvider（动态Provider）
     pub fn create_any_provider(provider_type: ProviderType, config_json: serde_json::Value) -> ProviderResult<AnyProvider> {
         match provider_type {
             ProviderType::Binance { .. } => {
-                let config: binance_provider::BinanceProviderConfig = serde_json::from_value(config_json)
+                let config: crate::config::provider_config::BinanceWebSocketConfig = serde_json::from_value(config_json)
                     .map_err(|e| ProviderError::configuration(
                         format!("Binance配置解析失败: {}", e)
                     ))?;
@@ -416,7 +376,7 @@ impl ProviderCreator {
                         Ok(AnyProvider::Gzip(Self::create_gzip(config)?))
                     },
                     _ => {
-                        let config: historical_provider::HistoricalDataConfig = serde_json::from_value(config_json)
+                        let config: gzip_historical_provider::HistoricalDataConfig = serde_json::from_value(config_json)
                             .map_err(|e| ProviderError::configuration(
                                 format!("历史数据配置解析失败: {}", e)
                             ))?;

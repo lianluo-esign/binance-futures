@@ -58,7 +58,7 @@ lazy_static! {
         map.insert("historical_file", ProviderMapping {
             config_name: "historical_file",
             provider_type: "HistoricalFile",
-            implementation_file: "core/provider/historical_provider.rs",
+            implementation_file: "core/provider/gzip_historical_provider.rs",
             struct_name: "HistoricalDataProvider",
             config_struct: "HistoricalDataConfig",
         });

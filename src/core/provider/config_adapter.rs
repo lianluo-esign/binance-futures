@@ -39,34 +39,11 @@ impl ProviderConfigAdapter {
     
     /// Apply configuration to Binance WebSocket provider
     pub fn apply_to_binance_websocket(
-        config: &BinanceWebSocketConfig,
-        provider: &mut crate::core::provider::BinanceProvider,
+        _config: &BinanceWebSocketConfig,
+        _provider: &mut crate::core::provider::BinanceProvider,
     ) -> Result<(), String> {
-        // Apply connection settings
-        if !config.connection.base_url.is_empty() {
-            provider.set_url(&config.connection.base_url);
-        }
-        
-        // Apply symbols
-        for symbol in &config.subscription.symbols {
-            provider.add_symbol(symbol.clone());
-        }
-        
-        // Apply authentication if provided
-        if !config.authentication.api_key.is_empty() {
-            provider.set_api_credentials(
-                &config.authentication.api_key,
-                &config.authentication.api_secret,
-            );
-        }
-        
-        // Apply performance settings
-        provider.set_buffer_size(config.performance.buffer_size);
-        provider.set_batch_processing(
-            config.performance.batch_processing,
-            config.performance.batch_size,
-        );
-        
+        // 简化的BinanceProvider不需要额外配置
+        // 所有配置都在创建时设置
         Ok(())
     }
     
@@ -120,61 +97,16 @@ impl ProviderConfigAdapter {
 impl crate::core::provider::BinanceProvider {
     /// Load configuration from BinanceWebSocketConfig
     pub fn from_websocket_config(config: &BinanceWebSocketConfig) -> Result<Self, String> {
-        // Convert BinanceWebSocketConfig to BinanceProviderConfig
-        let provider_config = Self::convert_websocket_config_to_provider_config(config)?;
-        let mut provider = Self::new(provider_config);
-        
-        // Apply additional configuration if needed
-        ProviderConfigAdapter::apply_to_binance_websocket(config, &mut provider)?;
+        // Create a simple BinanceProvider with the config
+        let provider = Self::from_config(config.clone())
+            .map_err(|e| format!("创建BinanceProvider失败: {}", e))?;
         
         Ok(provider)
-    }
-    
-    /// Convert BinanceWebSocketConfig to BinanceProviderConfig
-    fn convert_websocket_config_to_provider_config(config: &BinanceWebSocketConfig) -> Result<crate::core::provider::BinanceProviderConfig, String> {
-        use crate::core::provider::{BinanceProviderConfig, BinanceConnectionMode};
-        use crate::core::provider::binance_provider::{BinanceWebSocketConfig as ProviderWSConfig, FailoverConfig};
-        
-        Ok(BinanceProviderConfig {
-            symbols: config.subscription.symbols.clone(),
-            symbol: config.subscription.symbols.first().unwrap_or(&String::new()).clone(),
-            connection_mode: BinanceConnectionMode::WebSocket,
-            websocket_config: Some(ProviderWSConfig::default()), // Use default for now, can be customized later
-            rest_api_config: None,
-            failover_config: FailoverConfig::default(),
-        })
     }
     
     /// Update provider with new configuration
     pub fn update_from_config(&mut self, config: &BinanceWebSocketConfig) -> Result<(), String> {
         ProviderConfigAdapter::apply_to_binance_websocket(config, self)
-    }
-    
-    // Helper methods for configuration (maintaining backward compatibility)
-    
-    pub fn set_url(&mut self, url: &str) {
-        // Implementation would update internal URL
-        log::info!("Setting WebSocket URL to: {}", url);
-    }
-    
-    pub fn add_symbol(&mut self, symbol: String) {
-        // Implementation would add symbol to subscription list
-        log::info!("Adding symbol to subscription: {}", symbol);
-    }
-    
-    pub fn set_api_credentials(&mut self, _api_key: &str, _api_secret: &str) {
-        // Implementation would store credentials securely
-        log::info!("Setting API credentials");
-    }
-    
-    pub fn set_buffer_size(&mut self, size: usize) {
-        // Implementation would update buffer size
-        log::info!("Setting buffer size to: {}", size);
-    }
-    
-    pub fn set_batch_processing(&mut self, enabled: bool, batch_size: usize) {
-        // Implementation would configure batch processing
-        log::info!("Setting batch processing: enabled={}, size={}", enabled, batch_size);
     }
 }
 
@@ -300,7 +232,8 @@ impl ConfiguredProviderFactory {
         
         match config {
             ProviderConfig::BinanceWebSocket(ws_config) => {
-                let provider = crate::core::provider::BinanceProvider::from_config(ws_config.clone())?;
+                let provider = crate::core::provider::BinanceProvider::from_config(ws_config.clone())
+                    .map_err(|e| format!("创建BinanceProvider失败: {}", e))?;
                 Ok(Box::new(provider))
             }
             ProviderConfig::Gzip(gzip_config) => {
@@ -331,7 +264,8 @@ impl ConfiguredProviderFactory {
     ) -> Result<Box<dyn crate::core::provider::DataProvider<Error = crate::core::provider::ProviderError>>, String> {
         match config {
             ProviderConfig::BinanceWebSocket(ws_config) => {
-                let provider = crate::core::provider::BinanceProvider::from_config(ws_config.clone())?;
+                let provider = crate::core::provider::BinanceProvider::from_config(ws_config.clone())
+                    .map_err(|e| format!("创建BinanceProvider失败: {}", e))?;
                 Ok(Box::new(provider))
             }
             ProviderConfig::Gzip(gzip_config) => {

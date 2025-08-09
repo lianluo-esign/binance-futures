@@ -2,7 +2,8 @@ use ratatui::{
     layout::Rect,
     style::{Color, Style},
     symbols,
-    widgets::{Axis, Block, Borders, Chart, Dataset, GraphType},
+    widgets::{Axis, Block, Borders, Chart, Dataset, GraphType, Paragraph, canvas::Canvas},
+    text::{Line, Span},
     Frame,
 };
 use std::collections::VecDeque;
@@ -156,7 +157,7 @@ impl PriceChartRenderer {
         }
     }
 
-    /// 渲染价格图表
+    /// 渲染价格图表（使用数字显示成交量）
     pub fn render(&self, f: &mut Frame, area: Rect) {
         if self.data_points.is_empty() {
             // 如果没有数据，显示空图表
@@ -180,80 +181,107 @@ impl PriceChartRenderer {
             y_max = center + 5.0;
         }
 
-        // 按买卖方向分组数据点
-        let buy_points: Vec<(f64, f64)> = self.data_points
-            .iter()
-            .filter(|point| !point.is_buyer_maker) // 买单
-            .map(|point| (point.sequence as f64, point.price))
-            .collect();
-
-        let sell_points: Vec<(f64, f64)> = self.data_points
-            .iter()
-            .filter(|point| point.is_buyer_maker) // 卖单
-            .map(|point| (point.sequence as f64, point.price))
-            .collect();
-
-        // 准备数据集
-        let mut datasets = Vec::new();
-
-        // 添加买单数据集（绿色圆点）
-        if !buy_points.is_empty() {
-            let buy_dataset = Dataset::default()
-                .name("Buy Orders")
-                .marker(symbols::Marker::Dot)
-                .graph_type(GraphType::Scatter)
-                .style(Style::default().fg(Color::Green))
-                .data(&buy_points);
-            datasets.push(buy_dataset);
-        }
-
-        // 添加卖单数据集（红色圆点）
-        if !sell_points.is_empty() {
-            let sell_dataset = Dataset::default()
-                .name("Sell Orders")
-                .marker(symbols::Marker::Dot)
-                .graph_type(GraphType::Scatter)
-                .style(Style::default().fg(Color::Red))
-                .data(&sell_points);
-            datasets.push(sell_dataset);
-        }
-
-        // 创建X轴
-        let x_axis = Axis::default()
-            .title("Data Points")
-            .style(Style::default().fg(Color::Gray))
-            .bounds([x_min, x_max])
-            .labels(vec![
-                format!("{:.0}", x_min),
-                format!("{:.0}", (x_min + x_max) / 2.0),
-                format!("{:.0}", x_max),
-            ]);
-
-        // 创建Y轴（价格轴，1美元间隔）
-        let y_labels = self.generate_y_axis_labels(y_min, y_max);
-        let y_axis = Axis::default()
-            .title("Price (USD)")
-            .style(Style::default().fg(Color::Gray))
-            .bounds([y_min, y_max])
-            .labels(y_labels);
-
         // 创建图表标题
-        let buy_count = buy_points.len();
-        let sell_count = sell_points.len();
+        let buy_count = self.data_points.iter().filter(|p| !p.is_buyer_maker).count();
+        let sell_count = self.data_points.iter().filter(|p| p.is_buyer_maker).count();
         let title = format!("Price Chart (Buy: {} | Sell: {})", buy_count, sell_count);
 
-        // 创建图表
-        let chart = Chart::new(datasets)
+        // 克隆数据点用于Canvas渲染
+        let data_points = self.data_points.clone();
+        let x_bounds = [x_min, x_max];
+        let y_bounds = [y_min, y_max];
+        
+        // 使用Canvas绘制带数字的图表
+        let canvas = Canvas::default()
             .block(
                 Block::default()
                     .title(title)
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(Color::White))
             )
-            .x_axis(x_axis)
-            .y_axis(y_axis);
+            .x_bounds(x_bounds)
+            .y_bounds(y_bounds)
+            .paint(move |ctx| {
+                // 绘制每个数据点的成交量数字
+                for point in &data_points {
+                    let x = point.sequence as f64;
+                    let y = point.price;
+                    
+                    // 根据成交量大小选择方块字符
+                    let block_char = if point.volume >= 0.1 {
+                        "█"  // 大方块：成交量 >= 0.1 BTC
+                    } else {
+                        "▪"  // 小方块：成交量 < 0.1 BTC
+                    };
+                    
+                    // 根据买卖方向设置颜色
+                    let color = if point.is_buyer_maker {
+                        Color::Red  // 卖单红色
+                    } else {
+                        Color::Green  // 买单绿色
+                    };
+                    
+                    // 在指定位置打印方块字符
+                    let styled_text = Line::from(vec![Span::styled(block_char, Style::default().fg(color))]);
+                    ctx.print(x, y, styled_text);
+                }
+            });
 
-        f.render_widget(chart, area);
+        f.render_widget(canvas, area);
+        
+        // 渲染坐标轴标签（手动添加）
+        self.render_axis_labels(f, area, x_min, x_max, y_min, y_max);
+    }
+
+    /// 手动渲染坐标轴标签
+    fn render_axis_labels(&self, f: &mut Frame, area: Rect, x_min: f64, x_max: f64, y_min: f64, y_max: f64) {
+        // Y轴标签（价格）
+        if area.height > 4 {
+            let y_labels = self.generate_y_axis_labels(y_min, y_max);
+            let label_count = y_labels.len();
+            
+            for (i, label) in y_labels.iter().enumerate() {
+                if label_count > 1 {
+                    let y_pos = area.top() + 1 + ((area.height - 2) * i as u16 / (label_count - 1) as u16);
+                    if y_pos < area.bottom() - 1 {
+                        let label_area = Rect::new(area.left(), y_pos, 7, 1);
+                        let label_widget = Paragraph::new(label.as_str())
+                            .style(Style::default().fg(Color::Gray));
+                        f.render_widget(label_widget, label_area);
+                    }
+                }
+            }
+        }
+        
+        // X轴标签（数据点）
+        if area.width > 20 {
+            let x_labels = vec![
+                format!("{:.0}", x_min),
+                format!("{:.0}", (x_min + x_max) / 2.0),
+                format!("{:.0}", x_max),
+            ];
+            
+            let positions = vec![
+                area.left() + 8,
+                area.left() + area.width / 2,
+                (area.right().saturating_sub(5)).min(area.right().saturating_sub(1)),
+            ];
+            
+            for (label, x_pos) in x_labels.iter().zip(positions.iter()) {
+                // Ensure x_pos is within valid bounds (0 to width-1)
+                let safe_x_pos = (*x_pos).min(area.right().saturating_sub(1));
+                if safe_x_pos < area.right() && area.bottom() > 0 {
+                    // Ensure the label area doesn't exceed terminal boundaries
+                    let label_width = (label.len() as u16).min(area.right().saturating_sub(safe_x_pos));
+                    if label_width > 0 {
+                        let label_area = Rect::new(safe_x_pos, area.bottom() - 1, label_width, 1);
+                        let label_widget = Paragraph::new(label.as_str())
+                            .style(Style::default().fg(Color::Gray));
+                        f.render_widget(label_widget, label_area);
+                    }
+                }
+            }
+        }
     }
 
     /// 渲染空图表
@@ -282,7 +310,7 @@ impl PriceChartRenderer {
                 Block::default()
                     .title("Price Chart (No Data)")
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::Yellow))
+                    .border_style(Style::default().fg(Color::White))
             )
             .x_axis(x_axis)
             .y_axis(y_axis);

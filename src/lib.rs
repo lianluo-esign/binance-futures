@@ -6,7 +6,6 @@ pub mod core;
 pub mod events;
 pub mod handlers;
 pub mod orderbook;
-pub mod websocket;
 pub mod app;
 pub mod monitoring;
 pub mod gui;
@@ -16,7 +15,6 @@ pub mod config;
 pub use core::{RingBuffer, init_cpu_affinity, get_cpu_manager, check_affinity_status};
 pub use events::{Event, EventType, LockFreeEventBus, LockFreeEventDispatcher};
 pub use orderbook::{OrderBookManager, OrderFlow, MarketSnapshot};
-pub use websocket::{WebSocketManager, WebSocketConnection};
 pub use app::ReactiveApp;
 
 /// 库的版本信息
