@@ -14,7 +14,7 @@ pub mod config;
 
 // 重新导出主要类型
 pub use core::{RingBuffer, init_cpu_affinity, get_cpu_manager, check_affinity_status};
-pub use events::{Event, EventType, EventBus, EventDispatcher};
+pub use events::{Event, EventType, LockFreeEventBus, LockFreeEventDispatcher};
 pub use orderbook::{OrderBookManager, OrderFlow, MarketSnapshot};
 pub use websocket::{WebSocketManager, WebSocketConnection};
 pub use app::ReactiveApp;
@@ -26,7 +26,6 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub fn init_logging() {
     // 对于字符界面应用，我们需要将日志重定向到文件而不是控制台
     use std::fs::OpenOptions;
-    use std::io::Write;
 
     let log_file = OpenOptions::new()
         .create(true)

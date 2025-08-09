@@ -25,8 +25,8 @@ use serde_json::Value;
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
-use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::path::PathBuf;
+use std::time::Instant;
 
 /// 历史数据Provider配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -465,6 +465,7 @@ impl HistoricalDataProvider {
     }
 
     /// 解析一行数据
+    #[allow(dead_code)]
     fn parse_line(&self, line: &str) -> ProviderResult<Option<HistoricalRecord>> {
         if line.trim().is_empty() {
             return Ok(None);
@@ -487,6 +488,7 @@ impl HistoricalDataProvider {
     }
 
     /// 解析JSON行
+    #[allow(dead_code)]
     fn parse_json_line(&self, line: &str) -> ProviderResult<Option<HistoricalRecord>> {
         let data: Value = serde_json::from_str(line)
             .map_err(|e| ProviderError::data_parsing(
@@ -508,7 +510,8 @@ impl HistoricalDataProvider {
     }
 
     /// 解析CSV行
-    fn parse_csv_line(&self, line: &str) -> ProviderResult<Option<HistoricalRecord>> {
+    #[allow(dead_code)]
+    fn parse_csv_line(&self, _line: &str) -> ProviderResult<Option<HistoricalRecord>> {
         // TODO: 实现CSV解析
         // 这里需要根据具体的CSV格式进行解析
         Err(ProviderError::configuration(
@@ -517,6 +520,7 @@ impl HistoricalDataProvider {
     }
 
     /// 提取时间戳
+    #[allow(dead_code)]
     fn extract_timestamp(&self, data: &Value) -> ProviderResult<u64> {
         let timestamp_value = data.get(&self.config.time_config.timestamp_field)
             .ok_or_else(|| ProviderError::data_parsing(
@@ -556,6 +560,7 @@ impl HistoricalDataProvider {
     }
 
     /// 推断事件类型
+    #[allow(dead_code)]
     fn infer_event_type(&self, data: &Value) -> EventKind {
         // 尝试从数据中推断事件类型
         if let Some(event_type) = data.get("e").and_then(|e| e.as_str()) {
@@ -830,7 +835,7 @@ impl ControllableProvider for HistoricalDataProvider {
         Ok(())
     }
 
-    fn seek_to(&mut self, timestamp: u64) -> ProviderResult<()> {
+    fn seek_to(&mut self, _timestamp: u64) -> ProviderResult<()> {
         // TODO: 实现文件定位功能
         // 这需要预先建立时间戳索引或者从头扫描文件
         Err(ProviderError::configuration(

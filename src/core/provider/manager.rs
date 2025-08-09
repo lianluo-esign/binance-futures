@@ -16,7 +16,7 @@ use super::{
     DataProvider, ProviderType, ProviderStatus, ProviderFactory,
     error::{ProviderError, ProviderResult},
 };
-use crate::events::{EventType, Event, LockFreeEventDispatcher};
+use crate::events::{EventType, LockFreeEventDispatcher};
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock, atomic::{AtomicBool, Ordering}};
@@ -393,7 +393,7 @@ impl ProviderManager {
                     ))?;
                 
                 provider_guard.start()
-                    .map_err(|e| ProviderError::connection(
+                    .map_err(|_e| ProviderError::connection(
                         format!("启动Provider失败: {}", provider_id),
                         None,
                         true
@@ -683,7 +683,7 @@ impl ProviderManager {
     fn perform_health_check(
         providers: &Arc<RwLock<HashMap<String, ProviderRegistration>>>,
         active_provider_id: &Arc<RwLock<Option<String>>>,
-        auto_switch_config: &AutoSwitchConfig,
+        _auto_switch_config: &AutoSwitchConfig,
     ) -> ProviderResult<()> {
         let providers_guard = providers.read()
             .map_err(|_| ProviderError::internal("获取Provider锁失败", "HealthCheck"))?;

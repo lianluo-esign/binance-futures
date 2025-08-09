@@ -1,14 +1,12 @@
-use std::collections::BTreeMap;
-use ordered_float::OrderedFloat;
 use ratatui::{
     layout::Rect,
-    style::{Color, Modifier, Style},
+    // style::Style, // 未使用
     widgets::{Cell, Row},
     Frame,
 };
 
 use crate::app::ReactiveApp;
-use crate::orderbook::{OrderFlow, display_formatter::{aggregate_price_levels, aggregate_price_levels_with_conflict_resolution, aggregate_trade_price, simulate_order_data_detailed}};
+use crate::orderbook::{display_formatter::{simulate_order_data_detailed, aggregate_price_levels_with_conflict_resolution, aggregate_trade_price}};
 use crate::gui::OrderBookRenderer;
 
 /// 渲染订单薄的主要函数 - 从main.rs移动过来
@@ -31,9 +29,9 @@ pub fn render_orderbook(f: &mut Frame, app: &ReactiveApp, area: Rect) {
 /// 旧版本的订单薄渲染函数 - 保留作为备份
 pub fn render_orderbook_old(f: &mut Frame, app: &ReactiveApp, area: Rect) {
     use ratatui::{
-        layout::{Constraint, Direction, Layout},
+        layout::Constraint,
         style::{Color, Modifier, Style},
-        widgets::{Block, Borders, Cell, Row, Table},
+        widgets::{Block, Borders, Table},
     };
 
     let stats = app.get_stats();

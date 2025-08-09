@@ -72,7 +72,7 @@ pub fn handle_order_cancel(event: &Event, context: &HandlerContext) {
 
 // 辅助函数
 
-fn handle_trading_recommendation(data: &Value, context: &HandlerContext) {
+fn handle_trading_recommendation(data: &Value, _context: &HandlerContext) {
     if let (Some(direction), Some(strength), Some(confidence)) = (
         data["direction"].as_str(),
         data["strength"].as_str(),
@@ -132,7 +132,7 @@ fn get_max_position_size() -> f64 {
     10000.0
 }
 
-fn cancel_order(order_id: &str) -> bool {
+fn cancel_order(_order_id: &str) -> bool {
     // 模拟订单取消操作，不输出到控制台
     crate::handlers::global::increment_event_count("order_cancel_attempt");
     
@@ -141,7 +141,7 @@ fn cancel_order(order_id: &str) -> bool {
     true
 }
 
-fn simulate_trade_execution(direction: &str, size: f64) -> bool {
+fn simulate_trade_execution(_direction: &str, _size: f64) -> bool {
     // 模拟交易执行
     // 在实际应用中，这里会调用交易所API执行实际交易
     

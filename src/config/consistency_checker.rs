@@ -2,7 +2,6 @@
 // Ensures naming consistency between global config and provider configs
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use crate::config::{GlobalConfig, get_provider_mapping, validate_provider_config};

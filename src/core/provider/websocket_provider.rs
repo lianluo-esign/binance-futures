@@ -14,14 +14,14 @@
 
 use super::{
     DataProvider, ProviderType, ProviderStatus, EventKind, PerformanceMetrics,
-    error::{ProviderError, ProviderResult, TimeoutType},
+    error::{ProviderError, ProviderResult},
 };
 use crate::events::EventType;
 use crate::websocket::{WebSocketManager, WebSocketConfig};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// Binance WebSocket配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -311,7 +311,7 @@ impl BinanceWebSocketProvider {
         // 更新WebSocket特定指标
         if let super::types::ProviderMetrics::WebSocket {
             ref mut reconnect_count,
-            ref mut ping_latency_ms,
+            ping_latency_ms: _,
             ref mut messages_per_second,
             ref mut connection_duration,
             ref mut websocket_state,

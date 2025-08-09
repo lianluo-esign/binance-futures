@@ -327,6 +327,7 @@ pub struct MockLoggingConfig {
 
 // Default implementations for backward compatibility
 
+#[allow(dead_code)]
 fn default_buffer_size() -> usize {
     1000
 }

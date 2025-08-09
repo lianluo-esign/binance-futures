@@ -43,7 +43,7 @@ impl BarChartRenderer {
     }
 
     /// 渲染bid条形图（基于BTC数量的unicode块字符显示，绿色背景白色数字）
-    pub fn render_bid_bar(&self, volume: f64, max_volume: f64, cell_width: u16) -> String {
+    pub fn render_bid_bar(&self, volume: f64, _max_volume: f64, cell_width: u16) -> String {
         if volume <= 0.0 {
             return String::new();
         }
@@ -58,7 +58,7 @@ impl BarChartRenderer {
     }
 
     /// 渲染ask条形图（基于BTC数量的unicode块字符显示，红色背景白色数字）
-    pub fn render_ask_bar(&self, volume: f64, max_volume: f64, cell_width: u16) -> String {
+    pub fn render_ask_bar(&self, volume: f64, _max_volume: f64, cell_width: u16) -> String {
         if volume <= 0.0 {
             return String::new();
         }
@@ -73,7 +73,7 @@ impl BarChartRenderer {
     }
 
     /// 创建带文本的条形图单元格（使用unicode块字符显示，数字白色，色块有颜色）
-    pub fn create_bar_with_text<'a>(&'a self, volume: f64, max_volume: f64, cell_width: u16, is_bid: bool) -> Cell<'a> {
+    pub fn create_bar_with_text<'a>(&'a self, volume: f64, _max_volume: f64, cell_width: u16, is_bid: bool) -> Cell<'a> {
         if volume <= 0.0 {
             return Cell::from("");
         }
@@ -130,6 +130,7 @@ impl BarChartRenderer {
     }
 
     /// 创建条形图字符串
+    #[allow(dead_code)]
     fn create_bar_string(&self, bar_length: u16, text: &str, available_width: u16) -> String {
         if bar_length == 0 {
             return text.to_string();
@@ -154,6 +155,7 @@ impl BarChartRenderer {
     }
 
     /// 创建增强的条形图字符串（支持更好的可视化）
+    #[allow(dead_code)]
     fn create_enhanced_bar_string(&self, bar_length: u16, text: &str, available_width: u16, is_bid: bool) -> String {
         if bar_length == 0 {
             return format!(" {}", text); // 没有条形图时仍显示数值

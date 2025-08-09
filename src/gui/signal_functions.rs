@@ -2,7 +2,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Cell, Paragraph, Row, Table, Wrap},
+    widgets::{Block, Borders, Paragraph, Wrap},
     Frame,
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -68,7 +68,7 @@ pub fn render_orderbook_imbalance(f: &mut Frame, app: &ReactiveApp, area: Rect) 
 }
 
 // 渲染订单动量信号 - 与备份文件保持一致
-pub fn render_order_momentum(f: &mut Frame, app: &ReactiveApp, area: Rect) {
+pub fn render_order_momentum(f: &mut Frame, _app: &ReactiveApp, area: Rect) {
     let block = Block::default()
         .title("Order Momentum")
         .borders(Borders::ALL);
@@ -145,7 +145,7 @@ pub fn render_order_momentum(f: &mut Frame, app: &ReactiveApp, area: Rect) {
 }
 
 // 渲染Price Speed函数 - 与备份文件保持一致
-pub fn render_price_speed(f: &mut Frame, app: &ReactiveApp, area: Rect) {
+pub fn render_price_speed(f: &mut Frame, _app: &ReactiveApp, area: Rect) {
     let block = Block::default()
         .title("Price Speed")
         .borders(Borders::ALL);
@@ -196,7 +196,7 @@ pub fn render_price_speed(f: &mut Frame, app: &ReactiveApp, area: Rect) {
 }
 
 // 渲染波动率函数 - 与备份文件保持一致
-pub fn render_volatility(f: &mut Frame, app: &ReactiveApp, area: Rect) {
+pub fn render_volatility(f: &mut Frame, _app: &ReactiveApp, area: Rect) {
     let block = Block::default()
         .title("Price Volatility")
         .borders(Borders::ALL);

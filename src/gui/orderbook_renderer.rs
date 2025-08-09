@@ -1,16 +1,14 @@
 use ratatui::{
-    backend::Backend,
-    layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
-    text::{Line, Span, Text},
-    widgets::{Block, Borders, Cell, Paragraph, Row, Table, Wrap},
+    layout::Rect,
+    style::{Color, Style},
+    widgets::{Block, Borders, Cell, Row, Table},
     Frame,
 };
 use std::collections::BTreeMap;
 use ordered_float::OrderedFloat;
 
 use crate::app::ReactiveApp;
-use crate::orderbook::{OrderFlow, MarketSnapshot, OrderFlowDisplayData};
+use crate::orderbook::{OrderFlow, OrderFlowDisplayData};
 use super::bar_chart::BarChartRenderer;
 use super::price_tracker::PriceTracker;
 use super::layout_manager::LayoutManager;
@@ -424,7 +422,7 @@ impl OrderBookRenderer {
     }
 
     /// 创建单个价格层级的行
-    fn create_price_level_row(&self, level: &PriceLevel, render_data: &OrderBookRenderData, index: usize) -> Row {
+    fn create_price_level_row(&self, level: &PriceLevel, render_data: &OrderBookRenderData, _index: usize) -> Row {
         // 价格单元格 - 移除所有高亮显示，统一使用普通样式
         let price_cell = Cell::from(format!("{:.0}", level.price))
             .style(Style::default().fg(Color::White));

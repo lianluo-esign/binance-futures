@@ -1,6 +1,5 @@
 use std::time::{Duration, Instant};
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
 
 /// 内部监控系统 - 用于诊断应用程序健康状态和性能问题
 #[derive(Debug, Clone)]

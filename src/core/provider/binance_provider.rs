@@ -364,7 +364,7 @@ impl BinanceProvider {
             failover_config: FailoverConfig::default(),
         };
         
-        let mut provider = Self::new(provider_config);
+        let provider = Self::new(provider_config);
         
         log::info!("创建BinanceProvider，symbols: {:?}，streams: {:?}", 
                   provider.config.get_symbols(), 
@@ -583,7 +583,7 @@ impl BinanceProvider {
         // 更新WebSocket特定指标
         if let super::types::ProviderMetrics::WebSocket {
             ref mut reconnect_count,
-            ref mut ping_latency_ms,
+            ping_latency_ms: _,
             ref mut messages_per_second,
             ref mut connection_duration,
             ref mut websocket_state,

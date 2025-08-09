@@ -1,11 +1,8 @@
-use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
-use ordered_float::OrderedFloat;
 use serde_json::Value;
 
-use super::realtime_flow::{RealtimeOrderFlow, OrderFlowLevel, OrderFlowStatistics, OrderFlowConfig};
-use super::data_structures::TradeRecord;
+use super::realtime_flow::{RealtimeOrderFlow, OrderFlowStatistics, OrderFlowConfig};
 
 /// Thread-safe order flow manager that processes trades and maintains real-time order flow data
 pub struct OrderFlowManager {

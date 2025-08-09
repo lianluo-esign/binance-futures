@@ -225,7 +225,7 @@ impl LayoutManager {
     }
 
     /// 创建订单流单元格（Buy列）
-    pub fn create_buy_flow_cell(&self, volume: f64, max_volume: f64) -> Cell {
+    pub fn create_buy_flow_cell(&self, volume: f64, _max_volume: f64) -> Cell {
         if volume == 0.0 {
             Cell::from("")
         } else {
@@ -239,7 +239,7 @@ impl LayoutManager {
     }
 
     /// 创建订单流单元格（Sell列）
-    pub fn create_sell_flow_cell(&self, volume: f64, max_volume: f64) -> Cell {
+    pub fn create_sell_flow_cell(&self, volume: f64, _max_volume: f64) -> Cell {
         if volume == 0.0 {
             Cell::from("")
         } else {

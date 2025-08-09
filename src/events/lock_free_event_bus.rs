@@ -1,8 +1,16 @@
 use crate::core::LockFreeRingBuffer;
 use crate::events::event_types::Event;
-use crate::events::event_bus::EventBusStats;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+/// 事件总线统计信息
+#[derive(Debug, Default, Clone)]
+pub struct EventBusStats {
+    pub total_events_published: u64,
+    pub total_events_processed: u64,
+    pub events_dropped: u64,
+    pub handler_errors: u64,
+}
 
 /// 无锁事件总线实现
 /// 

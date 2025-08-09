@@ -25,7 +25,7 @@ use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 /// Gzip数据Provider配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -613,7 +613,7 @@ impl GzipProvider {
     /// - speed = 0: 立即发送所有事件（无延迟模式）
     /// - speed > 0: 基于原始市场时间间隔，按速度倍数缩放
     ///   例如：两个事件原本间隔100ms，2x速度下间隔50ms，0.5x速度下间隔200ms
-    fn should_send_event(&mut self, record: &GzipRecord) -> bool {
+    fn should_send_event(&mut self, _record: &GzipRecord) -> bool {
         // 速度为0表示无延迟模式，立即发送
         if self.playback_info.playback_speed == 0.0 {
             return true;
@@ -909,7 +909,7 @@ impl ControllableProvider for GzipProvider {
         Ok(())
     }
 
-    fn seek_to(&mut self, timestamp: u64) -> ProviderResult<()> {
+    fn seek_to(&mut self, _timestamp: u64) -> ProviderResult<()> {
         // TODO: 实现文件定位功能
         // 这需要预先建立时间戳索引或者从头扫描文件
         Err(ProviderError::configuration(

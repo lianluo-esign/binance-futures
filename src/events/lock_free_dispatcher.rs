@@ -1,5 +1,5 @@
 use crate::events::{Event, LockFreeEventBus};
-use crate::events::event_bus::EventBusStats;
+use crate::events::lock_free_event_bus::EventBusStats;
 use std::sync::Arc;
 
 /// 无锁事件分发器

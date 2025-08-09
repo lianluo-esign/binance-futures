@@ -1,7 +1,6 @@
 // Configuration module for managing system and provider configurations
 // Follows OOP principles with backward compatibility
 
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};

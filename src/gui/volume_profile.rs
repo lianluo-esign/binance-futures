@@ -276,7 +276,7 @@ impl VolumeProfileWidget {
     }
 
     /// 创建成交量柱状图单元格（不带文本）
-    fn create_volume_bar_cell_without_text(&self, volume_level: &VolumeLevel, max_volume: f64) -> Cell {
+    fn create_volume_bar_cell_without_text(&self, volume_level: &VolumeLevel, _max_volume: f64) -> Cell {
         
         if volume_level.total_volume <= 0.0 {
             return Cell::from("");
@@ -344,6 +344,7 @@ impl VolumeProfileWidget {
     }
 
     /// 创建成交量柱状图单元格（保持向后兼容）
+    #[allow(dead_code)]
     fn create_volume_bar_cell(&self, volume_level: &VolumeLevel, max_volume: f64) -> Cell {
         // 为了向后兼容，保留原有函数但现在调用新的分离函数
         self.create_volume_bar_cell_without_text(volume_level, max_volume)
@@ -396,6 +397,7 @@ impl VolumeProfileWidget {
 
 
     /// 创建Unicode块字符填充的bar（保持向后兼容）
+    #[allow(dead_code)]
     fn create_unicode_bar(&self, btc_volume: f64, max_width: usize) -> String {
         if btc_volume <= 0.0 {
             return String::new();
@@ -535,7 +537,7 @@ impl VolumeProfileRenderer {
     }
 
     /// 创建成交量柱状图单元格（不带文本）
-    pub fn create_volume_bar_cell_without_text(&self, volume_level: &VolumeLevel, max_volume: f64) -> Cell {
+    pub fn create_volume_bar_cell_without_text(&self, volume_level: &VolumeLevel, _max_volume: f64) -> Cell {
         if volume_level.total_volume <= 0.0 {
             return Cell::from("");
         }
@@ -594,6 +596,7 @@ impl VolumeProfileRenderer {
     }
 
     /// 创建成交量柱状图单元格（保持向后兼容）
+    #[allow(dead_code)]
     pub fn create_volume_bar_cell(&self, volume_level: &VolumeLevel, max_volume: f64) -> Cell {
         // 为了向后兼容，保留原有函数但现在调用新的分离函数
         self.create_volume_bar_cell_without_text(volume_level, max_volume)

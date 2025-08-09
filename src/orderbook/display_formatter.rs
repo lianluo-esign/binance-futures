@@ -8,7 +8,7 @@ use crate::orderbook::OrderFlow;
 /// precision: 价格精度（USD增量），强制为1.0以保证向下取整到整美元
 pub fn aggregate_price_levels(
     order_flows: &BTreeMap<OrderedFloat<f64>, OrderFlow>,
-    precision: f64,
+    _precision: f64,
 ) -> BTreeMap<OrderedFloat<f64>, OrderFlow> {
     // 强制使用1美元精度，忽略传入的precision参数
     let dollar_precision = 1.0;
@@ -60,7 +60,7 @@ pub fn aggregate_price_levels_with_conflict_resolution(
     order_flows: &BTreeMap<OrderedFloat<f64>, OrderFlow>,
     best_bid_price: Option<f64>,
     best_ask_price: Option<f64>,
-    precision: f64,
+    _precision: f64,
 ) -> BTreeMap<OrderedFloat<f64>, OrderFlow> {
     let dollar_precision = 1.0;
     let mut aggregated: BTreeMap<OrderedFloat<f64>, OrderFlow> = BTreeMap::new();
@@ -77,7 +77,7 @@ pub fn aggregate_price_levels_with_conflict_resolution(
     for (price_key, order_flow) in order_flows {
         let original_price = price_key.0;
         let has_bid = order_flow.bid_ask.bid > 0.0;
-        let has_ask = order_flow.bid_ask.ask > 0.0;
+        let _has_ask = order_flow.bid_ask.ask > 0.0;
 
         // 计算聚合价格
         let mut aggregated_price = (original_price / dollar_precision).floor() * dollar_precision;
@@ -123,7 +123,7 @@ pub fn aggregate_price_levels_with_conflict_resolution(
 }
 
 /// 根据价格精度聚合交易价格，固定使用1美元精度向下取整
-pub fn aggregate_trade_price(price: f64, precision: f64) -> f64 {
+pub fn aggregate_trade_price(price: f64, _precision: f64) -> f64 {
     // 强制使用1美元精度，忽略传入的precision参数
     let dollar_precision = 1.0;
     (price / dollar_precision).floor() * dollar_precision

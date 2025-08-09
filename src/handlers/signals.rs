@@ -64,8 +64,8 @@ fn handle_order_impact_signal(data: &Value, context: &HandlerContext) {
 }
 
 /// 处理价格变动信号
-fn handle_price_move_signal(data: &Value, context: &HandlerContext) {
-    if let Some(price) = data["price"].as_f64() {
+fn handle_price_move_signal(data: &Value, _context: &HandlerContext) {
+    if let Some(_price) = data["price"].as_f64() {
         // 记录价格变动信号统计，不输出到控制台
         crate::handlers::global::increment_event_count("price_move_signal");
         
@@ -76,7 +76,7 @@ fn handle_price_move_signal(data: &Value, context: &HandlerContext) {
 
 /// 处理大额交易信号
 fn handle_big_trade_signal(data: &Value, context: &HandlerContext) {
-    if let (Some(quantity), Some(price), Some(value)) = (
+    if let (Some(_quantity), Some(_price), Some(value)) = (
         data["quantity"].as_f64(),
         data["price"].as_f64(),
         data["value"].as_f64()

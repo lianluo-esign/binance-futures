@@ -109,7 +109,7 @@ fn handle_auth_error(error_msg: &str, context: &HandlerContext) {
 }
 
 /// 处理通用错误
-fn handle_generic_error(error_msg: &str, context: &HandlerContext) {
+fn handle_generic_error(_error_msg: &str, context: &HandlerContext) {
     // 通用错误记录统计，不输出到控制台
     crate::handlers::global::increment_event_count("generic_error_handled");
     

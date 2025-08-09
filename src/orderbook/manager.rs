@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use ordered_float::OrderedFloat;
 use serde_json::Value;
 

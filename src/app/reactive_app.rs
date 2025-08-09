@@ -72,6 +72,7 @@ pub struct ReactiveApp {
     // 断路器状态
     circuit_breaker_failures: u32,
     circuit_breaker_open: bool,
+    #[allow(dead_code)]
     circuit_breaker_last_failure: Option<Instant>,
     
     // 最新交易数据（用于价格图表）
@@ -332,6 +333,7 @@ impl ReactiveApp {
     }
 
     /// 处理Provider事件（新的事件处理方式）
+    #[allow(dead_code)]
     fn process_provider_events(&mut self) -> usize {
         if let Some(ref mut provider_manager) = self.provider_manager {
             match provider_manager.process_events() {
@@ -453,6 +455,7 @@ impl ReactiveApp {
     }
 
     /// 处理WebSocket消息 - 带断路器保护的版本（传统模式）
+    #[allow(dead_code)]
     fn process_websocket_messages(&mut self) {
         // 检查断路器状态
         if self.circuit_breaker_open {
@@ -515,6 +518,7 @@ impl ReactiveApp {
     }
 
     /// 将WebSocket消息转换为事件 - 带超时保护的版本
+    #[allow(dead_code)]
     fn convert_message_to_event(&mut self, message: serde_json::Value) -> Option<Event> {
         let start_time = Instant::now();
 
@@ -576,6 +580,7 @@ impl ReactiveApp {
     }
 
     /// 处理事件队列
+    #[allow(dead_code)]
     fn process_events(&mut self) -> usize {
         // 限制每次处理的事件数量，避免UI阻塞
         const MAX_EVENTS_PER_CYCLE: usize = 100;

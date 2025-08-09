@@ -87,13 +87,13 @@ pub fn handle_book_ticker(event: &Event, context: &HandlerContext) {
 
 // 辅助函数
 
-fn is_significant_price_move(price: f64, data: &Value) -> bool {
+fn is_significant_price_move(_price: f64, _data: &Value) -> bool {
     // 实现价格变动检测逻辑
     // 这里只是示例，实际实现需要根据具体需求
     false
 }
 
-fn create_price_signal(price: f64, data: &Value) -> Value {
+fn create_price_signal(price: f64, _data: &Value) -> Value {
     serde_json::json!({
         "signal_type": "price_move",
         "price": price,
@@ -105,7 +105,7 @@ fn create_price_signal(price: f64, data: &Value) -> Value {
     })
 }
 
-fn detect_order_book_imbalance(data: &Value) -> Option<Value> {
+fn detect_order_book_imbalance(_data: &Value) -> Option<Value> {
     // 实现订单簿不平衡检测逻辑
     // 返回None表示没有检测到不平衡
     None

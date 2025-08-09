@@ -9,7 +9,9 @@ use std::time::Instant;
 
 /// Windows GUI应用程序（暂时禁用）
 pub struct TradingGUI {
+    #[allow(dead_code)]
     market_data: HashMap<String, f64>,
+    #[allow(dead_code)]
     last_update: Instant,
 }
 

@@ -2,7 +2,7 @@
 // Validates configuration against provider implementations at startup
 // If validation fails, the program exits with a clear error message
 
-use super::{ConfigError, GlobalConfig, ProviderIdentity};
+use super::{GlobalConfig, ProviderIdentity};
 use crate::core::provider::{BinanceProvider, GzipProvider};
 use std::process;
 
