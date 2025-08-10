@@ -44,6 +44,8 @@
       "Bash(RUST_LOG=debug rustc --edition 2021 examplestiming_test.rs --extern env_logger --extern tokio --extern binance_futures -L targetdebugdeps -o timing_test.exe)",
       "Bash(RUST_LOG=debug rustc --edition 2021 examples/timing_test.rs --extern env_logger --extern tokio --extern binance_futures -L target/debug/deps -o timing_test.exe)"
     ],
-    "deny": []
+    "deny": [
+      "Bash(rm:CLAUDE.md)"
+    ]
   }
 }
