@@ -634,6 +634,7 @@ impl DataProvider for BinanceProvider {
         };
         
         ProviderStatus {
+            provider_type: ProviderType::Binance { mode: super::BinanceConnectionMode::WebSocket },
             is_connected: self.connected,
             is_running: self.running,
             events_received: self.performance.events_received,
@@ -641,12 +642,14 @@ impl DataProvider for BinanceProvider {
             error_count: self.performance.error_count,
             consecutive_errors: 0, // Reset on each status check
             last_error: None, // Simplified for now
-            provider_metrics,
+            provider_metrics: provider_metrics.clone(),
             status_timestamp: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_millis() as u64,
             is_healthy: self.connected && self.running && matches!(ws_state, ConnectionState::Connected),
+            metrics: Some(provider_metrics),
+            custom_metadata: None,
         }
     }
 

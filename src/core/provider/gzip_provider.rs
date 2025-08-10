@@ -579,19 +579,63 @@ impl GzipProvider {
             self.playback_info.update_timestamp(record.timestamp_ms);
         }
 
-        // 更新Provider指标
-        if let super::types::ProviderMetrics::Historical {
-            ref mut file_progress,
-            ref mut processed_events,
-            ref mut total_events,
-            ref mut current_timestamp,
-            ..
-        } = self.status.provider_metrics {
-            *file_progress = overall_progress;
-            *processed_events = self.events_sent;
-            *total_events = self.total_records_read; // 这是一个估算
-            *current_timestamp = self.last_event_timestamp_ns.map(|ns| ns / 1_000_000).unwrap_or(0);
+        // 更新Provider指标 - 使用重新赋值方式更新
+        let current_file_name = self.current_file_path.as_ref()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown.gz")
+            .to_string();
+            
+        self.status.provider_metrics = super::types::ProviderMetrics::Historical {
+            file_progress: overall_progress,
+            playback_speed: self.playback_info.playback_speed,
+            current_timestamp: self.playback_info.current_timestamp,
+            total_events: self.total_records_read,  // 使用正确的字段名
+            processed_events: self.events_sent,
+            file_path: current_file_name.clone(),
+        };
+        
+        // 更新自定义元数据
+        use std::collections::HashMap;
+        let mut metadata = HashMap::new();
+        
+        // 添加当前文件信息
+        if let Some(ref path) = self.current_file_path {
+            metadata.insert("file_path".to_string(), serde_json::Value::String(
+                path.to_string_lossy().to_string()
+            ));
         }
+        
+        // 添加所有文件列表
+        let file_list: Vec<String> = self.data_files.iter()  // 使用正确的字段名
+            .filter_map(|p| p.file_name())
+            .filter_map(|n| n.to_str())
+            .map(|s| s.to_string())
+            .collect();
+        metadata.insert("files".to_string(), serde_json::Value::Array(
+            file_list.into_iter().map(serde_json::Value::String).collect()
+        ));
+        
+        metadata.insert("current_file_index".to_string(), serde_json::Value::Number(
+            serde_json::Number::from(self.current_file_index)
+        ));
+        metadata.insert("total_files".to_string(), serde_json::Value::Number(
+            serde_json::Number::from(self.data_files.len())  // 使用正确的字段名
+        ));
+        metadata.insert("total_file_size".to_string(), serde_json::Value::Number(
+            serde_json::Number::from(self.total_file_size)
+        ));
+        metadata.insert("format".to_string(), serde_json::Value::String(
+            "Gzip Compressed".to_string()
+        ));
+        metadata.insert("playback_state".to_string(), serde_json::Value::String(
+            format!("{:?}", self.playback_state)
+        ));
+        
+        self.status.custom_metadata = Some(metadata);
+        
+        // 更新metrics字段
+        self.status.metrics = Some(self.status.provider_metrics.clone());
 
         self.status.update_timestamp();
     }

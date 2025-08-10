@@ -829,11 +829,32 @@ impl ReactiveApp {
         let event_bus_stats = self.event_dispatcher.get_stats();
         let orderbook_stats = self.orderbook_manager.get_stats();
 
+        // 根据使用的Provider系统获取连接状态
+        let websocket_connected = if self.use_provider_system && self.dynamic_provider.is_some() {
+            // 新Provider系统：根据Provider类型判断连接状态
+            if let Some(ref provider) = self.dynamic_provider {
+                if let Ok(provider_lock) = provider.try_lock() {
+                    match provider_lock.get_status().provider_type {
+                        ProviderType::Binance { .. } => provider_lock.get_status().is_connected,
+                        ProviderType::HistoricalData { .. } => true, // 历史数据始终"连接"
+                        _ => false,
+                    }
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        } else {
+            // 旧系统：使用BinanceProvider的连接状态
+            self.binance_provider.is_connected()
+        };
+
         AppStats {
             running: self.running,
             events_processed_per_second: self.events_processed_per_second,
             pending_events: self.event_dispatcher.pending_events(),
-            websocket_connected: self.binance_provider.is_connected(),
+            websocket_connected,
             total_events_published: event_bus_stats.as_ref().map(|s| s.total_events_published).unwrap_or(0),
             total_events_processed: event_bus_stats.as_ref().map(|s| s.total_events_processed).unwrap_or(0),
             websocket_messages_received: 0, // 简化实现
@@ -843,6 +864,18 @@ impl ReactiveApp {
             health_check_failures: 0, // 简化为0
             last_data_received: self.last_data_received,
         }
+    }
+    
+    /// 获取当前Provider的详细状态信息
+    pub fn get_provider_status(&self) -> Option<crate::core::ProviderStatus> {
+        if self.use_provider_system && self.dynamic_provider.is_some() {
+            if let Some(ref provider) = self.dynamic_provider {
+                if let Ok(provider_lock) = provider.try_lock() {
+                    return Some(provider_lock.get_status());
+                }
+            }
+        }
+        None
     }
 
     /// 获取EventBus缓冲区使用情况

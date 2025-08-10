@@ -359,6 +359,9 @@ pub enum EventPriority {
 /// 包含Provider的运行状态、统计信息和健康指标
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderStatus {
+    /// Provider类型
+    pub provider_type: ProviderType,
+    
     /// 是否已连接/就绪
     pub is_connected: bool,
     
@@ -388,12 +391,20 @@ pub struct ProviderStatus {
     
     /// 健康状态
     pub is_healthy: bool,
+    
+    /// Provider特定指标（可选）
+    pub metrics: Option<ProviderMetrics>,
+    
+    /// 自定义元数据（用于扩展）
+    pub custom_metadata: Option<HashMap<String, serde_json::Value>>,
 }
 
 impl ProviderStatus {
     /// 创建新的状态实例
     pub fn new(provider_type: ProviderType) -> Self {
+        let metrics = ProviderMetrics::new(provider_type.clone());
         Self {
+            provider_type: provider_type.clone(),
             is_connected: false,
             is_running: false,
             events_received: 0,
@@ -401,9 +412,11 @@ impl ProviderStatus {
             error_count: 0,
             consecutive_errors: 0,
             last_error: None,
-            provider_metrics: ProviderMetrics::new(provider_type),
+            provider_metrics: metrics.clone(),
             status_timestamp: Self::current_timestamp(),
             is_healthy: false,
+            metrics: Some(metrics),
+            custom_metadata: None,
         }
     }
 

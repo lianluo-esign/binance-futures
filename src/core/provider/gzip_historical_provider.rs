@@ -594,6 +594,33 @@ impl HistoricalDataProvider {
         if let Some(record) = self.event_buffer.back() {
             self.playback_info.update_timestamp(record.timestamp);
         }
+        
+        // 更新Provider状态的metrics
+        self.status.provider_metrics = super::types::ProviderMetrics::Historical {
+            file_progress: progress,
+            playback_speed: self.playback_info.playback_speed,
+            current_timestamp: self.playback_info.current_timestamp,
+            total_events: self.estimated_total_records,
+            processed_events: self.events_sent,
+            file_path: self.config.file_path.to_string_lossy().to_string(),
+        };
+        
+        // 更新自定义元数据
+        use std::collections::HashMap;
+        let mut metadata = HashMap::new();
+        metadata.insert("file_path".to_string(), serde_json::Value::String(
+            self.config.file_path.to_string_lossy().to_string()
+        ));
+        metadata.insert("file_size".to_string(), serde_json::Value::Number(
+            serde_json::Number::from(self.file_size)
+        ));
+        metadata.insert("format".to_string(), serde_json::Value::String(
+            format!("{:?}", self.config.format)
+        ));
+        metadata.insert("playback_state".to_string(), serde_json::Value::String(
+            format!("{:?}", self.playback_state)
+        ));
+        self.status.custom_metadata = Some(metadata);
 
         // 更新Provider指标
         if let super::types::ProviderMetrics::Historical {
