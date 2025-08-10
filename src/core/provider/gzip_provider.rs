@@ -13,6 +13,7 @@
 use super::{
     DataProvider, ControllableProvider, ProviderType, ProviderStatus, EventKind, 
     PerformanceMetrics, PlaybackInfo, HistoricalDataFormat,
+    VirtualClock, VirtualClockConfig, SyncResult,
     error::{ProviderError, ProviderResult},
 };
 use crate::config::ProviderIdentity;
@@ -83,6 +84,12 @@ pub struct PlaybackConfig {
     /// 时间过滤
     pub start_timestamp: Option<u64>,
     pub end_timestamp: Option<u64>,
+    
+    /// 是否启用纳秒级精度（默认true）
+    pub nanosecond_precision: bool,
+    
+    /// 时间漂移容差（纳秒，默认1ms）
+    pub drift_tolerance_ns: u64,
 }
 
 impl Default for PlaybackConfig {
@@ -95,6 +102,8 @@ impl Default for PlaybackConfig {
             min_speed: 0.1,
             start_timestamp: None,
             end_timestamp: None,
+            nanosecond_precision: true,
+            drift_tolerance_ns: 1_000_000, // 1ms
         }
     }
 }
@@ -189,11 +198,11 @@ pub struct GzipProvider {
     total_bytes_read: u64,
     events_sent: u64,
     
-    /// 时间控制 - 全新的定时系统
-    last_event_timestamp_ns: Option<u64>,  // 上一个事件的纳秒时间戳
-    playback_start_time: Option<Instant>,  // 播放开始的实时时间
-    virtual_start_timestamp_ns: Option<u64>, // 虚拟播放开始时的事件时间戳
-    next_event_due_time: Option<Instant>,  // 下一个事件应该发送的实时时间
+    /// 虚拟时钟系统 - 高精度时间控制
+    virtual_clock: VirtualClock,
+    
+    /// 最后事件的时间戳（用于统计）
+    last_event_timestamp_ns: Option<u64>,
     
     /// 性能监控
     performance_window_start: Instant,
@@ -222,10 +231,13 @@ impl GzipProvider {
     /// 创建新的Gzip数据Provider
     pub fn new(config: GzipProviderConfig) -> Self {
         // 初始化播放信息
-        let playback_info = PlaybackInfo::new(
+        let mut playback_info = PlaybackInfo::new(
             config.playback_config.start_timestamp.unwrap_or(0),
             config.playback_config.end_timestamp.unwrap_or(u64::MAX),
         );
+        
+        // 设置正确的初始播放速度
+        playback_info.playback_speed = config.playback_config.initial_speed;
 
         // 初始化状态
         let provider_type = ProviderType::HistoricalData { 
@@ -252,6 +264,17 @@ impl GzipProvider {
         ];
 
         let now = Instant::now();
+        
+        // 创建虚拟时钟配置
+        let clock_config = VirtualClockConfig {
+            initial_speed: config.playback_config.initial_speed,
+            max_speed: config.playback_config.max_speed,
+            min_speed: config.playback_config.min_speed,
+            nanosecond_precision: config.playback_config.nanosecond_precision,
+            drift_tolerance_ns: config.playback_config.drift_tolerance_ns,
+        };
+        
+        let virtual_clock = VirtualClock::new(clock_config);
 
         Self {
             config,
@@ -267,10 +290,8 @@ impl GzipProvider {
             total_records_read: 0,
             total_bytes_read: 0,
             events_sent: 0,
+            virtual_clock,
             last_event_timestamp_ns: None,
-            playback_start_time: None,
-            virtual_start_timestamp_ns: None,
-            next_event_due_time: None,
             performance_window_start: now,
             performance_events_count: 0,
             total_file_size: 0,
@@ -358,7 +379,8 @@ impl GzipProvider {
             if self.config.playback_config.loop_enabled {
                 // 重新开始时重置时间控制系统
                 self.current_file_index = 0;
-                self.reset_timing_base();
+                // 重置虚拟时钟，但保持当前速度
+                let _ = self.virtual_clock.stop();
                 log::info!("重新开始播放数据文件");
             } else {
                 // 播放完成
@@ -651,88 +673,27 @@ impl GzipProvider {
         }
     }
 
-    /// 检查是否应该发送事件（基于播放速度的现实时间算法）
+    /// 检查事件是否应该发送（基于虚拟时钟）
     /// 
-    /// 算法逻辑：
-    /// - speed = 0: 立即发送所有事件（无延迟模式）
-    /// - speed > 0: 基于原始市场时间间隔，按速度倍数缩放
-    ///   例如：两个事件原本间隔100ms，2x速度下间隔50ms，0.5x速度下间隔200ms
-    fn should_send_event(&mut self, _record: &GzipRecord) -> bool {
-        // 速度为0表示无延迟模式，立即发送
-        if self.playback_info.playback_speed == 0.0 {
-            return true;
-        }
-
-        let now = Instant::now();
-        
-        // 如果已经到了预定发送时间，则发送
-        if let Some(due_time) = self.next_event_due_time {
-            if now >= due_time {
-                return true;
-            } else {
-                return false;
+    /// 返回值：
+    /// - true: 应该立即发送事件
+    /// - false: 还未到发送时间，需要等待
+    fn should_send_event(&self, record: &GzipRecord) -> bool {
+        match self.virtual_clock.should_send_event(record.timestamp_ns) {
+            Ok(SyncResult::SendNow) => true,
+            Ok(SyncResult::WaitFor(_)) => false,
+            Ok(SyncResult::Expired) => {
+                // 事件过期，但仍然发送以避免丢失数据
+                log::warn!("事件时间戳过期: {} ns", record.timestamp_ns);
+                true
+            }
+            Err(e) => {
+                log::error!("虚拟时钟错误: {}", e);
+                true // 发生错误时默认发送
             }
         }
-        
-        // 第一个事件立即发送
-        true
     }
     
-    /// 更新下一个事件的预定发送时间
-    /// 
-    /// 此方法在成功发送事件后调用，计算下一个事件应该发送的时间
-    fn update_next_event_timing(&mut self, current_record: &GzipRecord, next_record: Option<&GzipRecord>) {
-        // 速度为0的情况下不需要时间控制
-        if self.playback_info.playback_speed == 0.0 {
-            self.next_event_due_time = None;
-            self.last_event_timestamp_ns = Some(current_record.timestamp_ns);
-            return;
-        }
-        
-        let now = Instant::now();
-        
-        // 初始化播放时间基准
-        if self.playback_start_time.is_none() {
-            self.playback_start_time = Some(now);
-            self.virtual_start_timestamp_ns = Some(current_record.timestamp_ns);
-        }
-        
-        // 如果有下一个事件，计算其应该发送的时间
-        if let Some(next_record) = next_record {
-            if let (Some(start_time), Some(virtual_start)) = (self.playback_start_time, self.virtual_start_timestamp_ns) {
-                // 计算下一个事件与播放开始时间的虚拟时间差（纳秒）
-                let virtual_time_diff_ns = next_record.timestamp_ns.saturating_sub(virtual_start);
-                
-                // 按播放速度缩放时间差
-                let scaled_time_diff_ns = if self.playback_info.playback_speed > 0.0 {
-                    (virtual_time_diff_ns as f64 / self.playback_info.playback_speed) as u64
-                } else {
-                    0 // 避免除零
-                };
-                
-                // 计算下一个事件应该发送的实际时间
-                let scaled_duration = Duration::from_nanos(scaled_time_diff_ns);
-                self.next_event_due_time = Some(start_time + scaled_duration);
-            }
-        } else {
-            // 没有下一个事件，清除预定时间
-            self.next_event_due_time = None;
-        }
-        
-        self.last_event_timestamp_ns = Some(current_record.timestamp_ns);
-    }
-    
-    /// 重置播放时间基准（当速度改变或暂停/恢复时调用）
-    fn reset_timing_base(&mut self) {
-        let now = Instant::now();
-        self.playback_start_time = Some(now);
-        self.next_event_due_time = None;
-        
-        // 如果有当前事件，将其作为新的虚拟开始时间
-        if let Some(current_record) = self.event_buffer.front() {
-            self.virtual_start_timestamp_ns = Some(current_record.timestamp_ns);
-        }
-    }
 }
 
 impl DataProvider for GzipProvider {
@@ -769,7 +730,12 @@ impl DataProvider for GzipProvider {
 
         if self.config.playback_config.auto_start {
             self.playback_state = PlaybackState::Playing;
-            self.playback_start_time = Some(Instant::now());
+            // 如果有事件数据，启动虚拟时钟
+            if let Some(first_record) = self.event_buffer.front() {
+                if let Err(e) = self.virtual_clock.start(first_record.timestamp_ns) {
+                    log::error!("虚拟时钟启动失败: {}", e);
+                }
+            }
         } else {
             self.playback_state = PlaybackState::Paused;
         }
@@ -788,7 +754,11 @@ impl DataProvider for GzipProvider {
 
         self.playback_state = PlaybackState::Stopped;
         self.status.is_running = false;
-        self.playback_start_time = None;
+        
+        // 停止虚拟时钟
+        if let Err(e) = self.virtual_clock.stop() {
+            log::error!("虚拟时钟停止失败: {}", e);
+        }
 
         log::info!("Gzip Data Provider已停止");
         Ok(())
@@ -823,13 +793,9 @@ impl DataProvider for GzipProvider {
             let event = self.convert_record_to_event(&record);
             events.push(event);
 
-            // 更新下一个事件的定时
-            // 创建一个临时的 Option，避免借用冲突
-            let next_record_copy = self.event_buffer.front().cloned();
-            self.update_next_event_timing(&record, next_record_copy.as_ref());
-            
-            // 更新统计
+            // 更新统计信息和最后事件时间戳
             self.events_sent += 1;
+            self.last_event_timestamp_ns = Some(record.timestamp_ns);
             self.performance_events_count += 1;
             self.status.record_event();
         }
@@ -911,8 +877,10 @@ impl ControllableProvider for GzipProvider {
     fn pause(&mut self) -> ProviderResult<()> {
         if matches!(self.playback_state, PlaybackState::Playing) {
             self.playback_state = PlaybackState::Paused;
-            // 暂停时清除定时器，避免时间计算错误
-            self.next_event_due_time = None;
+            // 暂停虚拟时钟
+            if let Err(e) = self.virtual_clock.pause() {
+                log::error!("虚拟时钟暂停失败: {}", e);
+            }
             log::info!("压缩数据播放已暂停");
         }
         Ok(())
@@ -921,32 +889,25 @@ impl ControllableProvider for GzipProvider {
     fn resume(&mut self) -> ProviderResult<()> {
         if matches!(self.playback_state, PlaybackState::Paused) {
             self.playback_state = PlaybackState::Playing;
-            // 恢复时重置时间基准，保证时间计算的连续性
-            self.reset_timing_base();
+            // 恢复虚拟时钟
+            if let Err(e) = self.virtual_clock.resume() {
+                log::error!("虚拟时钟恢复失败: {}", e);
+            }
             log::info!("压缩数据播放已恢复");
         }
         Ok(())
     }
 
     fn set_playback_speed(&mut self, speed: f64) -> ProviderResult<()> {
-        // 允许speed=0作为特殊情况（无延迟模式）
-        if speed < 0.0 || (speed > 0.0 && speed < self.config.playback_config.min_speed) || 
-           speed > self.config.playback_config.max_speed {
+        // 使用虚拟时钟设置速度（会自动进行范围检查）
+        if let Err(e) = self.virtual_clock.set_speed(speed) {
             return Err(ProviderError::configuration(
-                format!("播放速度超出范围 [0.0, {}-{}]: {}", 
-                       self.config.playback_config.min_speed,
-                       self.config.playback_config.max_speed,
-                       speed)
+                format!("设置播放速度失败: {}", e)
             ));
         }
 
-        let old_speed = self.playback_info.playback_speed;
+        // 更新播放信息
         self.playback_info.playback_speed = speed;
-        
-        // 当速度改变时重置时间基准，确保平滑过渡
-        if (old_speed == 0.0) != (speed == 0.0) || speed != old_speed {
-            self.reset_timing_base();
-        }
         
         if speed == 0.0 {
             log::info!("播放速度已设置为无延迟模式（speed=0）");
@@ -956,12 +917,22 @@ impl ControllableProvider for GzipProvider {
         Ok(())
     }
 
-    fn seek_to(&mut self, _timestamp: u64) -> ProviderResult<()> {
-        // TODO: 实现文件定位功能
-        // 这需要预先建立时间戳索引或者从头扫描文件
-        Err(ProviderError::configuration(
-            "时间跳转功能暂未实现".to_string()
-        ))
+    fn seek_to(&mut self, timestamp: u64) -> ProviderResult<()> {
+        // 将毫秒时间戳转换为纳秒
+        let timestamp_ns = timestamp * 1_000_000;
+        
+        // 使用虚拟时钟跳转到指定时间
+        if let Err(e) = self.virtual_clock.seek_to(timestamp_ns) {
+            return Err(ProviderError::configuration(
+                format!("虚拟时钟跳转失败: {}", e)
+            ));
+        }
+        
+        // 更新播放信息
+        self.playback_info.update_timestamp(timestamp);
+        
+        log::info!("已跳转到时间戳: {} ({}ns)", timestamp, timestamp_ns);
+        Ok(())
     }
 
     fn get_playback_info(&self) -> Option<PlaybackInfo> {

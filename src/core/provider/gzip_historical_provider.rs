@@ -241,10 +241,13 @@ impl HistoricalDataProvider {
     /// 创建新的历史数据Provider
     pub fn new(config: HistoricalDataConfig) -> Self {
         // 初始化播放信息
-        let playback_info = PlaybackInfo::new(
+        let mut playback_info = PlaybackInfo::new(
             config.time_config.start_time.unwrap_or(0),
             config.time_config.end_time.unwrap_or(u64::MAX),
         );
+        
+        // 设置正确的初始播放速度
+        playback_info.playback_speed = config.playback_config.initial_speed;
 
         // 初始化状态
         let provider_type = ProviderType::HistoricalData { 
