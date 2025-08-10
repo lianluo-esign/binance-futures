@@ -13,7 +13,7 @@
 // 4. 性能优化：最小化运行时开销
 
 use super::{
-    DataProvider, ProviderType, ProviderStatus, ProviderFactory,
+    DataProvider, ProviderType, ProviderStatus, ProviderFactory, BinanceConnectionMode,
     error::{ProviderError, ProviderResult},
 };
 use crate::events::{EventType, LockFreeEventDispatcher};
@@ -766,11 +766,11 @@ mod tests {
         }
         
         fn get_status(&self) -> ProviderStatus {
-            ProviderStatus::new(ProviderType::Binance { mode: super::BinanceConnectionMode::WebSocket })
+            ProviderStatus::new(ProviderType::Binance { mode: BinanceConnectionMode::WebSocket })
         }
         
         fn provider_type(&self) -> ProviderType {
-            ProviderType::Binance { mode: super::BinanceConnectionMode::WebSocket }
+            ProviderType::Binance { mode: BinanceConnectionMode::WebSocket }
         }
         
         fn supported_events(&self) -> &[EventKind] {
@@ -797,7 +797,7 @@ mod tests {
             id: "test_provider".to_string(),
             name: "Test Provider".to_string(),
             description: "A test provider".to_string(),
-            provider_type: ProviderType::Binance { mode: super::BinanceConnectionMode::WebSocket },
+            provider_type: ProviderType::Binance { mode: BinanceConnectionMode::WebSocket },
             priority: 1,
             is_fallback: false,
             tags: HashMap::new(),
@@ -820,7 +820,7 @@ mod tests {
             id: "provider1".to_string(),
             name: "Provider 1".to_string(),
             description: "First provider".to_string(),
-            provider_type: ProviderType::Binance { mode: super::BinanceConnectionMode::WebSocket },
+            provider_type: ProviderType::Binance { mode: BinanceConnectionMode::WebSocket },
             priority: 1,
             is_fallback: false,
             tags: HashMap::new(),
@@ -831,7 +831,7 @@ mod tests {
             id: "provider2".to_string(),
             name: "Provider 2".to_string(),
             description: "Second provider".to_string(),
-            provider_type: ProviderType::Binance { mode: super::BinanceConnectionMode::WebSocket },
+            provider_type: ProviderType::Binance { mode: BinanceConnectionMode::WebSocket },
             priority: 2,
             is_fallback: true,
             tags: HashMap::new(),

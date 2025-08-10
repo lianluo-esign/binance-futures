@@ -126,6 +126,8 @@ impl crate::core::provider::GzipProvider {
                 min_speed: 0.1,    // Default value
                 start_timestamp: None, // Config system doesn't have timestamp fields, set to None
                 end_timestamp: None,
+                nanosecond_precision: true, // Default value
+                drift_tolerance_ns: 1_000_000, // Default 1ms
             },
             buffer_config: super::gzip_provider::BufferConfig {
                 event_buffer_size: config.buffering.event_buffer_size,

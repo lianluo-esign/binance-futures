@@ -15,7 +15,7 @@ event_filter = []
 
 [playback_config]
 # 初始播放速度倍数
-initial_speed = 2.0
+initial_speed = 10.0
 # 是否自动开始播放
 auto_start = true
 # 是否循环播放
@@ -27,6 +27,12 @@ min_speed = 0.1
 # 时间过滤（可选）
 # start_timestamp = 0
 # end_timestamp = 0
+
+# 虚拟时钟配置
+# 是否启用纳秒级精度（false时使用微秒精度以提高性能）
+nanosecond_precision = true
+# 时间漂移容差（纳秒）- 允许的时间误差范围，默认1ms
+drift_tolerance_ns = 1000000
 
 [buffer_config]
 # 事件缓冲区大小

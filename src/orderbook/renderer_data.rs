@@ -89,7 +89,7 @@ pub fn render_orderbook_old(f: &mut Frame, app: &ReactiveApp, area: Rect) {
     // 获取最近交易高亮信息并应用价格聚合
     let (last_trade_price, last_trade_side, _) = app.get_orderbook_manager().get_last_trade_highlight();
     let aggregated_last_trade_price = last_trade_price.map(|price| aggregate_trade_price(price, price_precision));
-    let should_highlight_trade = app.get_orderbook_manager().should_show_trade_highlight(3000); // 3秒高亮
+    let should_highlight_trade = true; // 总是高亮显示最新交易，支持高速历史数据播放
 
     // 准备价格值列表用于自动居中计算
     let price_values: Vec<f64>;

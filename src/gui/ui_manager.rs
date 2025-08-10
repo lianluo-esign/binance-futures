@@ -203,13 +203,25 @@ impl UIManager {
 
     /// 更新价格图表数据
     fn update_price_chart(&mut self, app: &ReactiveApp) {
-        // 获取最新交易数据并添加为价格点（现在所有价格点都是交易数据点）
-        let orderbook_manager = app.get_orderbook_manager();
-        let (last_trade_price, last_trade_side, last_trade_timestamp) = orderbook_manager.get_last_trade_highlight();
+        // 优先使用应用直接存储的交易数据（确保捕获所有交易事件）
+        let direct_price = app.get_last_trade_price();
+        let direct_side = app.get_last_trade_side();
+        let direct_volume = app.get_last_trade_volume();
         
-        // 如果有最新交易数据，并且交易时间足够新（3秒内），添加价格点
-        if let (Some(price), Some(side), Some(_timestamp)) = (last_trade_price, last_trade_side, last_trade_timestamp) {
-            if orderbook_manager.should_show_trade_highlight(3000) { // 3秒内的交易
+        if let (Some(price), Some(side)) = (direct_price, direct_side) {
+            // 使用应用直接存储的交易数据（无时间过滤，确保高速播放时不丢失数据）
+            let is_buyer_maker = side == "sell";
+            let volume = direct_volume.unwrap_or(0.001);
+            
+            // 添加价格点到图表（移除了所有时间过滤）
+            self.price_chart_renderer.add_price_point(price, volume, is_buyer_maker);
+        } else {
+            // 备用方案：获取最新交易数据（来自订单簿管理器）
+            let orderbook_manager = app.get_orderbook_manager();
+            let (last_trade_price, last_trade_side, last_trade_timestamp) = orderbook_manager.get_last_trade_highlight();
+            
+            // 如果有最新交易数据，直接添加价格点（移除时间过滤以支持高速历史数据播放）
+            if let (Some(price), Some(side), Some(_timestamp)) = (last_trade_price, last_trade_side, last_trade_timestamp) {
                 // 确定交易方向：buy是买单（绿色），sell是卖单（红色）
                 let is_buyer_maker = side == "sell";
                 
@@ -217,13 +229,14 @@ impl UIManager {
                 let volume = app.get_last_trade_volume().unwrap_or(0.001); // 使用真实成交量，默认0.001
                 
                 // 统一使用add_price_point，现在包含交易信息
+                // 移除时间过滤以确保高速历史数据播放时所有交易点都能显示
                 self.price_chart_renderer.add_price_point(price, volume, is_buyer_maker);
-            }
-        } else {
-            // 如果没有最新交易数据，使用市场快照中的价格（作为默认的小量买单）
-            let market_snapshot = app.get_market_snapshot();
-            if let Some(current_price) = market_snapshot.current_price {
-                self.price_chart_renderer.add_price_point(current_price, 0.001, false); // 默认小量买单
+            } else {
+                // 如果没有最新交易数据，使用市场快照中的价格（作为默认的小量买单）
+                let market_snapshot = app.get_market_snapshot();
+                if let Some(current_price) = market_snapshot.current_price {
+                    self.price_chart_renderer.add_price_point(current_price, 0.001, false); // 默认小量买单
+                }
             }
         }
     }
@@ -242,8 +255,9 @@ impl Default for UIManager {
 
 /// 根据widget区域计算实际可见行数
 fn calculate_visible_rows_from_area(area: Rect) -> usize {
-    // 减去边框（上下各1行）和表头（1行）
-    let available_height = area.height.saturating_sub(3); // 边框2行 + 表头1行
+    // 只减去表头（1行），因为ratatui的Table with .block() 会自动处理边框空间
+    // 这样与Order Book的计算方式保持一致，确保边框高度对齐
+    let available_height = area.height.saturating_sub(1); // 只减去表头1行
     available_height as usize
 }
 

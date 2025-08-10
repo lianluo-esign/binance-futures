@@ -14,6 +14,7 @@
 // 5. 可扩展性：便于添加新的交易所支持
 
 pub mod types;
+pub mod virtual_clock;
 pub mod binance_market_provider;
 pub mod gzip_historical_provider;
 pub mod gzip_provider;
@@ -25,6 +26,7 @@ pub mod provider_launcher;
 
 // 重构后的核心导出
 pub use types::*;
+pub use virtual_clock::{VirtualClock, VirtualClockConfig, VirtualClockError, VirtualClockStatistics, SyncResult, ClockState};
 pub use binance_market_provider::BinanceProvider;
 pub use gzip_historical_provider::{HistoricalDataProvider, HistoricalDataConfig};
 pub use gzip_provider::{GzipProvider, GzipProviderConfig};

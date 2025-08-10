@@ -380,13 +380,8 @@ impl VolumeProfileWidget {
         // 组合显示：成交量数值 + delta数值
         let display_text = format!("{} {}", volume_text, delta_text);
         
-        // 检查是否为最近更新（2秒内）
-        let current_time = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
-        
-        let is_recent_update = current_time.saturating_sub(volume_level.timestamp) <= 500;
+        // 总是显示更新高亮，支持高速历史数据播放（移除时间过滤）
+        let is_recent_update = volume_level.last_update_side.is_some();
         
         // 根据最后更新方向和是否最近更新决定样式
         if is_recent_update && volume_level.last_update_side.is_some() {
@@ -576,21 +571,10 @@ impl VolumeProfileWidget {
     ) -> (f64, f64) {
         if let Some(orderbook) = orderbook_data {
             if let Some(order_flow) = orderbook.get(price_key) {
-                // 检查数据是否在2秒内更新过
-                let current_time = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis() as u64;
-                
-                if current_time.saturating_sub(order_flow.bid_ask.timestamp) <= 2000 {
-                    // 数据在2秒内更新过，返回orderbook的bid/ask挂单量
-                    // 修复：orderbook数据应该显示当前挂单量，而不是累计交易量
-                    // bid表示买单挂单量，ask表示卖单挂单量
-                    (order_flow.bid_ask.bid, order_flow.bid_ask.ask)
-                } else {
-                    // 数据超过2秒未更新，清除显示
-                    (0.0, 0.0)
-                }
+                // 移除时间过滤，总是显示最新orderbook数据以支持高速历史数据播放
+                // orderbook数据显示当前挂单量，而不是累计交易量
+                // bid表示买单挂单量，ask表示卖单挂单量
+                (order_flow.bid_ask.bid, order_flow.bid_ask.ask)
             } else {
                 (0.0, 0.0)
             }

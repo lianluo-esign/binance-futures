@@ -1,0 +1,27 @@
+# Alpaca WebSocket Provider Configuration
+# Real-time market data streaming via WebSocket
+
+[provider]
+name = "alpaca_market_provider"
+type = "AlpacaWebSocket"
+version = "1.0.0"
+
+[connection]
+base_url = "ws://xxxxx"
+max_reconnect_attempts = 5
+reconnect_delay_ms = 1000
+ping_interval_ms = 30000
+connection_timeout_ms = 10000
+
+[subscription]
+symbols = ["SPY", "AAPL"]
+streams = ["depth@100ms", "trade", "bookTicker"]
+
+[authentication]
+api_key = ""
+api_secret = ""
+
+[performance]
+buffer_size = 65536
+batch_processing = true
+batch_size = 100

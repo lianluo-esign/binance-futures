@@ -60,12 +60,13 @@ impl OrderBookRenderer {
     /// 主渲染方法
     pub fn render(&mut self, f: &mut Frame, app: &ReactiveApp, area: Rect) {
         // 创建简洁的边框块（移除复杂的标题信息）
+        // 确保与Volume Profile的边框高度对齐
         let block = Block::default()
             .title("Order Book")
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::White));
 
-        // 计算内部区域
+        // 计算内部区域 - 确保与Volume Profile的内部区域计算一致
         let inner_area = Rect {
             x: area.x + 1,
             y: area.y + 1,

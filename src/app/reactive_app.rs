@@ -78,6 +78,8 @@ pub struct ReactiveApp {
     
     // 最新交易数据（用于价格图表）
     last_trade_volume: Option<f64>,
+    last_trade_price: Option<f64>,
+    last_trade_side: Option<String>,
 
 }
 
@@ -156,6 +158,8 @@ impl ReactiveApp {
             circuit_breaker_open: false,
             circuit_breaker_last_failure: None,
             last_trade_volume: None,
+            last_trade_price: None,
+            last_trade_side: None,
             
         }
     }
@@ -353,6 +357,8 @@ impl ReactiveApp {
             circuit_breaker_open: false,
             circuit_breaker_last_failure: None,
             last_trade_volume: None,
+            last_trade_price: None,
+            last_trade_side: None,
         }
     }
 
@@ -587,11 +593,19 @@ impl ReactiveApp {
                 };
                 
                 
-                // 存储交易成交量信息（用于价格图表）
+                // 存储完整交易信息（用于价格图表）
                 if let Some(qty_str) = trade_data["q"].as_str() {
                     if let Ok(qty) = qty_str.parse::<f64>() {
                         self.last_trade_volume = Some(qty);
                     }
+                }
+                if let Some(price_str) = trade_data["p"].as_str() {
+                    if let Ok(price) = price_str.parse::<f64>() {
+                        self.last_trade_price = Some(price);
+                    }
+                }
+                if let Some(is_buyer_maker) = trade_data["m"].as_bool() {
+                    self.last_trade_side = Some(if is_buyer_maker { "sell".to_string() } else { "buy".to_string() });
                 }
                 
                 self.orderbook_manager.handle_trade(trade_data);
@@ -934,6 +948,16 @@ impl ReactiveApp {
     /// 获取最新交易的成交量
     pub fn get_last_trade_volume(&self) -> Option<f64> {
         self.last_trade_volume
+    }
+
+    /// 获取最新交易价格（用于价格图表）
+    pub fn get_last_trade_price(&self) -> Option<f64> {
+        self.last_trade_price
+    }
+
+    /// 获取最新交易方向（用于价格图表）
+    pub fn get_last_trade_side(&self) -> Option<String> {
+        self.last_trade_side.clone()
     }
 
     /// 从交易数据更新Volume Profile
